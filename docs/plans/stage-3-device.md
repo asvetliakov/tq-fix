@@ -87,13 +87,32 @@ The THQ Nordic overlay does this exact job successfully in this exact bottle
 
 ## Outcome
 
-**Run 2026-08-25. Gate NOT met — one clause of three.** Do not tick the box.
+**Run 2026-08-25. Gate MET (O27), after a false alarm that is worth reading.**
 
 | Gate clause | |
 |---|---|
-| Our log names the device pointer, the context pointer and the feature level | **met** — O19 |
-| The game reaches gameplay and plays normally | **not established** — nobody was at the keyboard, and the render process lived 7 seconds (O22) |
-| Exit is clean | **not met** — the process was terminated; no `DLL_PROCESS_DETACH` was logged |
+| Our log names the device pointer, the context pointer and the feature level | **met** — O19, O27 |
+| The game reaches gameplay and plays normally | **met** — the reporter played with the hook installed (O27) |
+| Exit is clean | **met** — exited through the loader, both summaries written, hook called exactly once (O27) |
+
+### The false alarm, kept because the lesson is the valuable part
+
+The first run looked like a crash: the render process lived **seven seconds** and
+was terminated without logging a detach (O22). The stage stopped there rather
+than building on it, and constructed a control — the same binary with
+`TQFLICKER_HOOK=0`, so the hook rather than the whole DLL was the variable.
+
+**The hook was exonerated** (O24). What actually differed was the *launch route*:
+the direct `cxstart TQ.exe` route runs the Steam handoff stub, which is killed
+once Steam takes over. Held constant, the game exits cleanly with the hook
+installed. **The uncontrolled variable was the one that mattered**, and it was
+not on anyone's list.
+
+A second scare followed and was also not ours: character create/select stopped
+working, with the hook on, with the hook off, **and with the DLL removed
+entirely** (O26). The probable cause was the hard `wineserver` kill used to
+recover from a wedged Steam — self-inflicted, now Risk 15. A normal restart fixed
+it with no save data lost.
 
 ### What the stage produced
 

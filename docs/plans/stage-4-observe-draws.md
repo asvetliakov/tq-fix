@@ -3,9 +3,7 @@
 **Goal:** identify, from inside the process, the draw call that fails to render,
 and establish whether the game issued it. Fix nothing.
 
-**Precondition:** Stage 3's gate met — **it is not yet**. One gate clause of
-three is met (O19); the seven-second render session in O22 must be attributed
-first. Do not start this stage on top of an unattributed possible crash.
+**Precondition:** Stage 3's gate met — **it is** (O27, 2026-08-25).
 
 ## What Stage 3 handed this stage
 
@@ -30,6 +28,28 @@ first. Do not start this stage on top of an unattributed possible crash.
 - **Only the process-exit detach path is ever taken** (O23), so anything this
   stage wants to know must be logged when it happens. A per-frame table
   accumulated for a summary at exit will simply be lost.
+- **`Direct3D11.dll` loads at a fixed base and the vtables are stable across
+  runs** (O25) — device `76465E84`, context `764759E4`, swapchain `7646C808` on
+  three runs. A slot index found once can be checked against a later log. The
+  *object* pointers change every run; key nothing on them.
+- **`TQFLICKER_HOOK=0` gives a control from the same binary**, and reaches the
+  renderer only when Steam itself is started with it (O24).
+
+## How to run a measurement, which Stage 3 paid to learn
+
+**State the launch route, and keep it constant.** It is not a detail: it changes
+the process topology, the environment the renderer inherits, and whether the
+process can exit cleanly at all. Stage 3 lost an afternoon to a "crash" that was
+the direct-launch stub being killed by design (O24).
+
+- **Launch from the Steam UI** for anything being measured.
+- To set a variable for the renderer, start `steam.exe` through `cxstart` with it
+  set, then launch from the Steam UI (O24).
+- **Never hard-kill Steam or `wineserver`** to recover from a wedged launch
+  (Risk 15, O26). Quit Steam through its own menu.
+- Confirm a launch actually happened by looking for `App Running` in Steam's
+  `content_log.txt` (Risk 14) — three of Stage 3's launches never reached Steam
+  at all and looked identical to a broken hook.
 
 **This plan replaces the original Stage 3 ("Observe the samplers, and the
 buffers"), which was built on H-A. O10a refuted H-A: the flicker does not move

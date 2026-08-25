@@ -2,38 +2,40 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 3 is written and
-> half-proved.** The device is reached — `device 06536BC0`, `context 06901448`,
-> **feature level 11_0** (O19) — and **Risk 3 is closed**: `ID3D11Device1` is the
-> same object with the same vtable (O20), so Stage 4 can patch one vtable.
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 3 is done.** We
+> hold the device — `ID3D11Device*`, `ID3D11DeviceContext*` and the swapchain,
+> taken by an IAT data write on `Direct3D11.dll`'s one import of
+> `D3D11CreateDeviceAndSwapChain`, feature level **11_0** — and the reporter has
+> played the game with the hook installed: gameplay reached, exit clean, hook
+> called exactly once (O27).
 >
-> **The box is NOT ticked, and here is why.** On the one launch that worked, the
-> render process lived **seven seconds** and was terminated without logging a
-> detach (O22). Nobody was at the keyboard and **no control run exists**, so this
-> is *unattributed*, not *our fault* — but it is the shortest render session in
-> the log and it ended right after the first hook this project has installed in
-> the game. **Attribute it before building anything on top of it.**
+> **Risk 3 is closed** (O20): `ID3D11Device1` is the **same object with the same
+> vtable**, so Stage 4 can patch one vtable. It has **not** been asked of
+> `ID3D11DeviceContext1` — ask before patching the context.
 >
-> **Do this first, and it is one launch each:**
-> 1. `wineserver -k` and restart Steam. Steam stopped responding to launch
->    requests after that run — `console_log.txt` wrote nothing after 23:29:20 and
->    three further attempts never reached it.
-> 2. `npm run build && npm run install-dll` — the DLL was left **uninstalled**.
-> 3. **Control:** set `TQFLICKER_HOOK=0` and play for a minute. Same binary, winmm
->    forwarded, **no hook**. Compare against a run without it. The heartbeat line
->    (`alive: Ns`) tells you whether the game died or was quit.
-> 4. Only when the game demonstrably plays normally *with* the hook, tick Stage 3
->    and go to `docs/plans/stage-4-observe-draws.md`.
+> We are at **Stage 4**, `docs/plans/stage-4-observe-draws.md`, which answers the
+> one question everything depends on: **did the game issue the missing draw?**
+> Hook `Present` for a frame counter and all four `Draw*` for a per-frame count,
+> align the log against a 10fps recording, compare the bad frame's count with its
+> neighbours.
 >
-> **Read O18 before setting any environment variable.** The `TQ.exe` you launch is
-> a **Steam handoff stub**; the process that renders is **Steam's** child
-> (`TQ.exe /dx11`). So `cxstart` env injection — O15 — **does not reach the
-> renderer**. Use `cxbottle.conf`, Steam launch options, or a file beside the exe
-> like `dxmt.conf` (O11a).
+> **Four things Stage 3 learned that Stage 4 must not rediscover:**
+> 1. **State the launch route in every measurement** (O24). It changes the process
+>    topology, what environment the renderer inherits, and whether a clean exit is
+>    even possible. A 7-second "crash" turned out to be the direct-launch stub.
+> 2. **Per-run variables reach the renderer only via Steam** (O18, O24): start
+>    `steam.exe` itself through `cxstart` with the variable set. `cxstart` on
+>    `TQ.exe` does **not** reach the process that renders.
+> 3. **Never hard-kill Steam or `wineserver`** (Risk 15, O26). It broke character
+>    select for the reporter. Quit Steam through its own menu.
+> 4. **Only the process-exit detach path ever runs** (O23), so log facts when they
+>    happen. A per-frame table saved for a summary at exit is lost.
 >
 > `npm run doctor` is green. `build`, `selftest`, `install-dll`, `uninstall-dll`
-> and `log` all work; every log line now carries a **pid** (O17), and the off-game
-> self-test proves the vtable patch primitive works under FEX in this bottle.
+> work; the proxy is **installed** and the hook is active. Every log line carries
+> a **pid**; `TQFLICKER_HOOK=0` gives a hook-free control from the same binary.
+> *(`npm run typecheck` and `npm run log` need an `npm install` first — there is
+> no `node_modules` in this checkout.)*
 >
 > Before measuring anything, set up the instrument from O12: cap the frame rate
 > to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
@@ -160,23 +162,21 @@ Off-game self-test passes; uninstall restores the directory. Produced **O17**.
 **Gate met.** `npm run build` / `selftest` / `install-dll` / `uninstall-dll` /
 `log` all work.
 
-### ☐ Stage 3 — Reach the device — **built, one gate clause of three met**
+### ☑ Stage 3 — Reach the device
 
-**Plan:** `docs/plans/stage-3-device.md` — code complete, run 2026-08-25,
-**gate not met.**
+**Plan:** `docs/plans/stage-3-device.md` — **complete, 2026-08-25.**
 Waits for `Direct3D11.dll`, IAT-hooks its imported
 `D3D11CreateDeviceAndSwapChain` — the only one it imports (O19) — and captures
 the device, context and swapchain.
 
-| Gate clause | |
-|---|---|
-| Log prints device, context and feature level (`11_0`) | **met** (O19) |
-| The game reaches gameplay and plays normally | **not established** (O22) |
-| Exit is clean | **not met** — terminated, no detach logged (O22) |
+**Gate met (O27):** the log names device `064CBE20`, context `0691B508` and
+feature level **11_0**; the reporter played the game with the hook installed; the
+process exited through the loader with both summaries written and the hook called
+exactly once.
 
-Produced **O18–O23**, and closed **Risk 3**. What remains is one control launch
-with `TQFLICKER_HOOK=0` against one without, to attribute the seven-second
-session — see the block at the top of this file.
+Produced **O18–O27**. **Closed Risk 3**; opened Risks 13, 14 and 15. Built
+`src/patch.{h,cpp}`, `src/modules.{h,cpp}`, `src/device.{h,cpp}`, a watcher
+thread, a pid on every log line, `TQFLICKER_HOOK=0` and a startup heartbeat.
 
 ### ☐ Stage 4 — Count the draws, and find the one that goes missing
 

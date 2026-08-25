@@ -675,6 +675,14 @@ Consequences:
 - Our DLL loads into both processes, so the pid stamp on every log line (O17's
   demand) is what makes the file readable at all.
 
+**Refinement, from three later Steam-UI launches:** each produced **exactly one**
+`TQ.exe` attach, not two. So the process count is a property of the *route* and
+possibly of the run, not a fixed fact about the game: the direct route always
+adds the stub, and O17's two Steam-tracked processes (23:13:09 then 23:13:22)
+were the game restarting itself for reasons still unknown. **Do not assume
+either count.** The pid stamp is what makes the log legible whichever happens,
+and that is the whole reason it is there.
+
 ## O19 — The device is reached. One entry point, and the race is won by ~150ms
 
 *Established in the running game, 2026-08-25, by the Stage 3 build.*
@@ -909,6 +917,14 @@ inconsistent.
 Not proven — the failure was never observed before the kill, so there is no
 before-and-after. It is the leading candidate and it is ours.
 
+### Resolved: a proper restart fixed it, and nothing was lost
+
+The reporter restarted normally and character create/select worked again, with
+our DLL installed and the hook active. **No save data was lost.** The damage was
+to session state, not to the saves, and it healed on a clean start — which is
+consistent with the Steam Cloud explanation and inconsistent with anything having
+touched the files.
+
 ### The rule this buys
 
 **Do not hard-kill Steam or `wineserver` to recover from a wedged launch.** Quit
@@ -936,6 +952,33 @@ There is effectively **no ASLR on this module here**, which means a vtable
 address written in one session's log can be compared against another's. Useful
 for Stage 4, and worth knowing before someone treats a matching address as
 suspicious. **The object pointers are not stable; do not key anything on them.**
+
+Held across **three** runs by the end of the stage — devices `06536BC0`,
+`0679F870`, `064CBE20`, all three with vtable `76465E84`.
+
+## O27 — Stage 3's gate, met: a real play session with the hook installed
+
+*Established by the reporter playing the game, 2026-08-25, DLL installed, hook
+active, launched from the Steam UI.*
+
+```
+23:58:47  p1520   host: TQ.exe
+23:58:51  p1520   d3d11: Direct3D11.dll at 765E0000 after 2630ms
+23:58:52  p1520   d3d11: D3D11CreateDeviceAndSwapChain succeeded
+                    device 064CBE20  context 0691B508  feature level 11_0
+23:59:34  p1520   d3d11 (process exit): 1 call(s), 1 succeeded.
+23:59:34  p1520   winmm (process exit): 186 of 186 exports forwarded, 0 call(s)
+                  to one we could not forward
+```
+
+Forty-seven seconds, **heartbeat unbroken**, gameplay reached, **exit through the
+loader** with both summaries written. The hook was called **exactly once** — no
+capability probe, no second device, no driver-type fallback loop.
+
+**This is what Stage 3 set out to prove and it is now proved in the running
+game:** we hold a valid `ID3D11Device*` and `ID3D11DeviceContext*`, we got them
+by a data write and nothing else, and the game does not care that we are there.
+Stage 4 may proceed.
 
 ---
 
