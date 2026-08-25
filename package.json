@@ -1,0 +1,12 @@
+{
+  "name": "tq-flicker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Investigating and fixing Titan Quest Anniversary Edition's moving-object flicker under CrossOver/DXMT",
+  "scripts": {
+    "doctor": "bash scripts/doctor.sh",
+    "log": "tsx tools/log.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}
