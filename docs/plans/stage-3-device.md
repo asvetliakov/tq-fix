@@ -33,12 +33,23 @@ import table has a resolvable entry for `D3D11CreateDevice` and
 trampoline, no code patching, in keeping with the house rule.
 
 `Engine.dll` loads the renderer by name at runtime, so `Direct3D11.dll` is
-**not** in the process at `DllMain` time. Wait for it. The sibling repo's
-`src/modules.{cpp,h}` already does this; reuse it rather than inventing a poll
-loop.
+**not** in the process at `DllMain` time. Wait for it.
+
+> **Corrected during the stage.** This plan said the sibling repo's
+> `src/modules.{cpp,h}` "already does this". It does not — next door `Game.dll`
+> is already loaded at attach, so that file only walks the PEB to *describe*
+> modules and has no wait at all. A bounded, cancellable poll was written here
+> (`src/modules.{h,cpp}`), and O19 shows the poll interval matters: the game
+> called through 147ms after the module appeared.
 
 Hook **both** entry points. The game may use either, and a miss looks identical
 to a hook that does not work.
+
+> **Corrected during the stage.** Only one of them exists.
+> `Direct3D11.dll` imports `D3D11CreateDeviceAndSwapChain` and **not**
+> `D3D11CreateDevice` (O19). Still try both — the absent one is a fact about the
+> game and gets a log line saying so, rather than a silent nothing that reads as
+> a failed patch.
 
 ## What to do in the hook
 
@@ -76,4 +87,55 @@ The THQ Nordic overlay does this exact job successfully in this exact bottle
 
 ## Outcome
 
-*(fill in at the end of the stage)*
+**Run 2026-08-25. Gate NOT met — one clause of three.** Do not tick the box.
+
+| Gate clause | |
+|---|---|
+| Our log names the device pointer, the context pointer and the feature level | **met** — O19 |
+| The game reaches gameplay and plays normally | **not established** — nobody was at the keyboard, and the render process lived 7 seconds (O22) |
+| Exit is clean | **not met** — the process was terminated; no `DLL_PROCESS_DETACH` was logged |
+
+### What the stage produced
+
+- **O18** — the two processes explained. The `TQ.exe` we launch is a Steam
+  handoff stub; the renderer is **Steam's** child, launched as `TQ.exe /dx11`.
+  This narrows O15: per-run `cxstart` environment injection does **not** reach
+  the process that renders.
+- **O19** — device `06536BC0`, context `06901448`, swapchain `067F0748`, feature
+  level **11_0**, via the one entry point that exists. The hook landed 147ms
+  before the game called through it.
+- **O20** — **Risk 3 closed.** `ID3D11Device1` is the same object with the same
+  vtable, so Stage 4 can patch one vtable.
+- **O21** — the swapchain description, including `BufferCount = 1`.
+- **O22** — the unresolved seven-second session, and the two things built so the
+  next session can attribute it in one launch.
+- **O23** — `FreeLibrary` does not unload us here, so only the process-exit
+  detach path is ever taken.
+
+### What was built
+
+`src/patch.{h,cpp}` (IAT and vtable data-writes, undo list, in-process
+self-test), `src/modules.{h,cpp}` (bounded cancellable module wait, PEB module
+census), `src/device.{h,cpp}` (the hook), a watcher thread in `dllmain.cpp`, a
+**pid on every log line** (O17's demand, stamped in `log.cpp` so no caller can
+forget it), a `TQFLICKER_HOOK=0` kill-switch and a startup heartbeat.
+
+### Two things found by writing the tests, not by reasoning
+
+- The 180-second module wait was **not interruptible**, so an orderly
+  `FreeLibrary` would have unmapped our code while the watcher was still parked
+  in it. Every wait now goes through `modules::nap`, which a cancel event cuts
+  short. *(O23 then showed `FreeLibrary` never unloads us here anyway — the fix
+  is defensive, not load-bearing.)*
+- `GetModuleHandleW` answers **before** the loader has snapped the module's
+  imports, and an IAT slot patched in that window is one the loader then
+  overwrites — a hook installed, reported as installed, and never firing.
+  `device.cpp` waits for the slot to hold a mapped address before patching, and
+  re-reads it afterwards to confirm it survived.
+
+### Where it stopped
+
+After that launch, Steam stopped responding to launch requests: three further
+attempts never reached it, so **no control run exists** and the bottle needs a
+`wineserver` restart. The DLL was left **uninstalled** rather than leaving a
+build of unknown safety in the game directory.

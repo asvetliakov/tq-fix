@@ -635,6 +635,190 @@ two `Maximum supported feature level` blocks, the second selecting
 
 ---
 
+# Stage 3 — the device
+
+## O18 — The two processes, explained: the second one is **Steam's** child, not ours
+
+*Established from Steam's own `console_log.txt` and `content_log.txt`, matched
+against our pid-stamped log, 2026-08-25.*
+
+O17 recorded that `TQ.exe` runs as two processes without saying why. Steam's log
+says why, and it changes how every remaining experiment must be set up:
+
+```
+23:29:14  p956    our log: TQ.exe attaches, forwards winmm, exits 2.6s later
+23:29:17  Steam:  GameAction [AppID 475150] LaunchApp ... CreatingProcess
+23:29:20  Steam:  Game process added : "...\TQ.exe" /dx11, ProcID 1708
+23:29:20  p1708   our log: TQ.exe attaches again - this is the one that renders
+```
+
+The `TQ.exe` we launch is a **Steam handoff stub**. It asks Steam to run
+`steam://rungameid/475150` and exits; **Steam** then launches the real game as
+`TQ.exe /dx11`, and that second process is the renderer. The first never loads
+`Direct3D11.dll` at all.
+
+**This is O15's caveat, arriving from the other direction and biting.** O15 said
+a game started from the Steam UI inherits Steam's environment rather than ours,
+and to launch `TQ.exe` directly instead. Launching directly does **not** avoid it:
+the direct launch is only a stub, and the process that matters is still spawned by
+Steam. **Per-run `cxstart` environment injection does not reach the renderer.**
+
+Consequences:
+
+- Anything the render process must see — `DXMT_*`, `FEX_*`, and now our own
+  `TQFLICKER_HOOK` — has to be somewhere Steam can see it: `cxbottle.conf`, or
+  Steam's own launch options, or a file beside the exe like `dxmt.conf` (O11a).
+  **O15 is not wrong, it is narrower than it reads:** it reaches processes we
+  start, and the renderer is not one of them.
+- The renderer is launched with **`/dx11`** explicitly, by Steam, from the app
+  manifest — not by our command line.
+- Our DLL loads into both processes, so the pid stamp on every log line (O17's
+  demand) is what makes the file readable at all.
+
+## O19 — The device is reached. One entry point, and the race is won by ~150ms
+
+*Established in the running game, 2026-08-25, by the Stage 3 build.*
+
+```
+23:29:24.670  d3d11: Direct3D11.dll at 765E0000 after 2200ms
+23:29:24.670    IAT Direct3D11.dll imports d3d11.dll.D3D11CreateDeviceAndSwapChain
+                    at 7664C2E8 -> was 762EEDA0, now 79BF3900
+23:29:24.691  d3d11: Direct3D11.dll does not import d3d11.dll!D3D11CreateDevice
+23:29:24.838  d3d11: D3D11CreateDeviceAndSwapChain succeeded
+                device   06536BC0  (vtable 76465E84)
+                context  06901448  (vtable 764759E4)
+                swapchain 067F0748  (vtable 7646C808)
+                feature level 11_0
+                driver UNKNOWN, flags 0x00000000, SDK version 7
+                it asked for: 11_0
+```
+
+**`Direct3D11.dll` imports exactly one of the two entry points.** It has
+`D3D11CreateDeviceAndSwapChain` and **not** `D3D11CreateDevice` — confirmed by
+`objdump` before the code was written and by the running game afterwards. The
+Stage 3 plan said to hook both because "a miss looks identical to a hook that
+does not work"; hooking both is still right, and the absent one is a *fact about
+the game*, not a failure, so it is logged as one.
+
+It also means **the game's device and its swapchain are created in the same
+call**, so Stage 4's `Present` hook and its `Draw*` hooks come from one captured
+moment. Nothing else in the process imports `d3d11.dll` — not `TQ.exe`, not
+`Engine.dll`, not `Game.dll`, not `GFSDK_SSAO_D3D11.win32.dll` — so this one IAT
+slot is the whole surface.
+
+**The race is real and it is close.** `Direct3D11.dll` appeared 2200ms after our
+watcher started, and the game called through it **147ms later**. The 10ms poll
+interval in `modules::waitFor` is what caught it; a 250ms poll would have lost
+the device roughly half the time, and the symptom would have been an intermittent
+"hooked, but never called" that looked like a bug in the hook.
+
+## O20 — Risk 3 is answered: `ID3D11Device1` is the **same object, same vtable**
+
+*Established by `QueryInterface` in the hook, in the running game.*
+
+```
+ID3D11Device1 06536BC0 (vtable 76465E84) - the SAME object as ID3D11Device
+```
+
+The device pointer and the vtable pointer are byte-identical to the
+`ID3D11Device` the game was handed. **DXMT does not hand out a separate object
+for the newer interface**, so Stage 4 can patch one vtable and reach the game's
+calls whichever interface it uses.
+
+This closes **Risk 3**, which had been open since the project started and was
+carried into the Stage 3 plan as a trap to check "while it is cheap". It was
+cheap, and the answer is the convenient one. *(It says nothing about
+`ID3D11DeviceContext1`, which Stage 4 should ask the same question of before it
+patches the context.)*
+
+## O21 — The swapchain: 5120×1440, **one buffer**, DISCARD, windowed
+
+*Established from the `DXGI_SWAP_CHAIN_DESC` the game passed.*
+
+```
+5120x1440, format 28, 1 buffer(s), 1 sample(s), windowed, swap effect 0
+refresh requested: 1/60 Hz
+```
+
+Format 28 is `DXGI_FORMAT_R8G8B8A8_UNORM`; swap effect 0 is
+`DXGI_SWAP_EFFECT_DISCARD`. **`BufferCount = 1`** is the number to notice: the
+game asks for the shallowest pipeline DXGI allows. Every "the frame read the
+wrong copy" hypothesis in this file is ultimately about how many frames can be in
+flight, and this is a direct measurement of what the game requested — recorded
+now, unused, because Stage 4 is where it becomes a question.
+
+`RefreshRate` is `Numerator = 1, Denominator = 60`, which is 1/60 Hz rather than
+60 Hz. It is the game's own field and DXGI ignores it in windowed mode, so it is
+noted and not chased.
+
+## O22 — **Unresolved: the render process lived seven seconds, and it is not attributed**
+
+*The negative result of Stage 3, written down first because it is the one that
+matters. The stage's gate is **not met**.*
+
+On the launch above, Steam's `content_log.txt` records the render process
+running from **23:29:20 to 23:29:27** — seven seconds. It created its device 4.8s
+in and was gone 2.5s later, and **our DLL logged no `DLL_PROCESS_DETACH` at all**,
+so it was terminated rather than exiting through the loader.
+
+For comparison, the same log across the evening:
+
+| Window | Duration | What it was |
+|---|---|---|
+| 23:13:22 → 23:14:23 | **61s** | the O17 run, Stage 2 proxy, reporter playing |
+| 23:29:20 → 23:29:27 | **7s** | this run, Stage 3 build |
+
+**This does not prove the Stage 3 build killed it, and it must not be recorded as
+if it did.** Nobody was at the keyboard, the session could have ended for its own
+reasons, and no control run exists. What is true is that it is the shortest
+render session in the log and it ended immediately after the first hook this
+project has ever installed in the game. That is enough to stop, not enough to
+conclude.
+
+**The control was attempted and could not be obtained.** After that launch,
+Steam stopped responding to launch requests entirely: `console_log.txt` has
+written nothing since 23:29:20, and three further launches — one with the DLL
+installed, two with it removed — never reached Steam at all. The bottle needs a
+`wineserver` restart before anything can be measured again.
+
+### What was built so the next session can attribute it in one launch
+
+- **`TQFLICKER_HOOK=0`** — the same binary loads and forwards winmm exactly as
+  Stage 2 did, and installs no hook. Comparing *installed* against *uninstalled*
+  changes two things at once and cannot answer this; comparing *hook* against
+  *no hook* in one binary can. **Per O18 it must be set where Steam can see it**
+  — `cxbottle.conf`, not `cxstart`.
+- **A heartbeat**: one line every two seconds for the first minute, then silence.
+  The log for this run ends at device creation and cannot distinguish "the game
+  ran and was quit" from "the game died on the spot". The next one will.
+
+## O23 — `FreeLibrary` does not unload us in this bottle, so the orderly-detach path never runs
+
+*Negative result, established by the off-game self-test, which now reports it on
+every run.*
+
+`selftest.exe` loads our `winmm.dll`, exercises it, and calls `FreeLibrary`. The
+module is **still loaded afterwards** — `GetModuleFileNameA` on the freed handle
+still answers — and our `DllMain` receives no detach until process exit.
+
+So of the two `DLL_PROCESS_DETACH` paths, **only the process-exit one is ever
+taken here**, and that is the path that deliberately does *less*: it reports and
+returns without unpatching, because touching another module's import table while
+the address space is being torn down is a crash on quit, which would look exactly
+like our patches breaking the game.
+
+**Consequences:** `patch::unpatchAll()` is correct, is exercised by the patch
+self-test, and is — in this bottle, so far — never reached in a real run. Do not
+delete it on those grounds; do not rely on it either. And a build installed into
+the game directory cannot be replaced while the game is running.
+
+*(Why the reference is held was not established. It is not our own
+`LoadLibraryW` of the system winmm — that resolves to a different module, which
+`winmm_proxy.cpp` checks for explicitly and would have logged. Left open; it
+costs nothing.)*
+
+---
+
 ## Hypotheses — not yet proven
 
 **Status at the end of Stage 0.** Live: **H-B1** (specific, testable, has prior

@@ -2,27 +2,38 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 0 is done** and
-> it changed the model: there is **one** defect, not two — individual draws fail
-> to render for exactly one frame, independently, each on 1–2% of frames. H-A
-> (sampler border colour) and H-E (`Map` DO_NOT_WAIT) are both **refuted**, and
-> there is no configuration fix left.
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 3 is written and
+> half-proved.** The device is reached — `device 06536BC0`, `context 06901448`,
+> **feature level 11_0** (O19) — and **Risk 3 is closed**: `ID3D11Device1` is the
+> same object with the same vtable (O20), so Stage 4 can patch one vtable.
 >
-> **Stage 1 (Metal capture) is deferred — there is no Xcode and a `.gputrace` has
-> no viewer.** **Stage 2 is done**: the `winmm` proxy is inside `TQ.exe`,
-> forwarding all 186 exports with zero unresolved calls. We are at **Stage 3**,
-> reaching the D3D11 device — `docs/plans/stage-3-device.md` — on the way to
-> **Stage 4**, which answers the one question everything else depends on:
-> **did the game issue the missing draw?**
+> **The box is NOT ticked, and here is why.** On the one launch that worked, the
+> render process lived **seven seconds** and was terminated without logging a
+> detach (O22). Nobody was at the keyboard and **no control run exists**, so this
+> is *unattributed*, not *our fault* — but it is the shortest render session in
+> the log and it ended right after the first hook this project has installed in
+> the game. **Attribute it before building anything on top of it.**
 >
-> **Read O17 before writing Stage 3.** `TQ.exe` runs as **two processes** and our
-> DLL loads into both, so: bound the wait for `Direct3D11.dll` (one process may
-> never load it, which looks exactly like a broken hook), **stamp every log line
-> with a pid**, and do not rely on shutdown reporting in the first process — it
-> was terminated rather than exiting through the loader.
+> **Do this first, and it is one launch each:**
+> 1. `wineserver -k` and restart Steam. Steam stopped responding to launch
+>    requests after that run — `console_log.txt` wrote nothing after 23:29:20 and
+>    three further attempts never reached it.
+> 2. `npm run build && npm run install-dll` — the DLL was left **uninstalled**.
+> 3. **Control:** set `TQFLICKER_HOOK=0` and play for a minute. Same binary, winmm
+>    forwarded, **no hook**. Compare against a run without it. The heartbeat line
+>    (`alive: Ns`) tells you whether the game died or was quit.
+> 4. Only when the game demonstrably plays normally *with* the hook, tick Stage 3
+>    and go to `docs/plans/stage-4-observe-draws.md`.
 >
-> `npm run doctor` is green. `build`, `selftest`, `install-dll`,
-> `uninstall-dll` and `log` all work; the proxy is currently **installed**.
+> **Read O18 before setting any environment variable.** The `TQ.exe` you launch is
+> a **Steam handoff stub**; the process that renders is **Steam's** child
+> (`TQ.exe /dx11`). So `cxstart` env injection — O15 — **does not reach the
+> renderer**. Use `cxbottle.conf`, Steam launch options, or a file beside the exe
+> like `dxmt.conf` (O11a).
+>
+> `npm run doctor` is green. `build`, `selftest`, `install-dll`, `uninstall-dll`
+> and `log` all work; every log line now carries a **pid** (O17), and the off-game
+> self-test proves the vtable patch primitive works under FEX in this bottle.
 >
 > Before measuring anything, set up the instrument from O12: cap the frame rate
 > to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
@@ -149,15 +160,23 @@ Off-game self-test passes; uninstall restores the directory. Produced **O17**.
 **Gate met.** `npm run build` / `selftest` / `install-dll` / `uninstall-dll` /
 `log` all work.
 
-### ☐ Stage 3 — Reach the device
+### ☐ Stage 3 — Reach the device — **built, one gate clause of three met**
 
-**Plan:** `docs/plans/stage-3-device.md`
-Wait for `Direct3D11.dll`, IAT-hook its imported `D3D11CreateDevice` /
-`D3D11CreateDeviceAndSwapChain`, capture the `ID3D11Device*` and
-`ID3D11DeviceContext*`.
-**Gate:** our log prints the device pointer, the context pointer and the feature
-level (expect `11_0`), the game still reaches gameplay and plays normally, and
-exit is clean.
+**Plan:** `docs/plans/stage-3-device.md` — code complete, run 2026-08-25,
+**gate not met.**
+Waits for `Direct3D11.dll`, IAT-hooks its imported
+`D3D11CreateDeviceAndSwapChain` — the only one it imports (O19) — and captures
+the device, context and swapchain.
+
+| Gate clause | |
+|---|---|
+| Log prints device, context and feature level (`11_0`) | **met** (O19) |
+| The game reaches gameplay and plays normally | **not established** (O22) |
+| Exit is clean | **not met** — terminated, no detach logged (O22) |
+
+Produced **O18–O23**, and closed **Risk 3**. What remains is one control launch
+with `TQFLICKER_HOOK=0` against one without, to attribute the seven-second
+session — see the block at the top of this file.
 
 ### ☐ Stage 4 — Count the draws, and find the one that goes missing
 
@@ -195,11 +214,13 @@ the note that DXVK ships a per-app profile for this exact executable.
 |---|------|-------|------|
 | 1 | The whole project is unnecessary because `/dx9` works | **OPEN — descoped** | **Never tested.** The reporter requires the DX11 renderer to work, so `/dx9` is not an acceptable outcome (D1). Still the cheapest experiment in the repo if the DX11 route ever proves impossible |
 | 2 | 32-bit stdcall decoration breaks the winmm proxy | **CLOSED** | Not a problem, and not for the expected reason: Windows' 32-bit winmm exports **186 plain names**, none decorated, so no `--kill-at` and no `@N` handling was needed. What *did* differ was the stub form — i386 has no `jmp *slot(%rip)` — and the DLL's location: on this ARM64 bottle the i386 winmm is in **syswow64**, `system32`'s being Aarch64. The generator now refuses a decorated name or a non-i386 input |
-| 3 | DXMT hands out different vtables per interface version | **OPEN** | Patch what `D3D11CreateDevice` returned; `QueryInterface` for `ID3D11Device1` may yield a different object. Verify before assuming one vtable |
+| 3 | DXMT hands out different vtables per interface version | **CLOSED** | **O20 asked it in the running game and the answer is the convenient one:** `QueryInterface` for `ID3D11Device1` returns the *same pointer* with the *same vtable* as the `ID3D11Device` the game holds. Stage 4 can patch one vtable. Not yet asked of `ID3D11DeviceContext1` — ask before patching the context |
 | 4 | Patching a vtable a thread is already inside | **OPEN** | Hook at device creation, before the render thread is running. Never patch mid-frame |
 | 5 | H-A is wrong and the border colour is a red herring | **CLOSED — the risk happened** | **O10a refuted H-A.** The flicker does not move when shadow-map resolution moves the frustum boundary. The shadows-off evidence was correlational and was labelled as such; it was correlational. O2's warning survives as bug-report evidence only |
 | 6 | The defect is unfixable from outside the game | **OPEN** | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
-| 7 | A fix that crashes is worse than the flicker | **OPEN** | Standing. Every patch guarded; anything uncertain is logged and skipped |
+| 7 | A fix that crashes is worse than the flicker | **OPEN — and it may have just happened** | Standing, and no longer hypothetical. The first hook this project installed was followed by a **seven-second** render session ending in termination (O22). Unattributed — no control run exists — but it is why Stage 3 is not ticked and why `TQFLICKER_HOOK=0` was built. Attribute it before adding a single further patch |
+| 13 | The renderer does not inherit our environment | **OPEN — newly found** | **O18.** The `TQ.exe` we launch is a Steam handoff stub; the renderer is Steam's child. `cxstart` env injection (O15) reaches the stub and **not** the process that renders. Every `DXMT_*`, `FEX_*` or `TQFLICKER_*` variable an experiment depends on must go where Steam can see it, or the experiment silently measures the baseline |
+| 14 | Steam wedges and stops launching the game | **OPEN — newly found** | Happened at the end of Stage 3: after one abrupt game exit, Steam wrote nothing further to `console_log.txt` and ignored three launch requests. Costs a `wineserver -k` and a Steam restart. **Check `content_log.txt` for an `App Running` line before believing a launch happened at all** |
 | 8 | CrossOver rewrites `cxbottle.conf` on exit | **CLOSED** | Known: quit CrossOver before editing it. Largely moot for experiments now — `dxmt.conf` (O11a) and `cxstart` env injection (O15) both avoid the file entirely |
 | 9 | Measurements polluted by the THQ overlay's Present hook | **CLOSED** | Cleared in O5. **Note: it has since been restored to `THQNOnline/overlay` and was enabled for all Stage 0 measurements** (O9). Re-disable it if a future measurement needs it excluded |
 | 10 | Trusting DXVK's log when DXVK does not work here | **CLOSED** | Only the app-profile line and the capability report are used, and why is written down (O6) |

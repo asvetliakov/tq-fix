@@ -23,6 +23,7 @@ mkdir -p build
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
   src/dllmain.cpp src/log.cpp src/winmm_proxy.cpp \
+  src/patch.cpp src/modules.cpp src/device.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
   -DTQFLICKER_BUILD="\"$BUILD_ID\"" \

@@ -10,6 +10,16 @@ HANDLE  g_file = INVALID_HANDLE_VALUE;
 wchar_t g_path[MAX_PATH] = L"(not open)";
 bool    g_verbose = false;
 
+// **Every line carries its pid, and it is stamped here so no caller can forget.**
+//
+// O17: `TQ.exe` runs as two processes and our DLL is loaded into both, so this
+// one file has two writers. Without a pid on every line the log is ambiguous,
+// and an ambiguous log becomes a wrong fact in docs/rev/ — which is exactly how
+// O16 came to record "two feature-level blocks" as unexplained when it was
+// simply two processes. Stage 4 will interleave per-frame draw counts from both;
+// that log without a pid would be worse than no log at all.
+DWORD g_pid;
+
 // One lock around the write. Stage 4 hooks `Present` and the `Draw*` family,
 // which D3D11 permits on more than one thread; two threads interleaving inside
 // one `WriteFile` would produce a line that is a lie, and a lie in this file
@@ -42,8 +52,8 @@ void emit(const char* fmt, va_list ap) {
 
     SYSTEMTIME t;
     GetLocalTime(&t);
-    int n = _snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d  ", t.wHour, t.wMinute, t.wSecond,
-                      t.wMilliseconds);
+    int n = _snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d  p%-5lu  ", t.wHour, t.wMinute,
+                      t.wSecond, t.wMilliseconds, (unsigned long)g_pid);
     if (n < 0 || n >= (int)sizeof(line)) return;
 
     int m = _vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
@@ -61,6 +71,7 @@ void emit(const char* fmt, va_list ap) {
 }  // namespace
 
 void logOpen(HINSTANCE self) {
+    g_pid = GetCurrentProcessId();
     if (!g_lockReady) {
         InitializeCriticalSection(&g_lock);
         g_lockReady = true;

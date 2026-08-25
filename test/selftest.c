@@ -88,7 +88,22 @@ int main(int argc, char** argv) {
     if (missing) fprintf(out, "first missing: %s\n", first);
     ck(missing == 0, "all exports resolve through our module");
 
+    /* Does FreeLibrary actually unload us here?
+     *
+     * Reported, not asserted: it is a fact about this substrate, not about our
+     * correctness. It matters because DLL_PROCESS_DETACH takes two different
+     * paths - an orderly unload puts every patch back, and process exit
+     * deliberately does less (touching another module's memory while the address
+     * space is being torn down is a crash on quit). If FreeLibrary never
+     * unloads here, the orderly path never runs in this bottle, and a future
+     * session should know that before it trusts the unpatch. */
     FreeLibrary(m);
+    {
+        char after[MAX_PATH] = "";
+        DWORD got = GetModuleFileNameA(m, after, MAX_PATH);
+        fprintf(out, "after FreeLibrary: %s\n",
+                got ? "STILL LOADED (the orderly-detach path did not run)" : "unloaded");
+    }
     fprintf(out, "\nRESULT: %d failure(s)\n", fails);
     fclose(out);
     return fails ? 1 : 0;

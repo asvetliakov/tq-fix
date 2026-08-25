@@ -3,7 +3,33 @@
 **Goal:** identify, from inside the process, the draw call that fails to render,
 and establish whether the game issued it. Fix nothing.
 
-**Precondition:** Stage 3's gate met.
+**Precondition:** Stage 3's gate met — **it is not yet**. One gate clause of
+three is met (O19); the seven-second render session in O22 must be attributed
+first. Do not start this stage on top of an unattributed possible crash.
+
+## What Stage 3 handed this stage
+
+- **The device is reachable and captured** — device, context and swapchain all
+  come from one `D3D11CreateDeviceAndSwapChain` call (O19). There is only that
+  one entry point; `Direct3D11.dll` does not import `D3D11CreateDevice`.
+- **Risk 3 is closed for the device** (O20): `ID3D11Device1` is the same object
+  with the same vtable. **Ask the same question of `ID3D11DeviceContext1` before
+  patching the context** — it has not been asked.
+- **The patch primitives exist and are proven in-process**: `src/patch.{h,cpp}`
+  has `vtableSlot`, `findSlot` and an undo list, and its self-test patches a
+  read-only page, fires through it and restores it on every run, under FEX, in
+  this bottle.
+- **Every log line carries a pid** (O17), which is what makes a two-process
+  per-frame log readable.
+- **`BufferCount = 1`, `DISCARD`, windowed, 5120×1440** (O21) — the game asks for
+  the shallowest pipeline DXGI allows.
+- **The renderer does not inherit our environment** (O18). Anything this stage
+  wants to switch at run time must go somewhere Steam can see it, or go in a file
+  beside the exe. `TQFLICKER_HOOK=0` already exists as the "install nothing"
+  control and is subject to the same rule.
+- **Only the process-exit detach path is ever taken** (O23), so anything this
+  stage wants to know must be logged when it happens. A per-frame table
+  accumulated for a summary at exit will simply be lost.
 
 **This plan replaces the original Stage 3 ("Observe the samplers, and the
 buffers"), which was built on H-A. O10a refuted H-A: the flicker does not move
