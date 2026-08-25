@@ -7,6 +7,10 @@
   "scripts": {
     "doctor": "bash scripts/doctor.sh",
     "log": "tsx tools/log.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bash scripts/build.sh",
+    "selftest": "bash scripts/selftest-offgame.sh",
+    "install-dll": "bash scripts/install-dll.sh",
+    "uninstall-dll": "bash scripts/uninstall-dll.sh"
   }
 }
