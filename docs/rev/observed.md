@@ -751,10 +751,21 @@ now, unused, because Stage 4 is where it becomes a question.
 60 Hz. It is the game's own field and DXGI ignores it in windowed mode, so it is
 noted and not chased.
 
-## O22 — **Unresolved: the render process lived seven seconds, and it is not attributed**
+## O22 — ~~Unresolved: the render process lived seven seconds~~ — **RESOLVED by O24: it was the launch route, not the hook**
 
-*The negative result of Stage 3, written down first because it is the one that
-matters. The stage's gate is **not met**.*
+> **Read this entry with its alarm crossed out.** The measurement below is
+> correct and the caution was right, but the suspect was wrong. **O24 ran the
+> control and the hook is exonerated**: launched from the Steam UI, the game
+> exits cleanly *with* the hook installed. The seven-second process was the Steam
+> handoff stub being killed once Steam took over the launch (O18), which is what
+> that route always does.
+>
+> Kept in full, because the reasoning is the reasoning this project is supposed
+> to use — stop, do not build on an unattributed possible crash, and construct
+> the control that settles it — and because the mistake is worth seeing: **the
+> launch route was an uncontrolled variable, and it was the one that mattered.**
+
+*The original entry, written before the control existed:*
 
 On the launch above, Steam's `content_log.txt` records the render process
 running from **23:29:20 to 23:29:27** — seven seconds. It created its device 4.8s
@@ -816,6 +827,115 @@ the game directory cannot be replaced while the game is running.
 `LoadLibraryW` of the system winmm — that resolves to a different module, which
 `winmm_proxy.cpp` checks for explicitly and would have logged. Left open; it
 costs nothing.)*
+
+## O24 — The control: **the hook is exonerated**, and the launch route was the uncontrolled variable
+
+*Established by two paired launches, 2026-08-25, same binary, same scene, the
+only difference being `TQFLICKER_HOOK`.*
+
+| Run | Launch route | Hook | Lifetime | Exit |
+|---|---|---|---|---|
+| O22's run | **direct `cxstart TQ.exe`** | on | **7s** | terminated, no detach |
+| Control | **Steam UI** | **off** | 64s | clean, both reports logged |
+| Test | **Steam UI** | **on** | 38s | clean, both reports logged |
+
+The hooked run exited through the loader and logged its summary:
+
+```
+d3d11 (process exit): 1 call(s), 1 succeeded. device 0679F870, context 06B4ED90,
+                      feature level 11_0
+```
+
+**The hook is not what killed the seven-second process.** The variable that
+actually differed was how the game was started: the direct route runs the Steam
+handoff stub, which asks Steam to launch the game and is then terminated (O18).
+That is what a 7-second "session" with no detach *is*. Both Steam-UI launches
+exited cleanly whether the hook was installed or not.
+
+**The methodological lesson, which is the reason this entry exists.** O22 held
+two things constant that were not the interesting ones and let the launch route
+float. Every measurement in this project from here on states the launch route,
+because it changes the process topology, the environment the renderer inherits
+(O18), and — as it turns out — whether a clean exit is even possible.
+
+### And the environment problem from O18 has a solution
+
+`TQFLICKER_HOOK=0` **did reach the render process**, and the mechanism is the one
+O18's finding implies: **start Steam itself through `cxstart` with the variable
+set, and the game Steam spawns inherits it.**
+
+```sh
+CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
+TQFLICKER_HOOK=0 "$CX/bin/cxstart" --bottle "New Bottle" --no-convert \
+  -- 'C:\Program Files (x86)\Steam\steam.exe'
+```
+
+This restores what O15 promised and O18 took away: **per-run variables that reach
+the renderer, with no `cxbottle.conf` edit and no Risk 8.** The cost is that
+Steam must be restarted to change one, because a process's environment is fixed
+at launch.
+
+*(Stopping Steam needs `wineserver-arm64 -k` — the binary is
+`bin/wineserver-arm64`, not `bin/wineserver`, which does not exist. Its CEF
+`steamwebhelper` children survive the kill and have to be killed by pid; Steam
+restarts correctly through the orphans.)*
+
+## O26 — **Character create/select stopped working, and it is not ours** — probable cost of a hard `wineserver` kill
+
+*Established by the reporter at the keyboard, across three states of our code,
+2026-08-25. Recorded as a hazard, not a finding about the flicker.*
+
+The reporter could not create or select a character from the main menu. Isolated
+immediately, and the ladder cleared our code completely:
+
+| Our code | Character select |
+|---|---|
+| DLL installed, **hook on** | broken |
+| DLL installed, **hook off** (`TQFLICKER_HOOK=0`) | broken |
+| **DLL removed entirely**, override removed | **still broken** |
+
+**Nothing of this project is involved.** Same symptom with no `winmm.dll` in the
+game directory and no `DllOverrides` entry.
+
+### The probable cause, and it was self-inflicted
+
+To unwedge Steam (O22), the bottle's `wineserver` was killed and Steam's
+surviving `steamwebhelper` processes were `kill -9`'d, at roughly 23:43. **Every
+character-select attempt happened after that point**; the last session known to
+reach gameplay was 23:13. Titan Quest AE's saves are **Steam Cloud synced**, and
+a client killed mid-session is a well-known way to leave cloud state
+inconsistent.
+
+Not proven — the failure was never observed before the kill, so there is no
+before-and-after. It is the leading candidate and it is ours.
+
+### The rule this buys
+
+**Do not hard-kill Steam or `wineserver` to recover from a wedged launch.** Quit
+Steam through its own menu and let it exit, even when that is slower. The
+recovery for a wedged bottle cost more than the wedge did: it was cheap to do,
+and it may have cost the reporter their characters.
+
+If it must be done, **check the game's save directory first** —
+`Documents\My Games\Titan Quest - Immortal Throne\SaveData\Main\`, one `_Name`
+folder per character — so there is a record of what existed beforehand. Note that
+the bottle's `Documents` is a **symlink to the real `~/Documents`**, which is
+unreadable from a macOS terminal under TCC, so that check has to be done by the
+reporter, not by tooling.
+
+## O25 — `Direct3D11.dll` loads at the same base every run, so vtable addresses are comparable
+
+*Established by comparing two runs.*
+
+`Direct3D11.dll` was at `765E0000` in both, and all three vtable pointers were
+**byte-identical across runs** — device `76465E84`, context `764759E4`,
+swapchain `7646C808` — while the object pointers themselves differed
+(`06536BC0` vs `0679F870`), as they should.
+
+There is effectively **no ASLR on this module here**, which means a vtable
+address written in one session's log can be compared against another's. Useful
+for Stage 4, and worth knowing before someone treats a matching address as
+suspicious. **The object pointers are not stable; do not key anything on them.**
 
 ---
 
