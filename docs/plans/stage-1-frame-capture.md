@@ -5,6 +5,28 @@ Write no code.
 
 **Precondition:** Stage 0's gate met.
 
+> ## ⚠ DEFERRED — no Xcode on this machine
+>
+> Checked 2026-08-25: `xcode-select -p` gives `/Library/Developer/CommandLineTools`,
+> there is no `/Applications/Xcode.app`, and `xcrun -f metal` fails. **A
+> `.gputrace` has no viewer here**, so a capture would produce a file nobody can
+> open.
+>
+> **This is less costly than it looks.** Read the first Trap below: the capture
+> shows what DXMT submitted **to Metal**, not what the game called. The central
+> question — *did the game issue the draw?* — is a question about the **D3D11
+> side**, and it is answered directly by **Stage 4**, by counting the game's own
+> `Draw*` calls per frame. The capture was scheduled first because it was
+> **free**, not because it was better. With Xcode required, it is no longer free
+> and that ordering no longer holds.
+>
+> **Revisit this stage if:** Xcode gets installed (a ~15 GB App Store download —
+> the Command Line Tools are not enough, the Metal debugger ships only with the
+> full app), **or** Stage 4 answers "the game *did* issue the draw", at which
+> point the fault is on the Metal side and this becomes the only way to see it.
+>
+> Until then the running order is **Stage 2 → 3 → 4**.
+
 ## Why this is the next stage and not the proxy
 
 Stage 0 ended with one question, and both of its answers demand different fixes:

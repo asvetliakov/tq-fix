@@ -6,10 +6,18 @@
 > it changed the model: there is **one** defect, not two — individual draws fail
 > to render for exactly one frame, independently, each on 1–2% of frames. H-A
 > (sampler border colour) and H-E (`Map` DO_NOT_WAIT) are both **refuted**, and
-> there is no configuration fix left. We are at **Stage 1**, the **Metal frame
-> capture**, which needs no code — run
-> `docs/plans/stage-1-frame-capture.md`. It answers the one question everything
-> else depends on: **was the missing draw ever submitted?**
+> there is no configuration fix left.
+>
+> **Stage 1 (Metal capture) is deferred — there is no Xcode on this machine and a
+> `.gputrace` has no viewer.** We are at **Stage 2**, the 32-bit `winmm` proxy —
+> `docs/plans/stage-2-proxy.md` — on the way to **Stage 4**, which answers the one
+> question everything else depends on: **did the game issue the missing draw?**
+> Stage 4 answers it on the D3D11 side, which is the side that matters.
+>
+> **`npm run doctor` is broken** — `scripts/doctor.sh` does not exist, and
+> `scripts/`, `src/` and `tools/` are empty but for `.gitkeep`. Stage 2 builds
+> that scaffolding. The 32-bit cross-compiler is present and working:
+> `i686-w64-mingw32-g++` (GCC 16.2.0).
 >
 > Before measuring anything, set up the instrument from O12: cap the frame rate
 > to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
@@ -66,8 +74,9 @@ longer a suspect; it is **evidence for the Stage 6 bug report**.
 ### The one question
 
 **Was the missing draw ever submitted?** The two answers need opposite fixes, and
-nothing in the project distinguishes them yet. Stage 1 asks Metal; Stage 4 asks
-the game.
+nothing in the project distinguishes them yet. **Stage 4 asks the game**, which
+is the side that matters and the side we can reach. Stage 1 would have asked
+Metal, and is deferred for want of a `.gputrace` viewer.
 
 ### The instrument, which outlasts every stage
 
@@ -81,7 +90,8 @@ Two supporting facts that make experiments cheap:
 - **`dxmt.conf` beside `TQ.exe` works** (O11a) — no `cxbottle.conf` edit, so
   Risk 8 does not apply.
 - **Environment variables can be injected per-run via `cxstart`** with CrossOver
-  already running (O15) — which is what makes Stage 1 free.
+  already running (O15) — the mechanism that would have made Stage 1 free, and
+  still the way to set any variable for a single run.
 
 ---
 
@@ -91,9 +101,10 @@ Each stage has a **gate**. Do not tick a box until its gate has actually been
 met, in the game, with your own eyes on the screen.
 
 *Re-ordered at the end of Stage 0. The `winmm` proxy was Stage 1; the Metal
-capture was Stage 5. The capture needs no code and answers the central question,
-so the house rule — free experiments before expensive ones — moved it to the
-front.*
+capture was Stage 5. The capture needs no code, so "free experiments before
+expensive ones" moved it to the front — and then it turned out to need Xcode,
+which this machine does not have, so it is deferred and the proxy is next after
+all. The numbering is kept as-is rather than churned a second time.*
 
 ### ☑ Stage 0 — Free experiments
 
@@ -104,16 +115,26 @@ measuring instrument.
 **Gate met:** every experiment recorded in `observed.md` including the negative
 results, and an explicit decision — **continue**.
 
-### ☐ Stage 1 — Metal frame capture
+### ⊘ Stage 1 — Metal frame capture — **DEFERRED, no Xcode**
 
 **Plan:** `docs/plans/stage-1-frame-capture.md`
 No code. `DXMT_CAPTURE_FRAME` + `MTL_CAPTURE_ENABLED` via `cxstart` (O15),
-producing a `.gputrace` for Xcode. **The only real graphics debugger here, and
-still entirely unspent.**
-**Gate:** a trace opens, we can describe the frame's pass structure and name the
-draw that makes the shrine beam, the actual `DXMT_CAPTURE_FRAME` syntax is
-written into `substrate.md`, and either a bad frame is captured and answered — or
-the attempts are counted and recorded as a negative result.
+producing a `.gputrace` for Xcode.
+
+**Blocked 2026-08-25:** this machine has Command Line Tools only — no
+`/Applications/Xcode.app`, and `xcrun -f metal` fails. **A `.gputrace` has no
+viewer here.** The Metal debugger ships only with the full ~15 GB Xcode app; the
+Command Line Tools are not enough.
+
+**Why this costs less than it looks.** The capture shows what DXMT submitted **to
+Metal**. The central question — *did the game issue the draw?* — is about the
+**D3D11 side**, and **Stage 4 answers it directly** by counting the game's own
+`Draw*` calls. Stage 1 was put first because it was **free**, not because it was
+better; with Xcode required it is neither.
+
+**Revisit if** Xcode is installed, **or** Stage 4 answers "the game *did* issue
+the draw" — at which point the fault is on the Metal side and this becomes the
+only way to see it.
 
 ### ☐ Stage 2 — Get inside the process
 
