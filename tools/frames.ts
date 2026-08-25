@@ -90,8 +90,12 @@ const capped = dts.filter((x) => x > 95 && x < 105).length;
 const first = rows[0], last = rows[rows.length - 1];
 console.log(`${file}`);
 console.log(`${rows.length} frames, pid ${first.pid}, ${first.time} .. ${last.time}`);
-console.log(`dt: median ${dts.slice().sort((a, b) => a - b)[dts.length >> 1]?.toFixed(1)}ms; ${capped} of ${dts.length} frames within 95-105ms` +
-  (capped > dts.length * 0.9 ? '  (10fps cap in effect: 1 recorded frame == 1 game frame, O12)' : '  (NOT at the 10fps cap - a recording will not be 1:1)'));
+const medDt = dts.slice().sort((a, b) => a - b)[dts.length >> 1] ?? 0;
+// The median, not the fraction: a session includes loading and menus, whose
+// frames are not capped, so a strict fraction reads a properly capped
+// gameplay run as uncapped. 909 frames at the cap gave 74% within 95-105ms.
+console.log(`dt: median ${medDt.toFixed(1)}ms; ${capped} of ${dts.length} frames within 95-105ms` +
+  (medDt > 95 && medDt < 105 ? '  (10fps cap in effect: 1 recorded frame == 1 game frame, O12)' : '  (NOT at the 10fps cap - a recording will not be 1:1)'));
 console.log(`draws/frame: min ${draws[0]}  median ${draws[draws.length >> 1]}  max ${draws[draws.length - 1]}`);
 console.log(`sync interval: ${[...new Set(rows.map((r) => r.sync))].join(', ')}`);
 console.log(`frames with an empty draw: ${rows.filter((r) => r.empty).length};  with a busy Map: ${rows.filter((r) => r.maps_busy).length};  ` +

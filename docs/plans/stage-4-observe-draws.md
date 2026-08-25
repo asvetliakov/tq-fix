@@ -233,8 +233,44 @@ naive read. And `maps_busy`: any non-zero on a bad frame reopens H-E.
 
 ## Outcome
 
-**Built and self-tested 2026-08-26; the gate needs a play session and is not
-yet met.** The reporter has not run the Stage 4 build in the game. Everything
-that could be verified without the game has been (O28, O29); the DLL is
-installed, the cap is armed, and the protocol above is what the next session
-does first.
+**Run 2026-08-26. Gate MET. The answer is: the game issued the draw.**
+
+| Gate clause | |
+|---|---|
+| A frame index that can be aligned against a screen recording | **met** — aligned by wall clock, verified `birth + duration == mtime` (O30) |
+| Name the frame an object failed on, and its draw count against its neighbours | **met** — 56 such frames listed, each with `prev \| this \| next` |
+| **An explicit, recorded answer to: did the game issue the draw?** | **met — YES. O30.** |
+| Constant-buffer widths logged, reflection mismatch called out | **met** — O32, no instance, and the test's weakness stated |
+| The game is unharmed, the flicker unchanged, exit clean | **met** — 909 frames, played normally, exit through the loader |
+
+**The measurement.** Over the 387 frames the recording covers: **56 frames show
+an object vanish; 4 show the draw count fall.** The count is identical between
+consecutive frames **93.3%** of the time, so a missing draw would have read as a
+clean −1 — and the four dips are −3/−4, the wrong size and the wrong number.
+`empty` draws: **0**. `Map` returning `WAS_STILL_DRAWING`: **0**. Instanced,
+indirect, `DrawAuto` and `ExecuteCommandList`: **all 0**, so no draws happened
+anywhere we were not looking.
+
+> **The game submits the draw and it produces no pixels. The fault is on the
+> DXMT/Metal side.**
+
+**What it produced:** O30 (the answer), O31 (H-E refuted directly — `Map` never
+said busy), O32 (H-B1 un-instanced, with the test's weakness stated), O33 (the
+one border sampler, fully described — the Stage 6 bug report's evidence), O34
+(Risk 3 closed in-game for the context).
+
+**What it cost, worth not repeating:** aligning by timing fingerprint does not
+work at a 10fps cap — both series are ~100ms everywhere, best offset 1.70ms
+median error against 2.60ms worst. Use the wall clock. And the alignment must
+never be done by matching anomalies to dips, which would assume the answer.
+
+### Where this leaves the project
+
+**Stage 1 is now the critical path**, exactly as its own plan predicted:
+*revisit if Stage 4 answers "the game did issue the draw" — at which point the
+fault is on the Metal side and this becomes the only way to see it.* It needs
+**Xcode** for a `.gputrace` viewer, which this machine does not have.
+
+**Stage 5 cannot be written yet.** There is no D3D11-side fix to attempt: the
+D3D11 side is correct. What can be done without Xcode is in
+`docs/plans/stage-5-fix.md`.

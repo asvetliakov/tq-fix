@@ -2,41 +2,43 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is built,
-> self-tested and installed; its gate needs one play session and is not yet
-> met.** The DLL now patches fourteen vtable slots at device creation —
-> `Present`, all seven `Draw*`, `Map`, `CreateBuffer`, both shader creators and
-> `CreateSamplerState` — and the off-game self-test drove all of it through the
-> real 32-bit DXMT before the game was launched once (O28). `ID3D11DeviceContext1`
-> is the same object and vtable as the context (Risk 3 now closed on both).
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is done, and
+> it answered the one question the project existed to ask.**
 >
-> **Do the measurement run first**, exactly as `docs/plans/stage-4-observe-draws.md`
-> § "The measurement run — protocol" says: cap is **armed** in `dxmt.conf`
-> (`npm run doctor` says so), launch **from the Steam UI** (O24), shrine, stand
-> still, **screen-record 60s+**, quit normally, then **`npm run keep-log --
-> stage4-run1` before anything else** — the per-frame table
-> (`%TEMP%\tqflicker-frames.log`) is truncated on the next device creation.
-> Then `npm run frames`, and `cache/venv/bin/python tools/recording.py
-> cache/captures/*<time>*.mov cache/logs/stage4-run1-*-frames.log` (glob the
-> name: it has a U+202F before `PM`). It prints, per bad frame, the draw count
-> against its neighbours — **that is the answer to "did the game issue the
-> draw?"**, and it goes in `observed.md` either way.
+> **The game ISSUES the draw. The fault is on the DXMT/Metal side** (O30). Over
+> the 387 frames a screen recording covers, **56 frames show an object vanish
+> and 4 show the draw count fall** — against a draw count that is identical
+> between consecutive frames 93.3% of the time, so a missing draw would have
+> read as a clean −1. The four dips are −3/−4: wrong size, wrong number. Zero
+> empty draws, zero `Map` returning `WAS_STILL_DRAWING`, and zero instanced,
+> indirect or deferred draws anywhere in the session, so nothing was submitted
+> where we could not see it.
 >
-> **Also read on the way:** `empty` (a draw issued with zero indices is a third
-> answer), `maps_busy` (non-zero on a bad frame reopens H-E), and any `!!
-> reflect:` line (a shader declaring a larger cbuffer than the game ever
-> created is H-B1's first real instance).
+> **This closes the D3D11 side.** Every "the engine skipped it" hypothesis is
+> dead; H-B1 is demoted (O32 found no instance, by a test that admits it could
+> only catch the blatant form, and it is a D3D11-side explanation anyway).
 >
-> **Standing rules from Stage 3** (O24, O18, Risk 15, O23): state the launch
-> route; per-run variables reach the renderer only via a Steam started under
-> `cxstart`; never hard-kill Steam or `wineserver`; only the process-exit
-> detach runs, so nothing is held for exit. **After the run, comment the cap
-> back out** in `dxmt.conf` so the reporter's normal play is not at 10fps.
+> **The project is now at a decision, not at a stage.** The only instrument that
+> can see a Metal-side fault is **Stage 1's `.gputrace`**, and it needs **Xcode**
+> — a ~15 GB install; Command Line Tools are not enough. So:
 >
-> `npm install` has been done; `build`, `selftest`, `typecheck`, `install-dll`,
-> `uninstall-dll`, `log`, `frames`, `keep-log` all work. numpy is in the old
-> session venv only — `python3 -m venv cache/venv && cache/venv/bin/pip install
-> numpy` if `cache/venv` is missing.
+> - **If Xcode gets installed** → `docs/plans/stage-1-frame-capture.md`, whose
+>   header now says what to do first. One thing is better than when it was
+>   written: we can **name the bad frame** from Stage 4's table, so the capture
+>   no longer needs luck.
+> - **If it does not** → `docs/plans/stage-6-ship.md`. The bug report is the
+>   honest outcome and **the evidence is already complete**: O30's measurement,
+>   O33's full description of the one border sampler DXMT warns about, and
+>   DXVK's per-app profile naming `TQ.exe`.
+>
+> **Ask the reporter which.** Nothing else in the repo moves without that answer.
+>
+> Housekeeping: the 10fps cap is **commented back out** (normal play). Both logs
+> from the run are in `cache/logs/stage4-run1-002554-*`. Re-derive the result any
+> time with `cache/venv/bin/python tools/recording.py cache/captures/*12.24.39*.mov
+> cache/logs/stage4-run1-002554-tqflicker-frames.log` — glob the name, it has a
+> U+202F before `AM`. `npm run doctor` is green and reports whether Xcode has
+> appeared.
 
 ---
 
@@ -57,6 +59,11 @@ period. Counted in **frames**, not seconds. It hits the shadow pass, the FX pass
 and skinned character geometry alike. Full evidence in `docs/rev/observed.md`
 O9–O16; the pictures are in `cache/captures/`.
 
+**Stage 4 added the half that was missing** (O30): **the game issues the draw
+anyway.** The engine submits it, `Map` never reports the resource busy, the
+draw is never empty — and no pixels appear. So the sentence above is a
+description of what **DXMT** does with a draw the game made correctly.
+
 **There is no Defect A and Defect B.** O1 read the artefact as two defects
 because turning shadows off "greatly reduced" it. O10b and O14 show that shadows
 are simply the most numerous dynamic draws on screen — removing them removes
@@ -74,23 +81,33 @@ are simply the most numerous dynamic draws on screen — removing them removes
 DXMT's border-colour warning (O2) is still real and still unexplained. It is no
 longer a suspect; it is **evidence for the Stage 6 bug report**.
 
-### What is alive
+### What is alive — **one thing, after Stage 4**
 
-- **H-B1** — out-of-range constant-buffer reads. Strengthened, not weakened, by
-  Stage 0: garbage in a transform flings geometry off-screen, which looks
-  identical to "not drawn", and DXVK ships `constantBufferRangeCheck` keyed on
-  **`TQ.exe`** specifically. DXMT has no equivalent knob, so it cannot be tested
-  for free.
-- **H-D** — draws or their resources intermittently missing. The general form;
-  true almost by construction, and too unspecific to act on until Stage 1 or
-  Stage 4 says which side of the translation it lives on.
+- **H-D, second branch only.** *The game submits the draw and DXMT renders
+  nothing for it.* O30 measured the first branch dead: 56 objects vanished
+  against 4 draw-count dips, with the count flat frame-to-frame 93.3% of the
+  time. This is now the project's position rather than a hypothesis, and going
+  further needs a Metal-side instrument.
+- **H-B1 — demoted.** O32 reflected 541 shaders and found no constant buffer
+  declared larger than any created — by a test that admits it could only have
+  caught the blatant form (it compares against the largest buffer, not the one
+  bound at the draw, and 16 of the game's 20 constant buffers are 32 bytes). And
+  it is a D3D11-side explanation, which O30 has made unlikely on principle.
+  Kept as a Stage 5 fallback because its prior art names `TQ.exe`.
 
-### The one question
+### The one question — **ANSWERED, 2026-08-26**
 
-**Was the missing draw ever submitted?** The two answers need opposite fixes, and
-nothing in the project distinguishes them yet. **Stage 4 asks the game**, which
-is the side that matters and the side we can reach. Stage 1 would have asked
-Metal, and is deferred for want of a `.gputrace` viewer.
+**Was the missing draw ever submitted? Yes.** (O30.) Over the 387 frames a
+recording covers: **56 objects vanished, 4 draw-count dips**, against a count
+that is flat frame-to-frame 93.3% of the time. Zero empty draws, zero busy
+`Map`s, zero draws on any path we had not hooked.
+
+> **The game submits the draw and DXMT renders nothing for it.**
+
+The D3D11 side is exonerated, and with it every hypothesis in which the engine
+decides to skip. What remains is a fault in the D3D11→Metal translation, and
+the only instrument that can see one is **Stage 1's Metal capture** — which
+needs **Xcode**. That is the project's open decision.
 
 ### The instrument, which outlasts every stage
 
@@ -129,26 +146,30 @@ measuring instrument.
 **Gate met:** every experiment recorded in `observed.md` including the negative
 results, and an explicit decision — **continue**.
 
-### ⊘ Stage 1 — Metal frame capture — **DEFERRED, no Xcode**
+### ☐ Stage 1 — Metal frame capture — **THE CRITICAL PATH, blocked on Xcode**
 
 **Plan:** `docs/plans/stage-1-frame-capture.md`
 No code. `DXMT_CAPTURE_FRAME` + `MTL_CAPTURE_ENABLED` via `cxstart` (O15),
 producing a `.gputrace` for Xcode.
 
-**Blocked 2026-08-25:** this machine has Command Line Tools only — no
+**Un-deferred 2026-08-26 by O30**, which met this stage's own revival
+condition: the game issues the draw, so the fault is on the Metal side and this
+is the only way to see it. It is now the main line of the investigation.
+
+**Still blocked:** this machine has Command Line Tools only — no
 `/Applications/Xcode.app`, and `xcrun -f metal` fails. **A `.gputrace` has no
 viewer here.** The Metal debugger ships only with the full ~15 GB Xcode app; the
-Command Line Tools are not enough.
+Command Line Tools are not enough. **This is a decision for the reporter:
+install Xcode, or ship the bug report (Stage 6).**
 
-**Why this costs less than it looks.** The capture shows what DXMT submitted **to
-Metal**. The central question — *did the game issue the draw?* — is about the
-**D3D11 side**, and **Stage 4 answers it directly** by counting the game's own
-`Draw*` calls. Stage 1 was put first because it was **free**, not because it was
-better; with Xcode required it is neither.
+**Better than when it was written:** the capture is keyed on a frame index, and
+Stage 4's table now **names the bad frames**, so catching a defective one no
+longer depends on luck.
 
-**Revisit if** Xcode is installed, **or** Stage 4 answers "the game *did* issue
-the draw" — at which point the fault is on the Metal side and this becomes the
-only way to see it.
+*The 2026-08-25 reasoning, kept because it was right: the capture shows what
+DXMT submitted to Metal, whereas "did the game issue the draw?" is a D3D11-side
+question that Stage 4 could answer directly and cheaply. Stage 4 answered it —
+and the answer is the one that hands the investigation back to this stage.*
 
 ### ☑ Stage 2 — Get inside the process
 
@@ -174,27 +195,36 @@ Produced **O18–O27**. **Closed Risk 3**; opened Risks 13, 14 and 15. Built
 `src/patch.{h,cpp}`, `src/modules.{h,cpp}`, `src/device.{h,cpp}`, a watcher
 thread, a pid on every log line, `TQFLICKER_HOOK=0` and a startup heartbeat.
 
-### ☐ Stage 4 — Count the draws, and find the one that goes missing
+### ☑ Stage 4 — Count the draws, and find the one that goes missing
 
-**Plan:** `docs/plans/stage-4-observe-draws.md` — **built 2026-08-26, gate not
-yet met.** `src/frames.{h,cpp}` patches `Present`, the seven `Draw*`, `Map`,
-`CreateBuffer`, shader creation (+`D3DReflect`) and `CreateSamplerState` at
-device creation; slots are generated from the MinGW headers
-(`scripts/gen-slots.sh`); a per-frame table goes to `%TEMP%\tqflicker-frames.log`.
-The off-game self-test now creates a real DXMT device and fires the hooks (O28);
-the Stage 0 recording detector is committed as `tools/recording.py` and
-reproduces O12/O14 (O29). **Needs the play session** in the plan's protocol.
-**Gate:** an explicit, recorded answer to **did the game issue the draw?**
+**Plan:** `docs/plans/stage-4-observe-draws.md` — **complete, 2026-08-26.**
+`src/frames.{h,cpp}` patches fourteen vtable slots at device creation —
+`Present`, all seven `Draw*`, `Map`, `CreateBuffer`, both shader creators and
+`CreateSamplerState` — writing a per-frame table beside the main log. Slots are
+generated from the MinGW headers (`scripts/gen-slots.sh`), and the off-game
+self-test drives all of it through the real 32-bit DXMT before any launch (O28).
 
-### ☐ Stage 5 — Fix it
+**Gate met (O30):** 909 frames measured in a real play session; the recording
+aligned by wall clock; **56 objects vanished against 4 draw-count dips**, with
+the count flat 93.3% of the time. **The game issues the draw.**
 
-**Plan:** `docs/plans/stage-5-fix.md` — stub. Write it once Stages 1 and 4 have
-said which side of the translation the defect lives on. *Replaces the deleted
-`stage-4-fix-defect-a.md` (targeted refuted H-A) and `stage-5-defect-b.md` (there
-is no separate Defect B).*
+Produced **O28–O34**. Closed Risk 3 on the context; opened Risk 16 (the frames
+table is truncated by the next launch). Built `src/frames.{h,cpp}`,
+`scripts/gen-slots.sh`, `scripts/keep-log.sh`, `tools/frames.ts`, and
+`tools/recording.py` — the Stage 0 detector, finally committed (O29), now with
+a clock-based aligner and an offset-independent verdict.
+
+### ☐ Stage 5 — Fix it — **no D3D11-side target exists**
+
+**Plan:** `docs/plans/stage-5-fix.md` — still a stub, and O30 is why. The fix
+for "the engine skipped it" and the fix for "DXMT dropped it" have nothing in
+common, and **O30 chose the second**: the D3D11 side is submitting correctly, so
+there is nothing to correct there. A shim cannot fix a translation fault it
+cannot see. **This stage stays unwritten until Stage 1 says what DXMT did with
+the draw.**
 **Gate:** the same scene, shadows **on**, no dropouts in a 60-second 10fps
-recording measured the same way as O12/O14 — **a number, not an impression** — no
-new artefact, no crash.
+recording measured the same way as O12/O14/O30 — **a number, not an impression**
+— no new artefact, no crash.
 
 ### ☐ Stage 6 — Ship it
 
@@ -204,6 +234,14 @@ overlay put back, and a CodeWeavers bug report carrying the evidence — DXMT's 
 border-colour warning (O2), the frame-counted dropout measurements (O12/O14), and
 the note that DXVK ships a per-app profile for this exact executable.
 **Gate:** a clean bottle, a fresh install, someone else's hands.
+
+**O30 changed this stage's standing.** It was the fallback; it is now a
+*legitimate outcome* — possibly the only one available without Xcode — and its
+evidence is **already complete**: O30's measurement (the game submits the draw
+and DXMT renders nothing for it, with the method and the numbers), O33's full
+description of the single `ADDRESS_BORDER` sampler DXMT warns about, and DXVK's
+per-app profile naming `TQ.exe`. If the reporter does not want to install Xcode,
+this is the next stage and it can be written today.
 
 ---
 
@@ -219,6 +257,8 @@ the note that DXVK ships a per-app profile for this exact executable.
 | 6 | The defect is unfixable from outside the game | **OPEN** | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
 | 7 | A fix that crashes is worse than the flicker | **OPEN** | O22's scare was the launch route (O24), not the hook. Stage 4 adds fourteen vtable patches, and the rule applied was: **prove every one of them through the real DXMT off-game first** — the self-test now does (O28). `TQFLICKER_HOOK=0` remains the one-launch control if the play session misbehaves |
 | 16 | The per-frame table is truncated by the next launch | **OPEN — newly found** | `tqflicker-frames.log` is rewritten at every device creation, so the run that just measured is one launch from gone. `npm run keep-log -- label` first, always. Same family as Risk 12 |
+| 17 | The project ends in a bug report rather than a fix | **OPEN — now likely** | **O30.** The fault is in DXMT, which we do not ship and cannot patch from a shim in the game's process. Risk 6 said "if the cause is engine- or shader-internal the honest outcome is a bug report"; O30 makes it *translation*-internal, which is the same conclusion by a different route. Stage 6's evidence is already complete. Not a failure — the project set out to find out what was wrong, and it did |
+| 18 | Concluding from a mis-aligned recording | **CLOSED** | The alignment is the load-bearing step of O30 and it was nearly done wrongly. Two rules came out of it: **align by wall clock** (verified `birth + duration == mtime`), never by matching anomalies to dips — that assumes the answer; and **make the verdict two counts over one span**, so a second of clock error cannot change it. A timing-fingerprint alignment was tried and does not work at a 10fps cap (1.70ms best against 2.60ms worst) |
 | 13 | The renderer does not inherit our environment | **OPEN — newly found** | **O18.** The `TQ.exe` we launch is a Steam handoff stub; the renderer is Steam's child. `cxstart` env injection (O15) reaches the stub and **not** the process that renders. Every `DXMT_*`, `FEX_*` or `TQFLICKER_*` variable an experiment depends on must go where Steam can see it, or the experiment silently measures the baseline |
 | 14 | Steam wedges and stops launching the game | **OPEN — newly found** | Happened at the end of Stage 3: after one abrupt game exit, Steam wrote nothing further to `console_log.txt` and ignored three launch requests. **Check `content_log.txt` for an `App Running` line before believing a launch happened at all.** Recovering from it is Risk 15, and the recovery was worse than the wedge |
 | 15 | Breaking the player's saves while recovering the bottle | **OPEN — the risk happened** | **O26.** A hard `wineserver -k` plus `kill -9` on Steam's helpers was used to unwedge Risk 14, and character create/select stopped working immediately afterwards — with our DLL installed, with the hook off, and with the DLL removed entirely. TQ AE's saves are Steam Cloud synced. **Quit Steam through its own menu; never kill it.** This is the same family as Risk 12 (deleting evidence while tidying up) and it cost more |

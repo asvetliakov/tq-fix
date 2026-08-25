@@ -5,27 +5,44 @@ Write no code.
 
 **Precondition:** Stage 0's gate met.
 
-> ## ⚠ DEFERRED — no Xcode on this machine
+> ## ⚠ UN-DEFERRED BY O30 — this is now the critical path, and it needs Xcode
 >
-> Checked 2026-08-25: `xcode-select -p` gives `/Library/Developer/CommandLineTools`,
-> there is no `/Applications/Xcode.app`, and `xcrun -f metal` fails. **A
-> `.gputrace` has no viewer here**, so a capture would produce a file nobody can
-> open.
+> **2026-08-26: the condition this stage set for its own revival has been met.**
+> The note below said *"revisit if Stage 4 answers 'the game did issue the
+> draw', at which point the fault is on the Metal side and this becomes the only
+> way to see it."* **Stage 4 answered exactly that** (O30): over 387 frames, 56
+> objects vanished while the draw count fell 4 times, against a count that is
+> flat 93.3% of the time. The game submits the draw; DXMT renders nothing for
+> it.
 >
-> **This is less costly than it looks.** Read the first Trap below: the capture
-> shows what DXMT submitted **to Metal**, not what the game called. The central
-> question — *did the game issue the draw?* — is a question about the **D3D11
-> side**, and it is answered directly by **Stage 4**, by counting the game's own
-> `Draw*` calls per frame. The capture was scheduled first because it was
-> **free**, not because it was better. With Xcode required, it is no longer free
-> and that ordering no longer holds.
+> **So the fault is on the Metal side, and this stage is the only instrument
+> that can see it.** Everything below was written when this was a cheap
+> speculative look; read it now as the main line of the investigation.
 >
-> **Revisit this stage if:** Xcode gets installed (a ~15 GB App Store download —
-> the Command Line Tools are not enough, the Metal debugger ships only with the
-> full app), **or** Stage 4 answers "the game *did* issue the draw", at which
-> point the fault is on the Metal side and this becomes the only way to see it.
+> **The blocker is unchanged and it is the whole cost.** Checked 2026-08-25:
+> `xcode-select -p` gives `/Library/Developer/CommandLineTools`, there is no
+> `/Applications/Xcode.app`, and `xcrun -f metal` fails. A `.gputrace` has no
+> viewer here. The Metal debugger ships **only** with the full Xcode app — a
+> ~15 GB App Store download; the Command Line Tools are not enough.
 >
-> Until then the running order is **Stage 2 → 3 → 4**.
+> **The decision this needs from the reporter:** install Xcode, or stop at a
+> bug report. There is no third instrument. `npm run doctor` reports Xcode's
+> presence on every run and will say when this unblocks.
+>
+> ### What to do the moment Xcode exists
+>
+> 1. Re-read this plan's Traps — they were written before we knew the answer and
+>    the first one is now the point rather than a caveat.
+> 2. The capture is keyed on a **frame index** (`substrate.md`:
+>    `scheduleNextFrameCapture(unsigned long long)`), and **we can now name the
+>    frame**: Stage 4's table gives a frame number for every bad frame, and
+>    `tools/recording.py` prints them. That is a capability this stage did not
+>    have when it was written — it no longer needs luck to catch a defective
+>    frame.
+> 3. Still unknown, and Stage 1 must record the answer: whether
+>    `DXMT_CAPTURE_FRAME` takes a count or a range.
+> 4. Remember O18/O24: the variable has to reach the **renderer**, so start
+>    `steam.exe` itself through `cxstart` with it set.
 
 ## Why this is the next stage and not the proxy
 

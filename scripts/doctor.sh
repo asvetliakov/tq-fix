@@ -84,11 +84,18 @@ fi
 G_FRAMES="$BOTTLE/drive_c/users/crossover/AppData/Local/Temp/tqflicker-frames.log"
 [ -f "$G_FRAMES" ] && note "a frames table exists from the last run - npm run keep-log -- <label> before launching again (Risk 16)"
 
-echo "optional"
+echo "the critical path  (docs/rev/observed.md O30)"
+# Not optional any more: O30 showed the game issues the draw, so the fault is on
+# the Metal side and Stage 1's capture is the only instrument that can see it.
 if [ -d /Applications/Xcode.app ]; then
-  ok "Xcode - Stage 1 (Metal frame capture) is unblocked"
+  ok "Xcode - Stage 1 (Metal frame capture) is UNBLOCKED and is the critical path"
 else
-  note "no Xcode - Stage 1 stays deferred, a .gputrace has no viewer (RUNBOOK Stage 1)"
+  # A note, not a failure: this is a DECISION, not a missing dependency. Shipping
+  # the bug report instead (Stage 6) is a legitimate outcome, and a doctor that
+  # exits non-zero forever would make every session start on a false alarm.
+  note "no Xcode - since O30 this is the project's one open decision: the fault is on the"
+  note "      Metal side, and a .gputrace has no viewer here. Install Xcode (~15GB; Command"
+  note "      Line Tools are not enough) for Stage 1, or ship the bug report (Stage 6)"
 fi
 
 echo

@@ -1067,14 +1067,183 @@ no PIL). The instrument is reproducible and it is in the repo.
 path typed with a normal space is "No such file or directory" with the sandbox
 on or off. Glob it.)*
 
+## O30 — **The answer: the game ISSUED the draw.** The defect is in the translation
+
+*Established 2026-08-26 by the Stage 4 build in a real play session — launched
+from the Steam UI, 10fps cap, the O9 shrine, reporter standing still — plus a
+38.7-second screen recording taken during it. This is the result the whole
+project was waiting for.*
+
+**Run:** pid 2136, `00:23:46` → `00:25:27`, **909 frames**, 1,105,881 draws,
+exit through the loader with every summary written. The recording covers table
+rows **452–838** (`00:24:40.095` → `00:25:18.711`) — it was started after the
+game was already running and stopped before the game was closed, which is
+exactly where the clock places it.
+
+### The comparison, and it does not depend on the alignment
+
+| Over the same 387 frames | |
+|---|---|
+| Frames where an object **visibly vanished** for exactly one frame | **56** |
+| Frames where the **draw count fell** below both neighbours | **4** |
+
+**Objects vanish fourteen times more often than the draw count falls.** This is
+two counts over one span, so it cannot be broken by a second of clock error —
+which matters, because the alignment is by wall clock and is good to about ±1s.
+
+### The instrument was sensitive enough to see a missing draw, and it did not
+
+The draw count over the recorded span is **1787 ± 3**, and it is **identical
+between consecutive frames on 360 of 386 frames — 93.3%**. The scene was static
+(the reporter stood still), so the count is a flat line. A single un-issued
+draw would have shown as a clean **−1** against it.
+
+The four dips that do exist are **−4, −3, −4, −3** — not −1 — and only four of
+them. They are the wrong size *and* the wrong number to be the flicker.
+
+### Why the alignment is trustworthy
+
+Aligned **by wall clock, not by matching anomalies to dips** — matching them
+would have assumed the answer. The recording's container timestamp is its
+**start**, verified arithmetically: `birth 00:24:40 + 38.74s duration =
+00:25:18 = the file's mtime`. The reporter independently confirms the recording
+began after launch and ended before quit, which is what the row range says.
+
+*(A timing-fingerprint alignment was tried first — cross-correlating the
+recording's inter-frame intervals against the table's `dt_ms` — and **it does
+not work**: at a 10fps cap both series are ~100ms everywhere, and the best
+offset scored 1.70ms median error against 2.60ms for the worst. Recorded so
+nobody builds on it. The wall clock is the anchor.)*
+
+### The three other answers, all excluded in the same run
+
+- **Not "issued with nothing in it":** `empty` draws — a `Draw*` called with a
+  zero index or vertex count — are **0 across all 909 frames**. The draw was
+  not a no-op.
+- **Not a draw path we cannot see:** `DrawIndexedInstanced`, `DrawInstanced`,
+  `DrawAuto`, both `*Indirect` and **`ExecuteCommandList` are all 0** for the
+  whole session. The game uses exactly two entry points — `DrawIndexed`
+  (1,050,275) and `Draw` (55,606) — both hooked. **There is no deferred context
+  and no command list**, so no draws were recorded somewhere we were not
+  looking.
+- **Not `Map` failing:** see O31.
+
+### What this settles, and what it costs
+
+> **The game submits the draw and it produces no pixels.** The fault is on the
+> **DXMT / Metal** side of the translation, not in the engine deciding to skip.
+
+**H-D's "the engine skipped it" branch is dead.** So is any remaining hope that
+a state fix on the D3D11 side is the answer — the D3D11 side is doing the right
+thing.
+
+**And it makes Stage 1 the critical path.** The Stage 1 plan said: *revisit if
+Stage 4 answers "the game did issue the draw" — at which point the fault is on
+the Metal side and this becomes the only way to see it.* That is now the case,
+and Stage 1 needs **Xcode**, which this machine does not have. That is the
+honest position: the next instrument costs a ~15 GB install.
+
+## O31 — H-E is refuted a second time, directly: `Map` **never** returned `WAS_STILL_DRAWING`
+
+*Established by counting it in the hook, same run.*
+
+Across **909 frames and roughly two million `Map` calls**, the number of times
+`Map` returned `DXGI_ERROR_WAS_STILL_DRAWING` is **zero**. Not "rare" — none.
+
+O13 refuted H-E by showing DXMT's `ignoreMapFlagNoWait` knob changed nothing
+(p = 0.803). That was an argument from a knob; **this is the thing itself**, and
+it closes the question from the other side. The engine was never told a resource
+was busy, so it never had the documented reason to skip an update.
+
+Two hypotheses now agree the D3D11 side is behaving: the draws are issued (O30)
+and the maps succeed (O31).
+
+## O32 — H-B1 has **no instance in this scene** — and the test that found none was the weak one
+
+*Established by `D3DReflect` on every shader created, against every constant
+buffer created, same run.*
+
+```
+cbuffer (process exit): 20 constant buffer(s) of 2085 buffer(s);
+                        widths: 2048 x2, 64 x1, 224 x1, 32 x16; largest 2048B
+reflect (process exit): 541 shader(s); largest declared cbuffer 1760B against
+                        largest created 2048B - 0 shader(s) declared more than
+                        had been created at the time
+```
+
+**541 shaders reflected, and not one declares a constant buffer larger than the
+largest the game created.** The largest declaration is **1760 B**; the largest
+buffer is **2048 B**.
+
+**State the weakness plainly, because it is the whole caveat.** This compares
+each declaration against the **largest buffer that exists**, not against the
+buffer **actually bound to that slot at that draw**. The game creates only
+**twenty** constant buffers and **sixteen of them are 32 bytes**. A shader
+declaring a 1760 B `b0` while the engine binds one of the 32-byte buffers to
+`b0` is *precisely* H-B1, and this test cannot see it.
+
+So: **H-B1 is not refuted; it is un-instanced by a test that could only have
+caught the blatant form.** Catching the real form needs
+`VSSetConstantBuffers`/`PSSetConstantBuffers` logged per slot and matched
+against the shader bound at the draw — which is more state tracking than Stage 4
+signed up for, and which **O30 has now demoted anyway**: a constant-buffer
+over-read is a *D3D11-side* explanation, and the D3D11 side is submitting
+correctly. Keep it as a Stage 5 fallback, not a lead.
+
+## O33 — 16,911 samplers, and **exactly one** has a border colour
+
+*Established by logging every `CreateSamplerState`, same run.*
+
+```
+sampler (process exit): 16911 sampler(s), 1 with ADDRESS_BORDER
+```
+
+The single `ADDRESS_BORDER` sampler is the one DXMT warns about (O2), and its
+full description is now on the record:
+
+```
+filter 0x94 (comparison)  addr BORDER/BORDER/BORDER  border (-3.40282e+38, 0, 0, 0)
+cmp 4 (LESS_EQUAL)  lod 0..3.40282e+38  bias 0  aniso 0
+```
+
+A **comparison** filter with `LESS_EQUAL` and a `-FLT_MAX` border is a shadow-map
+sampler, unambiguously — which confirms by observation what H-A only ever
+assumed. H-A is still refuted as the *cause* (O10a); this is the evidence for
+the **Stage 6 bug report**, now complete enough to send.
+
+The other number is worth a line: **16,911 samplers in 92 seconds** is roughly
+180 per second, so the engine creates sampler states per-draw rather than
+caching them. Not a defect, and not ours to fix — but it is a lot of state
+objects, and it is the kind of thing a translation layer can be slow about.
+
+## O34 — Risk 3 is closed in the running game for the context too
+
+`ID3D11DeviceContext1 0691B6F8 (vtable 764759E4) - the SAME object as
+ID3D11DeviceContext`. O28 established this in the off-game self-test; this is
+the same answer from the game itself, with the same context vtable `764759E4`
+that O19/O25 recorded. One vtable per interface family under DXMT, confirmed on
+both device and context, off-game and in-game.
+
 ---
 
 ## Hypotheses — not yet proven
 
-**Status at the end of Stage 0.** Live: **H-B1** (specific, testable, has prior
-art naming `TQ.exe`) and **H-D** (general, true almost by construction, too
-unspecific to act on). Refuted: **H-A** (O10a), **H-E** (O13), **H-C** (O8).
-Dissolved: **H-B2**, whose premise disappeared with Defect B.
+**Status at the end of Stage 4 (2026-08-26).** **O30 cut the space in half:
+the game issues the draw, so every hypothesis in which the *engine* decides to
+skip something is dead, and what survives has to be a fault in the D3D11→Metal
+translation.**
+
+- **H-D** — survives only in its second branch. "The engine skipped the draw" is
+  refuted (O30); "the draw was submitted and rendered nothing" is now the
+  project's position and needs a *Metal-side* instrument to go further.
+- **H-B1** — **demoted.** No instance found (O32), by a test that admits it could
+  only catch the blatant form; and it is a D3D11-side explanation, which O30 has
+  made unlikely on principle. A Stage 5 fallback, not a lead.
+- Refuted: **H-A** (O10a), **H-E** (O13, and again directly by O31), **H-C**
+  (O8). Dissolved: **H-B2**.
+
+*Status at the end of Stage 0, kept for the record: live were H-B1 and H-D;
+refuted H-A, H-E, H-C; dissolved H-B2.*
 
 Refuted hypotheses are kept in full, not deleted. Knowing what was already ruled
 out — and by which experiment — is the point of this file.
@@ -1124,7 +1293,19 @@ screen**. O12 gives us a way to *count*: 8 events in 641 frames, in a fixed
 scene, at a pinned frame rate. Re-testing it as a measurement rather than an
 impression costs one launch. **E7.**
 
-### H-D — One defect: whole draws or their resources are intermittently missing
+### H-D — One defect: whole draws or their resources are intermittently missing — **HALVED by O30**
+
+> **Read this with its first branch crossed out.** H-D allowed two mechanisms:
+> the draw is never submitted, or the draw is submitted and produces nothing.
+> **O30 measured it: the draw is submitted.** 56 objects vanished while the draw
+> count fell 4 times, against a count that is identical frame-to-frame 93.3% of
+> the time. What remains of H-D is its second branch, and that is now the
+> project's working position:
+>
+> **The game submits the draw and DXMT renders nothing for it.**
+>
+> The next question is no longer "which side?" but "what does DXMT do with that
+> draw" — and that is Stage 1's `.gputrace`, which needs Xcode.
 
 *Raised by O9, 2026-08-25. Currently the best fit to what is actually on screen.*
 
@@ -1182,7 +1363,18 @@ to the frustum".
 *Test:* Stage 3 logs the full `D3D11_SAMPLER_DESC` so we learn which pass owns
 it. Stage 4 rewrites it.
 
-### H-B1 — Out-of-range constant-buffer reads — **the surviving specific hypothesis**
+### H-B1 — Out-of-range constant-buffer reads — **DEMOTED by O30 and un-instanced by O32**
+
+> Two things happened to H-B1 in Stage 4. **O32** reflected 541 shaders against
+> every constant buffer the game created and found **no declaration larger than
+> any buffer** — though by a test that could only have caught the blatant form
+> (it compares against the largest buffer, not the one bound at the draw, and 16
+> of the game's 20 constant buffers are 32 bytes). And **O30** made it unlikely
+> in principle: a constant-buffer over-read is a *D3D11-side* fault, and the
+> D3D11 side is submitting correctly.
+>
+> Kept as a Stage 5 fallback. Its prior art still names `TQ.exe`, which is why it
+> is not deleted.
 
 DXVK ships a per-app profile enabling `constantBufferRangeCheck` **for `TQ.exe`**
 (O6), which exists because a game binds constant buffers smaller than its
