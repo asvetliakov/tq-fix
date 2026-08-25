@@ -5,6 +5,26 @@ change nothing else.
 
 **Precondition:** Stage 2's gate met.
 
+## Two processes — read this first
+
+**O17: `TQ.exe` runs as two processes** (pid 40 then pid 1008 on the observed
+launch), and our DLL is loaded into **both**. This was discovered by Stage 2's
+own log and is invisible from outside.
+
+What it means here:
+
+- **A module-wait for `Direct3D11.dll` may never complete** in the first
+  process, because it may never load a renderer at all. That is not a broken
+  hook and must not be diagnosed as one. Bound the wait, log the giving-up, and
+  say which pid gave up.
+- **Every line this stage writes must carry its pid.** Two processes share one
+  log file. Without a pid the log is ambiguous, and an ambiguous log becomes a
+  wrong fact in `docs/rev/`.
+- **Shutdown reporting is unreliable in the first process.** It logged no
+  detach at all on the observed launch, so it was terminated rather than
+  exiting through the loader. Anything worth knowing must be logged when it
+  happens, not accumulated for a summary at exit.
+
 ## The hook point
 
 `Direct3D11.dll` imports `d3d11.dll` **statically** (`substrate.md`), so its

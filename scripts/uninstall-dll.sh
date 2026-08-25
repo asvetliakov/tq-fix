@@ -41,3 +41,7 @@ EOF
 sleep 2
 rm -f "$REG"
 echo "removed the TQ.exe winmm DLL override"
+# wineserver keeps the registry in memory and writes user.reg lazily, so
+# grepping that file immediately after this will still show the old value and
+# make a working uninstall look broken. Give it a few seconds before checking.
+echo "(user.reg is written lazily by wineserver - allow a few seconds before grepping it)"

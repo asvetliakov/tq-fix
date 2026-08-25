@@ -580,6 +580,61 @@ a launch on the idea without knowing.)*
 
 ---
 
+# Stage 2 — the proxy
+
+## O17 — The proxy works, and **`TQ.exe` runs as two processes**
+
+*Established by the proxy's own log on the first real game launch, 2026-08-25.*
+
+```
+23:13:10  tqflicker afaf188 - Stage 2, proxy only. No patches installed.
+23:13:10  host:     TQ.exe  (pid 40)
+23:13:10  winmm:    186 of 186 exports forwarded to C:\windows\system32\winmm.dll
+23:13:22  host:     TQ.exe  (pid 1008)
+23:13:22  winmm:    186 of 186 exports forwarded to C:\windows\system32\winmm.dll
+23:14:21  winmm (process exit): 186 of 186 exports forwarded, 0 call(s) to one we could not forward
+```
+
+**All 186 exports forwarded, in the real game, and nothing ever called an
+unresolved one.** The i386 stack-cleanup hazard documented on
+`tq_winmm_unresolved` was never reached, as designed.
+
+### The finding that matters for Stage 3
+
+**`TQ.exe` starts twice** — pid 40, then twelve seconds later pid 1008 — and our
+DLL is loaded into **both**. This was not known before; it is invisible from
+outside, and the DXMT log gives no pid.
+
+It explains a detail of the trace log in O16 that was recorded as unexplained:
+two `Maximum supported feature level` blocks, the second selecting
+`D3D_FEATURE_LEVEL_10_0` and immediately destroying its command queue. That is
+**two different processes**, not one process probing itself.
+
+**Consequences for Stage 3, which must be designed around this:**
+
+- Hooking `D3D11CreateDevice` will fire in **whichever process reaches it**. The
+  first process may never load `Direct3D11.dll` at all, so a module-wait there
+  waits forever — which would look exactly like a hook that does not work.
+- **Every log line must carry its pid.** The lines above are only
+  interpretable because `host:` prints one; a per-frame draw count from Stage 4
+  with two processes interleaved into one file and no pid would be worse than no
+  log at all.
+- The first process **logged no detach**. Only one `process exit` line appears,
+  from the second. So pid 40 was terminated rather than exiting through the
+  loader, and **anything Stage 3 or 4 wants to report at shutdown cannot be
+  relied on in that process.**
+
+### Also confirmed
+
+- **`%TEMP%` is `C:\users\crossover\AppData\Local\Temp`**, not
+  `users\crossover\Temp`. Stage 2 printed the latter in an install message and
+  briefly looked in the wrong place.
+- **`GetSystemDirectoryW` returns `C:\windows\system32` and the file actually
+  loaded is `syswow64`'s**, via WOW64 redirection — which is why asking is right
+  and hard-coding either path would be wrong.
+
+---
+
 ## Hypotheses — not yet proven
 
 **Status at the end of Stage 0.** Live: **H-B1** (specific, testable, has prior

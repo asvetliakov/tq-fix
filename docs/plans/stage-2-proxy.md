@@ -69,4 +69,60 @@ not `Documents`.
 
 ## Outcome
 
-*(fill in at the end of the stage)*
+**Complete, 2026-08-25.** The proxy builds, matches the real winmm export for
+export, passes an off-game self-test, and forwarded all 186 exports inside the
+running game with **zero** calls to an unresolved slot.
+
+### Risk 2 is closed, and not the way the plan expected
+
+The plan warned about `_Foo@N` stdcall decoration and told us to use
+`--kill-at`. **None of that was needed.** Windows' own 32-bit winmm exports
+**186 plain names — none with `@`, none with a leading `_`** — so the `.def`
+lists plain names and the link needs no decoration handling at all. Settled by
+reading the real DLL's export table, which is what the plan said to do; the
+reasoning about stdcall would have led somewhere else. The generator now
+**refuses to run** if it ever sees a decorated name, so the assumption is
+checked rather than remembered.
+
+### What genuinely differed from the 64-bit sibling
+
+- **`jmp *slot(%rip)` does not exist on i386.** RIP-relative addressing is
+  x86-64 only, so the stub is an absolute indirect jump (`ff 25`), the slots are
+  `.long` not `.quad`, and the table is `.p2align 2`. Verified by disassembling
+  the result: **186 stubs, 186 distinct slots, contiguous with no gaps and no
+  repeats**, every one initialised to the fallback. That check exists because
+  the sibling's own comment warns that an arithmetic slip in a generator
+  emitting 186 of them is a jump into the middle of a pointer.
+- **Assembler symbols carry a leading underscore** on i386 MinGW.
+- **The i386 winmm is in `syswow64`.** This bottle is ARM64, so
+  `system32\winmm.dll` is a **PE32+ Aarch64** binary; generating against it
+  would have built cleanly and failed at load with nothing in the log. The
+  generator refuses a non-i386 input. The DLL itself asks
+  `GetSystemDirectoryW`, which under WOW64 answers correctly anywhere — and the
+  log confirms the redirect: it reports `system32` while the file loaded is
+  `syswow64`'s.
+- **An unresolved slot is a real hazard here and is not one next door.** These
+  are `__stdcall`: the *callee* cleans the stack, and the byte count differs per
+  export, so one generic fallback (which compiles to a bare `ret`) would corrupt
+  the stack. There is no general fix — export tables carry no argument counts —
+  so it is made unreachable by construction and reported with `!!` at attach.
+  Documented at length on `tq_winmm_unresolved`.
+
+### What the stage found out about the game — see O17
+
+**`TQ.exe` runs as two processes**, and we are loaded into both. Stage 3's plan
+has been amended: bound the module wait, stamp every line with a pid, and do not
+rely on shutdown reporting in the first process, which was terminated rather
+than exiting through the loader.
+
+### Small things, recorded so they are not rediscovered
+
+- `%TEMP%` is `C:\users\crossover\AppData\Local\Temp`, not
+  `users\crossover\Temp`. The install script printed the wrong one once.
+- **`wineserver` writes `user.reg` lazily.** Grepping it immediately after
+  uninstall still shows the old override and makes a working uninstall look
+  broken. Wait a few seconds.
+- Wine prefers its builtin winmm, so the DLL override is required — without it
+  the symptom is *nothing at all*: the game runs fine and no log appears. The
+  override is scoped to `TQ.exe` under `AppDefaults`, not bottle-wide, which
+  would also have applied to Steam.

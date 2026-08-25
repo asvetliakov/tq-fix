@@ -8,16 +8,21 @@
 > (sampler border colour) and H-E (`Map` DO_NOT_WAIT) are both **refuted**, and
 > there is no configuration fix left.
 >
-> **Stage 1 (Metal capture) is deferred — there is no Xcode on this machine and a
-> `.gputrace` has no viewer.** We are at **Stage 2**, the 32-bit `winmm` proxy —
-> `docs/plans/stage-2-proxy.md` — on the way to **Stage 4**, which answers the one
-> question everything else depends on: **did the game issue the missing draw?**
-> Stage 4 answers it on the D3D11 side, which is the side that matters.
+> **Stage 1 (Metal capture) is deferred — there is no Xcode and a `.gputrace` has
+> no viewer.** **Stage 2 is done**: the `winmm` proxy is inside `TQ.exe`,
+> forwarding all 186 exports with zero unresolved calls. We are at **Stage 3**,
+> reaching the D3D11 device — `docs/plans/stage-3-device.md` — on the way to
+> **Stage 4**, which answers the one question everything else depends on:
+> **did the game issue the missing draw?**
 >
-> **`npm run doctor` is broken** — `scripts/doctor.sh` does not exist, and
-> `scripts/`, `src/` and `tools/` are empty but for `.gitkeep`. Stage 2 builds
-> that scaffolding. The 32-bit cross-compiler is present and working:
-> `i686-w64-mingw32-g++` (GCC 16.2.0).
+> **Read O17 before writing Stage 3.** `TQ.exe` runs as **two processes** and our
+> DLL loads into both, so: bound the wait for `Direct3D11.dll` (one process may
+> never load it, which looks exactly like a broken hook), **stamp every log line
+> with a pid**, and do not rely on shutdown reporting in the first process — it
+> was terminated rather than exiting through the loader.
+>
+> `npm run doctor` is green. `build`, `selftest`, `install-dll`,
+> `uninstall-dll` and `log` all work; the proxy is currently **installed**.
 >
 > Before measuring anything, set up the instrument from O12: cap the frame rate
 > to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
@@ -136,14 +141,13 @@ better; with Xcode required it is neither.
 the draw" — at which point the fault is on the Metal side and this becomes the
 only way to see it.
 
-### ☐ Stage 2 — Get inside the process
+### ☑ Stage 2 — Get inside the process
 
-**Plan:** `docs/plans/stage-2-proxy.md`
-A 32-bit `winmm.dll` proxy that forwards everything and writes one line to a log.
-Adapted from `../grimdawn-trash/scripts/gen-winmm-proxy.sh`, with stdcall
-decoration handled.
-**Gate:** the game launches, plays normally, and our log file exists with our
-line in it. Plus an off-game self-test that loads the DLL and checks forwarding.
+**Plan:** `docs/plans/stage-2-proxy.md` — **complete, 2026-08-25.**
+186 exports forwarded in the running game, zero calls to an unresolved slot.
+Off-game self-test passes; uninstall restores the directory. Produced **O17**.
+**Gate met.** `npm run build` / `selftest` / `install-dll` / `uninstall-dll` /
+`log` all work.
 
 ### ☐ Stage 3 — Reach the device
 
@@ -190,7 +194,7 @@ the note that DXVK ships a per-app profile for this exact executable.
 | # | Risk | State | Note |
 |---|------|-------|------|
 | 1 | The whole project is unnecessary because `/dx9` works | **OPEN — descoped** | **Never tested.** The reporter requires the DX11 renderer to work, so `/dx9` is not an acceptable outcome (D1). Still the cheapest experiment in the repo if the DX11 route ever proves impossible |
-| 2 | 32-bit stdcall decoration breaks the winmm proxy | **OPEN** | Deferred to Stage 2. The sibling repo is 64-bit; its `.def` and stub generation do not transfer unexamined |
+| 2 | 32-bit stdcall decoration breaks the winmm proxy | **CLOSED** | Not a problem, and not for the expected reason: Windows' 32-bit winmm exports **186 plain names**, none decorated, so no `--kill-at` and no `@N` handling was needed. What *did* differ was the stub form — i386 has no `jmp *slot(%rip)` — and the DLL's location: on this ARM64 bottle the i386 winmm is in **syswow64**, `system32`'s being Aarch64. The generator now refuses a decorated name or a non-i386 input |
 | 3 | DXMT hands out different vtables per interface version | **OPEN** | Patch what `D3D11CreateDevice` returned; `QueryInterface` for `ID3D11Device1` may yield a different object. Verify before assuming one vtable |
 | 4 | Patching a vtable a thread is already inside | **OPEN** | Hook at device creation, before the render thread is running. Never patch mid-frame |
 | 5 | H-A is wrong and the border colour is a red herring | **CLOSED — the risk happened** | **O10a refuted H-A.** The flicker does not move when shadow-map resolution moves the frustum boundary. The shadows-off evidence was correlational and was labelled as such; it was correlational. O2's warning survives as bug-report evidence only |

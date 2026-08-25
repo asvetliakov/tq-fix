@@ -49,5 +49,8 @@ echo "installed:"
 echo "  $GAME/winmm.dll"
 echo "  HKCU\\Software\\Wine\\AppDefaults\\TQ.exe\\DllOverrides  winmm = native,builtin"
 echo
-echo "the log will be at %TEMP%\\tqflicker.log inside the bottle:"
-echo "  $BOTTLE/drive_c/users/crossover/Temp/tqflicker.log"
+echo "the log will be at %TEMP%\\tqflicker.log inside the bottle, which is:"
+echo "  $BOTTLE/drive_c/users/crossover/AppData/Local/Temp/tqflicker.log"
+echo "(not users/crossover/Temp - that path does not exist here)"
+echo
+echo "tail it with:  npm run log"
