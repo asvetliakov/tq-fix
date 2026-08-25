@@ -60,6 +60,9 @@ else
   ok "no winmm.dll in the game directory (clean)"
 fi
 
+[ -x node_modules/.bin/tsx ] && ok "node_modules present (npm run log / frames / typecheck)" \
+                              || note "no node_modules - npm install, or npm run log/frames/typecheck will not run"
+
 echo "measurement  (docs/rev/observed.md O12 - the instrument)"
 command -v ffmpeg >/dev/null && ok "ffmpeg $(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')" \
                              || note "ffmpeg absent - needed to count frames in a recording"
@@ -72,6 +75,14 @@ if [ -f "$GAME/dxmt.conf" ]; then
 else
   note "no dxmt.conf - fine; add one to cap the frame rate for measuring"
 fi
+
+if [ -x cache/venv/bin/python ] && cache/venv/bin/python -c 'import numpy' 2>/dev/null; then
+  ok "cache/venv has numpy (tools/recording.py)"
+else
+  note "no cache/venv with numpy - python3 -m venv cache/venv && cache/venv/bin/pip install numpy  (tools/recording.py needs it)"
+fi
+G_FRAMES="$BOTTLE/drive_c/users/crossover/AppData/Local/Temp/tqflicker-frames.log"
+[ -f "$G_FRAMES" ] && note "a frames table exists from the last run - npm run keep-log -- <label> before launching again (Risk 16)"
 
 echo "optional"
 if [ -d /Applications/Xcode.app ]; then

@@ -11,6 +11,14 @@
     "build": "bash scripts/build.sh",
     "selftest": "bash scripts/selftest-offgame.sh",
     "install-dll": "bash scripts/install-dll.sh",
-    "uninstall-dll": "bash scripts/uninstall-dll.sh"
+    "uninstall-dll": "bash scripts/uninstall-dll.sh",
+    "frames": "tsx tools/frames.ts",
+    "keep-log": "bash scripts/keep-log.sh",
+    "recording": "python3 tools/recording.py"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "tsx": "^4",
+    "typescript": "^5"
   }
 }

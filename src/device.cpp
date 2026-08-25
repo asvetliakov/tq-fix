@@ -3,6 +3,7 @@
 #include <d3d11_1.h>
 #include <stdio.h>
 
+#include "frames.h"
 #include "log.h"
 #include "modules.h"
 #include "patch.h"
@@ -196,6 +197,14 @@ void onCreated(const char* which, UINT flags, D3D_DRIVER_TYPE driver, UINT sdk,
         g_context      = ctx;
         g_swapChain    = sc;
         g_featureLevel = got;
+
+        // Stage 4. Now, on the game's thread, before the game has the device:
+        // no render thread exists yet, so nothing can be inside a slot while it
+        // is rewritten (Risk 4). A device without a swapchain cannot give a
+        // frame counter, so `D3D11CreateDevice` callers (there are none, O19)
+        // are logged and left alone.
+        if (sc) frames::install(dev, ctx, sc);
+        else    tqlog("frames:   no swapchain from this creation - no Present to count; not patching");
     }
 
     if (owned) owned->Release();
@@ -285,13 +294,14 @@ bool importsSnapped(void** slot) {
 
 /** Hook one entry point, if `Direct3D11.dll` imports it. Returns true if hooked. */
 template <typename T>
-bool hookOne(HMODULE d3d, const char* name, void* replacement, T* realOut, HANDLE cancel) {
+bool hookOne(HMODULE d3d, const char* hostName, const char* name, void* replacement, T* realOut,
+             HANDLE cancel) {
     void** slot = patch::iatSlot(d3d, "d3d11.dll", name);
     if (!slot) {
         // Not an error, and worth a line saying so: Direct3D11.dll imports
         // exactly one of the two (checked with objdump, and confirmed here at
         // runtime). A silent absence would read as a failed patch.
-        tqlog("d3d11:    Direct3D11.dll does not import d3d11.dll!%s - nothing to hook", name);
+        tqlog("d3d11:    %s does not import d3d11.dll!%s - nothing to hook", hostName, name);
         return false;
     }
 
@@ -303,7 +313,7 @@ bool hookOne(HMODULE d3d, const char* name, void* replacement, T* realOut, HANDL
         return false;
     }
 
-    void* original = patch::iat(d3d, "Direct3D11.dll", "d3d11.dll", name, replacement);
+    void* original = patch::iat(d3d, hostName, "d3d11.dll", name, replacement);
     if (!original) return false;
     *realOut = (T)original;
 
@@ -330,9 +340,19 @@ bool install(HANDLE cancel) {
     // short enough to be over before anyone starts diagnosing.
     const DWORD kTimeoutMs = 180000;
 
+    // The module whose import of d3d11.dll is hooked. The game's renderer,
+    // unless the off-game self-test says otherwise: it names its own exe here
+    // so the same hook, the same vtable patches and the same DXMT are exercised
+    // with no game running (scripts/selftest-offgame.sh).
+    wchar_t host[64] = L"Direct3D11.dll";
+    DWORD hn = GetEnvironmentVariableW(L"TQFLICKER_D3D_HOST", host, 64);
+    if (hn == 0 || hn >= 64) lstrcpyW(host, L"Direct3D11.dll");
+    else tqlog("d3d11:    TQFLICKER_D3D_HOST=%S - hooking that module's d3d11 imports instead of"
+               " Direct3D11.dll's (self-test)", host);
+
     DWORD waited = 0;
     bool cancelled = false;
-    HMODULE d3d = modules::waitFor(L"Direct3D11.dll", kTimeoutMs, cancel, &waited, &cancelled);
+    HMODULE d3d = modules::waitFor(host, kTimeoutMs, cancel, &waited, &cancelled);
     if (!d3d) {
         if (cancelled) {
             tqlog("d3d11:    stopped waiting for Direct3D11.dll after %ums - we are being"
@@ -345,12 +365,15 @@ bool install(HANDLE cancel) {
         modules::logLoaded("gave up waiting for Direct3D11.dll");
         return false;
     }
-    tqlog("d3d11:    Direct3D11.dll at %p after %ums", (void*)d3d, (unsigned)waited);
+    tqlog("d3d11:    %S at %p after %ums", host, (void*)d3d, (unsigned)waited);
 
-    if (hookOne(d3d, "D3D11CreateDeviceAndSwapChain",
+    char hostA[64];
+    for (int i = 0; i < 64; i++) { hostA[i] = (char)host[i]; if (!host[i]) break; }
+    hostA[63] = 0;
+    if (hookOne(d3d, hostA, "D3D11CreateDeviceAndSwapChain",
                 (void*)&hookCreateDeviceAndSwapChain, &g_realCreateAndSwapChain, cancel))
         g_hooked++;
-    if (hookOne(d3d, "D3D11CreateDevice", (void*)&hookCreateDevice, &g_realCreate, cancel))
+    if (hookOne(d3d, hostA, "D3D11CreateDevice", (void*)&hookCreateDevice, &g_realCreate, cancel))
         g_hooked++;
 
     if (!g_hooked) {

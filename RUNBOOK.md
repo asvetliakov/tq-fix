@@ -2,45 +2,41 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 3 is done.** We
-> hold the device — `ID3D11Device*`, `ID3D11DeviceContext*` and the swapchain,
-> taken by an IAT data write on `Direct3D11.dll`'s one import of
-> `D3D11CreateDeviceAndSwapChain`, feature level **11_0** — and the reporter has
-> played the game with the hook installed: gameplay reached, exit clean, hook
-> called exactly once (O27).
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is built,
+> self-tested and installed; its gate needs one play session and is not yet
+> met.** The DLL now patches fourteen vtable slots at device creation —
+> `Present`, all seven `Draw*`, `Map`, `CreateBuffer`, both shader creators and
+> `CreateSamplerState` — and the off-game self-test drove all of it through the
+> real 32-bit DXMT before the game was launched once (O28). `ID3D11DeviceContext1`
+> is the same object and vtable as the context (Risk 3 now closed on both).
 >
-> **Risk 3 is closed** (O20): `ID3D11Device1` is the **same object with the same
-> vtable**, so Stage 4 can patch one vtable. It has **not** been asked of
-> `ID3D11DeviceContext1` — ask before patching the context.
+> **Do the measurement run first**, exactly as `docs/plans/stage-4-observe-draws.md`
+> § "The measurement run — protocol" says: cap is **armed** in `dxmt.conf`
+> (`npm run doctor` says so), launch **from the Steam UI** (O24), shrine, stand
+> still, **screen-record 60s+**, quit normally, then **`npm run keep-log --
+> stage4-run1` before anything else** — the per-frame table
+> (`%TEMP%\tqflicker-frames.log`) is truncated on the next device creation.
+> Then `npm run frames`, and `cache/venv/bin/python tools/recording.py
+> cache/captures/*<time>*.mov cache/logs/stage4-run1-*-frames.log` (glob the
+> name: it has a U+202F before `PM`). It prints, per bad frame, the draw count
+> against its neighbours — **that is the answer to "did the game issue the
+> draw?"**, and it goes in `observed.md` either way.
 >
-> We are at **Stage 4**, `docs/plans/stage-4-observe-draws.md`, which answers the
-> one question everything depends on: **did the game issue the missing draw?**
-> Hook `Present` for a frame counter and all four `Draw*` for a per-frame count,
-> align the log against a 10fps recording, compare the bad frame's count with its
-> neighbours.
+> **Also read on the way:** `empty` (a draw issued with zero indices is a third
+> answer), `maps_busy` (non-zero on a bad frame reopens H-E), and any `!!
+> reflect:` line (a shader declaring a larger cbuffer than the game ever
+> created is H-B1's first real instance).
 >
-> **Four things Stage 3 learned that Stage 4 must not rediscover:**
-> 1. **State the launch route in every measurement** (O24). It changes the process
->    topology, what environment the renderer inherits, and whether a clean exit is
->    even possible. A 7-second "crash" turned out to be the direct-launch stub.
-> 2. **Per-run variables reach the renderer only via Steam** (O18, O24): start
->    `steam.exe` itself through `cxstart` with the variable set. `cxstart` on
->    `TQ.exe` does **not** reach the process that renders.
-> 3. **Never hard-kill Steam or `wineserver`** (Risk 15, O26). It broke character
->    select for the reporter. Quit Steam through its own menu.
-> 4. **Only the process-exit detach path ever runs** (O23), so log facts when they
->    happen. A per-frame table saved for a summary at exit is lost.
+> **Standing rules from Stage 3** (O24, O18, Risk 15, O23): state the launch
+> route; per-run variables reach the renderer only via a Steam started under
+> `cxstart`; never hard-kill Steam or `wineserver`; only the process-exit
+> detach runs, so nothing is held for exit. **After the run, comment the cap
+> back out** in `dxmt.conf` so the reporter's normal play is not at 10fps.
 >
-> `npm run doctor` is green. `build`, `selftest`, `install-dll`, `uninstall-dll`
-> work; the proxy is **installed** and the hook is active. Every log line carries
-> a **pid**; `TQFLICKER_HOOK=0` gives a hook-free control from the same binary.
-> *(`npm run typecheck` and `npm run log` need an `npm install` first — there is
-> no `node_modules` in this checkout.)*
->
-> Before measuring anything, set up the instrument from O12: cap the frame rate
-> to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
-> 1:1 per-frame trace of the renderer, and it is the only reason Stage 0
-> produced numbers instead of impressions.
+> `npm install` has been done; `build`, `selftest`, `typecheck`, `install-dll`,
+> `uninstall-dll`, `log`, `frames`, `keep-log` all work. numpy is in the old
+> session venv only — `python3 -m venv cache/venv && cache/venv/bin/pip install
+> numpy` if `cache/venv` is missing.
 
 ---
 
@@ -180,11 +176,14 @@ thread, a pid on every log line, `TQFLICKER_HOOK=0` and a startup heartbeat.
 
 ### ☐ Stage 4 — Count the draws, and find the one that goes missing
 
-**Plan:** `docs/plans/stage-4-observe-draws.md`
-*Replaces the original Stage 3, which was built on the refuted H-A.* Hook
-`Present` for a frame counter and all four `Draw*` entry points for a per-frame
-count; align the log against a 10fps recording and compare the bad frame's draw
-count with its neighbours. Log constant-buffer widths for H-B1 while in there.
+**Plan:** `docs/plans/stage-4-observe-draws.md` — **built 2026-08-26, gate not
+yet met.** `src/frames.{h,cpp}` patches `Present`, the seven `Draw*`, `Map`,
+`CreateBuffer`, shader creation (+`D3DReflect`) and `CreateSamplerState` at
+device creation; slots are generated from the MinGW headers
+(`scripts/gen-slots.sh`); a per-frame table goes to `%TEMP%\tqflicker-frames.log`.
+The off-game self-test now creates a real DXMT device and fires the hooks (O28);
+the Stage 0 recording detector is committed as `tools/recording.py` and
+reproduces O12/O14 (O29). **Needs the play session** in the plan's protocol.
 **Gate:** an explicit, recorded answer to **did the game issue the draw?**
 
 ### ☐ Stage 5 — Fix it
@@ -214,11 +213,12 @@ the note that DXVK ships a per-app profile for this exact executable.
 |---|------|-------|------|
 | 1 | The whole project is unnecessary because `/dx9` works | **OPEN — descoped** | **Never tested.** The reporter requires the DX11 renderer to work, so `/dx9` is not an acceptable outcome (D1). Still the cheapest experiment in the repo if the DX11 route ever proves impossible |
 | 2 | 32-bit stdcall decoration breaks the winmm proxy | **CLOSED** | Not a problem, and not for the expected reason: Windows' 32-bit winmm exports **186 plain names**, none decorated, so no `--kill-at` and no `@N` handling was needed. What *did* differ was the stub form — i386 has no `jmp *slot(%rip)` — and the DLL's location: on this ARM64 bottle the i386 winmm is in **syswow64**, `system32`'s being Aarch64. The generator now refuses a decorated name or a non-i386 input |
-| 3 | DXMT hands out different vtables per interface version | **CLOSED** | **O20 asked it in the running game and the answer is the convenient one:** `QueryInterface` for `ID3D11Device1` returns the *same pointer* with the *same vtable* as the `ID3D11Device` the game holds. Stage 4 can patch one vtable. Not yet asked of `ID3D11DeviceContext1` — ask before patching the context |
-| 4 | Patching a vtable a thread is already inside | **OPEN** | Hook at device creation, before the render thread is running. Never patch mid-frame |
+| 3 | DXMT hands out different vtables per interface version | **CLOSED** | **O20** for the device, **O28** for the context: `ID3D11Device1` and `ID3D11DeviceContext1` are each the *same object with the same vtable* as the base interface. One vtable each; Stage 4 patches once. `frames.cpp` still asks at install and would say `!!` if that ever changed |
+| 4 | Patching a vtable a thread is already inside | **OPEN — mitigated** | Done as designed: `frames::install` runs inside the `D3D11CreateDeviceAndSwapChain` hook, on the game's thread, before the game is handed the device. Stays open until a play session confirms it (Stage 4 gate) |
 | 5 | H-A is wrong and the border colour is a red herring | **CLOSED — the risk happened** | **O10a refuted H-A.** The flicker does not move when shadow-map resolution moves the frustum boundary. The shadows-off evidence was correlational and was labelled as such; it was correlational. O2's warning survives as bug-report evidence only |
 | 6 | The defect is unfixable from outside the game | **OPEN** | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
-| 7 | A fix that crashes is worse than the flicker | **OPEN — and it may have just happened** | Standing, and no longer hypothetical. The first hook this project installed was followed by a **seven-second** render session ending in termination (O22). Unattributed — no control run exists — but it is why Stage 3 is not ticked and why `TQFLICKER_HOOK=0` was built. Attribute it before adding a single further patch |
+| 7 | A fix that crashes is worse than the flicker | **OPEN** | O22's scare was the launch route (O24), not the hook. Stage 4 adds fourteen vtable patches, and the rule applied was: **prove every one of them through the real DXMT off-game first** — the self-test now does (O28). `TQFLICKER_HOOK=0` remains the one-launch control if the play session misbehaves |
+| 16 | The per-frame table is truncated by the next launch | **OPEN — newly found** | `tqflicker-frames.log` is rewritten at every device creation, so the run that just measured is one launch from gone. `npm run keep-log -- label` first, always. Same family as Risk 12 |
 | 13 | The renderer does not inherit our environment | **OPEN — newly found** | **O18.** The `TQ.exe` we launch is a Steam handoff stub; the renderer is Steam's child. `cxstart` env injection (O15) reaches the stub and **not** the process that renders. Every `DXMT_*`, `FEX_*` or `TQFLICKER_*` variable an experiment depends on must go where Steam can see it, or the experiment silently measures the baseline |
 | 14 | Steam wedges and stops launching the game | **OPEN — newly found** | Happened at the end of Stage 3: after one abrupt game exit, Steam wrote nothing further to `console_log.txt` and ignored three launch requests. **Check `content_log.txt` for an `App Running` line before believing a launch happened at all.** Recovering from it is Risk 15, and the recovery was worse than the wedge |
 | 15 | Breaking the player's saves while recovering the bottle | **OPEN — the risk happened** | **O26.** A hard `wineserver -k` plus `kill -9` on Steam's helpers was used to unwedge Risk 14, and character create/select stopped working immediately afterwards — with our DLL installed, with the hook off, and with the DLL removed entirely. TQ AE's saves are Steam Cloud synced. **Quit Steam through its own menu; never kill it.** This is the same family as Risk 12 (deleting evidence while tidying up) and it cost more |

@@ -982,6 +982,93 @@ Stage 4 may proceed.
 
 ---
 
+# Stage 4 — counting the draws
+
+## O28 — Fourteen vtable slots patched through the real DXMT, off-game, and every hook fires
+
+*Established 2026-08-26 by the off-game self-test, which now creates a real
+D3D11 device through the bottle's 32-bit DXMT and drives it through the patched
+slots. No game launch spent.*
+
+`selftest.exe` imports `d3d11.dll` statically; with `TQFLICKER_D3D_HOST=selftest.exe`
+the watcher hooks *its* import of `D3D11CreateDeviceAndSwapChain` instead of
+`Direct3D11.dll`'s, so the device it makes goes through exactly the code path
+the game's will. Then:
+
+```
+frames:   patching vtables (... swapchain has 18 methods, context 115, device 43)
+  VT IDXGISwapChain::Present      slot   8 at 79CBC828 -> was 79B38820, now 799951D0
+  ID3D11DeviceContext1 00BAF188 (vtable 79CC59E4) - the SAME object as ID3D11DeviceContext
+  VT ID3D11DeviceContext          slot  12 ... slot 13, 20, 21, 38, 39, 40, 58, 14
+  VT ID3D11Device                 slot   3 ... slot 12, 15, 23
+frames:   14 vtable slot(s) patched. Present=ok Draw*=ok Map=ok CreateBuffer=ok shaders=ok/ok sampler=ok
+cbuffer:  #1 00BB8378  256 bytes, DYNAMIC, cpu 0x10000, misc 0x0, frame 0
+sampler:  #1 00BBC908  filter 0x94 (comparison)  addr BORDER/BORDER/BORDER  border (-3.40282e+38, 0, 0, 0)  cmp 4 ...
+frames:   first Present (sync interval 1, flags 0x0) - the frame counter is running; ...
+frames (process exit): 5 frame(s), 0 draw(s) ... Table: C:\users\crossover\AppData\Local\Temp\tqflicker-frames.log
+```
+
+and the table has five rows, one per `Present`, each with `maps 1`.
+
+**Four facts from one run:**
+
+1. **DXMT's vtable pages take a `VirtualProtect` data write** — swapchain,
+   context and device alike — and the hooked slots are the ones called: every
+   hook fired exactly as many times as the test called it. The primitive proven
+   on our own page (Stage 3) is now proven on DXMT's.
+2. **Risk 3 is closed for the context too.** `QueryInterface` for
+   `ID3D11DeviceContext1` returns the *same pointer with the same vtable*, as
+   O20 found for the device. One vtable each; nothing to patch twice.
+3. **The `-FLT_MAX` sampler reproduces, and DXMT accepts it** — `S_OK` with a
+   valid object — so O2's warning is a substitution, not a refusal. The hook
+   logs the full description, which is what the Stage 6 report needs.
+4. **The vtable addresses differ from the game's** (`79CB5E84` here against
+   `76465E84` in O25) because `d3d11.dll` is at a different base in a
+   different process. O25's "stable across runs" is per-executable; do not
+   compare a self-test address with a game address.
+
+**Not proven here:** a `Draw*` call. The test has no pipeline, and a draw with
+nothing bound would test DXMT's tolerance rather than our hook. The seven draw
+slots are the same primitive on the same vtable as `Map`, which did fire.
+
+## O29 — The Stage 0 detector, committed at last, reproduces O12 and O14 from the same recording
+
+*Established 2026-08-26 by running `tools/recording.py` on the E6 recording
+(`cache/captures/*10.25.03*.mov`). No launch spent.*
+
+The Stage 0 analysis lived in a session scratchpad and was one `rm` from gone
+(Risk 12, again). It is now `tools/recording.py`, and on the E6 file it finds:
+
+- the **same eight** beam dropouts — recording frames **51, 73, 110, 156, 266,
+  275, 281, 346**, each `DARK`, 55–62 blocks, peak 128–177 gray levels, all in
+  x 192–272 y 0–192 (O12: "8 events, x 192–256, y 0–192");
+- **9.5% of frames** with at least one confirmed one-frame anomaly (O14:
+  "roughly 9%"), on the same fixed locations — the NPC shadow at (320–352,
+  224–256), the prop shadow at (448–464, 128–144), the two NPC shadows at
+  (448–512, 384–416).
+
+Same recording, same numbers, independent code path (ffmpeg → raw gray, no PNG,
+no PIL). The instrument is reproducible and it is in the repo.
+
+**Two things it cost to learn, recorded so the next run does not pay again:**
+
+1. **`ffmpeg` duplicates frames unless told not to.** Piping to rawvideo
+   defaults to a constant frame rate, which turned 674 recorded frames into
+   more, broke the "exactly one frame" test, and found **2** anomalies instead
+   of 61. `-fps_mode passthrough` is mandatory; the tool now checks the frame
+   count against `ffprobe`'s and says so if they differ.
+2. **The recording's 1:1 region ends before the file does.** From about frame
+   400 the intervals drop to 17–42ms — the recorder was catching up or the cap
+   had been lifted — and the tool marks anomalies there `(NOT 1:1 here -
+   ignore)` and excludes them from alignment. Stage 0 only checked where the
+   region *started*.
+
+*(And the filename: macOS puts a U+202F narrow no-break space before `PM`. A
+path typed with a normal space is "No such file or directory" with the sandbox
+on or off. Glob it.)*
+
+---
+
 ## Hypotheses — not yet proven
 
 **Status at the end of Stage 0.** Live: **H-B1** (specific, testable, has prior

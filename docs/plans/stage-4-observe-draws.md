@@ -170,6 +170,71 @@ let it grow.
 - Constant-buffer widths logged, with any reflection mismatch called out.
 - The game is unharmed, the flicker is unchanged, and exit is clean.
 
+## What was built (2026-08-26) — and proven off-game before any launch
+
+**`src/frames.{h,cpp}`** — fourteen vtable data-writes, installed inside the
+`D3D11CreateDeviceAndSwapChain` hook on the game's own thread, before the game
+has the device (Risk 4):
+
+| Object | Slots | What the hook does |
+|---|---|---|
+| `IDXGISwapChain` | `Present` (8) | frame counter; one row per frame in the table; summary every 600 frames |
+| `ID3D11DeviceContext` | `DrawIndexed` 12, `Draw` 13, `DrawIndexedInstanced` 20, `DrawInstanced` 21, `DrawAuto` 38, `*Indirect` 39/40, `ExecuteCommandList` 58 | per-frame counts by kind, vertex total, **empty draws** (count 0) |
+| `ID3D11DeviceContext` | `Map` (14) | per-frame Map count and how many returned `WAS_STILL_DRAWING` — H-E measured directly |
+| `ID3D11Device` | `CreateBuffer` 3 | every `BIND_CONSTANT_BUFFER`: width, usage, CPU access; width histogram at exit — **H-B1** |
+| `ID3D11Device` | `CreateVertexShader` 12, `CreatePixelShader` 15 | `D3DReflect` (D3DCOMPILER_43) declared cbuffer sizes per slot; `!!` line if one exceeds every width created so far |
+| `ID3D11Device` | `CreateSamplerState` 23 | the full `D3D11_SAMPLER_DESC`; every `ADDRESS_BORDER` one always logged — the O2 errand |
+
+**No slot index is typed by hand.** `scripts/gen-slots.sh` reads them off the
+MinGW `*Vtbl` structs at build time into `build/gen/slots.h`, and the install
+log prints the method counts (18/115/43) so a header mismatch would show.
+
+**The per-frame table** is a separate file, `%TEMP%\tqflicker-frames.log`,
+tab-separated, truncated at device creation, one row per `Present`:
+`time pid frame dt_ms sync draws DrawIndexed Draw DrawIndexedInstanced
+DrawInstanced other empty verts maps maps_busy new_buffers`. The main log keeps
+the one-off facts and a summary line every 600 frames (a minute at 10fps), so a
+run that dies still leaves numbers behind (O23).
+
+**The off-game self-test now creates a real DXMT device** (`TQFLICKER_D3D_HOST`
+tells the watcher to hook the test exe's own d3d11 import instead of
+`Direct3D11.dll`'s) and drives `Present`, `Map`, `CreateBuffer` and
+`CreateSamplerState` through the patched slots — **O28**. Everything above was
+proven through the 32-bit DXMT in this bottle before the game was launched once.
+
+**Tools:** `npm run frames` (the table: dt distribution, draws/frame, dip
+frames), `npm run recording -- REC.mov FRAMES.log` (the Stage 0 detector,
+finally committed, plus the alignment search), `npm run keep-log -- label`
+(copies both logs into `cache/logs` — Risk 12).
+
+## The measurement run — protocol
+
+1. `npm run doctor` must say the cap is **active** (`d3d11.preferredMaxFrameRate
+   = 10` in `dxmt.conf`) and the DLL installed. Both are set now.
+2. Launch **from the Steam UI** (O24). Get to the O9 shrine, stand still.
+3. Start a macOS screen recording; hold **60 seconds or more** at the shrine.
+   Stop the recording, then quit the game normally.
+4. `npm run keep-log -- stage4-run1` **before anything else**.
+5. `npm run frames` — confirm `dt` is ~100ms (1:1 with the recording), then
+   `npm run frames -- --dips`.
+6. Move the recording into `cache/captures/`, and run
+   `cache/venv/bin/python tools/recording.py cache/captures/*<time>*.mov
+   cache/logs/stage4-run1-*-frames.log` (glob the name: it contains a U+202F).
+   It prints the anomaly frames, the alignment offset, and for each anomaly the
+   draw count on that frame against its neighbours.
+7. Write the answer into `observed.md`, whichever way it goes.
+
+**Reading the result.** The recording's anomaly frames either land on draw-count
+dips (the game *skipped* a draw) or they do not (the game *issued* it and DXMT
+lost it). The tool prints the chance-coincidence rate next to the hit count so a
+weak match is not over-read. Also check `empty`: a draw *issued with zero
+indices* is a third answer, and it would look like "identical count" in a
+naive read. And `maps_busy`: any non-zero on a bad frame reopens H-E.
+
 ## Outcome
 
-*(fill in at the end of the stage)*
+**Built and self-tested 2026-08-26; the gate needs a play session and is not
+yet met.** The reporter has not run the Stage 4 build in the game. Everything
+that could be verified without the game has been (O28, O29); the DLL is
+installed, the cap is armed, and the protocol above is what the next session
+does first.

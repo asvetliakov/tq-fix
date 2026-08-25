@@ -1,13 +1,15 @@
-// Stage 3: get inside the process, forward everything, and reach the device.
+// Stage 4: get inside the process, reach the device, and count the draws.
 //
-// Still an observer. Nothing here changes an argument, a return value or a
-// vtable — the gate is that the game plays exactly as it did before, including
-// the flicker, unchanged. The one thing this stage adds over Stage 2 is a
-// thread, and the reason it needs one is O17.
+// Still an observer: every hook calls through with its arguments untouched and
+// returns what the real function returned. What changed since Stage 3 is that a
+// dozen vtable slots now point at src/frames.cpp, patched at device creation on
+// the game's own thread (Risk 4). The gate is unchanged - the game plays as it
+// did before, flicker included - plus a per-frame draw count in the log.
 
 #include <windows.h>
 
 #include "device.h"
+#include "frames.h"
 #include "log.h"
 #include "patch.h"
 #include "winmm_proxy.h"
@@ -116,6 +118,7 @@ DWORD WINAPI watcher(LPVOID) {
     // case, because the process is killed on the way out.
     WaitForSingleObject(g_wake, INFINITE);
     tq::device::report("watcher stopping");
+    tq::frames::report("watcher stopping");
     tqlog("watcher:  out");
     SetEvent(g_finished);        // the last touch of our code before ExitThread
     return 0;
@@ -144,8 +147,8 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
 
             tq::logOpen(self);
             tqlog("%s", "");
-            tqlog("tqflicker %s - Stage 3, reaching the device. No vtable patches installed.",
-                  TQFLICKER_BUILD);
+            tqlog("tqflicker %s - Stage 4, counting draws. Vtable patches: Present, Draw*, Map,"
+                  " CreateBuffer, shader and sampler creation - observe only.", TQFLICKER_BUILD);
             logHost();
             tq::winmm::resolve(self);
             tq::winmm::report("attach");
@@ -169,6 +172,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
             // to crash on quit, and a crash on quit looks exactly like our
             // patches having broken the game. So on process exit we do less.
             tq::device::report(reserved ? "process exit" : "detach");
+            tq::frames::report(reserved ? "process exit" : "detach");
             tq::winmm::report(reserved ? "process exit" : "detach");
 
             if (!reserved) {

@@ -18,6 +18,8 @@
  */
 #include <windows.h>
 #include <stdio.h>
+#include <float.h>
+#include <d3d11.h>
 
 static FILE* out;
 static int   fails;
@@ -87,6 +89,82 @@ int main(int argc, char** argv) {
     fprintf(out, "exports: %d checked, %d missing\n", n, missing);
     if (missing) fprintf(out, "first missing: %s\n", first);
     ck(missing == 0, "all exports resolve through our module");
+
+    /* Stage 4: the vtable patches, exercised through DXMT with no game.
+     *
+     * This exe imports d3d11.dll statically, and the DLL was told
+     * (TQFLICKER_D3D_HOST=selftest.exe) to hook THIS module's import of
+     * D3D11CreateDeviceAndSwapChain instead of Direct3D11.dll's. So the device
+     * created below goes through the same hook the game's does, gets the same
+     * vtable patches, and the calls after it land in the same hooks - under
+     * FEX, through the same 32-bit DXMT. What it cannot do is draw: there is
+     * no pipeline here, and a Draw with nothing bound would test DXMT's
+     * tolerance, not our hook. Present, CreateBuffer, Map, CreateSamplerState
+     * are enough to prove the mechanism on every one of its shapes
+     * (swapchain, context, device vtables). */
+    Sleep(600);   /* the watcher thread installs the IAT hook asynchronously */
+    {
+        WNDCLASSA wc = {0};
+        wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(NULL);
+        wc.lpszClassName = "tqflicker-selftest";
+        RegisterClassA(&wc);
+        HWND hwnd = CreateWindowA("tqflicker-selftest", "tqflicker self-test", WS_OVERLAPPEDWINDOW,
+                                  0, 0, 320, 240, NULL, NULL, wc.hInstance, NULL);
+        ck(hwnd != NULL, "a window for the swapchain");
+
+        DXGI_SWAP_CHAIN_DESC sd = {0};
+        sd.BufferCount = 1; sd.BufferDesc.Width = 320; sd.BufferDesc.Height = 240;
+        sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.OutputWindow = hwnd;
+        sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        D3D_FEATURE_LEVEL want = D3D_FEATURE_LEVEL_11_0, got = 0;
+        IDXGISwapChain* sc = NULL; ID3D11Device* dev = NULL; ID3D11DeviceContext* ctx = NULL;
+        HRESULT hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, &want, 1,
+                                                   D3D11_SDK_VERSION, &sd, &sc, &dev, &got, &ctx);
+        fprintf(out, "D3D11CreateDeviceAndSwapChain: hr 0x%08lx, feature level 0x%x\n",
+                (unsigned long)hr, (unsigned)got);
+        ck(SUCCEEDED(hr) && dev && ctx && sc, "a DXMT device, context and swapchain");
+        if (SUCCEEDED(hr)) {
+            /* a constant buffer, dynamic, then Map it a few times */
+            D3D11_BUFFER_DESC bd = {0};
+            bd.ByteWidth = 256; bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            ID3D11Buffer* cb = NULL;
+            hr = dev->lpVtbl->CreateBuffer(dev, &bd, NULL, &cb);
+            ck(SUCCEEDED(hr) && cb, "CreateBuffer(256-byte dynamic constant buffer) through the hook");
+
+            /* the sampler DXMT warns about (O2): border colour -FLT_MAX */
+            D3D11_SAMPLER_DESC sm = {0};
+            sm.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+            sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+            sm.BorderColor[0] = -FLT_MAX; sm.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+            sm.MaxLOD = D3D11_FLOAT32_MAX;
+            ID3D11SamplerState* ss = NULL;
+            hr = dev->lpVtbl->CreateSamplerState(dev, &sm, &ss);
+            ck(SUCCEEDED(hr) && ss, "CreateSamplerState(BORDER, -FLT_MAX) through the hook");
+
+            int presented = 0, mapped = 0;
+            for (int i = 0; i < 5; i++) {
+                if (cb) {
+                    D3D11_MAPPED_SUBRESOURCE m;
+                    if (SUCCEEDED(ctx->lpVtbl->Map(ctx, (ID3D11Resource*)cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+                        memset(m.pData, 0, 256);
+                        ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)cb, 0);
+                        mapped++;
+                    }
+                }
+                if (SUCCEEDED(sc->lpVtbl->Present(sc, 1, 0))) presented++;
+            }
+            fprintf(out, "presented %d, mapped %d\n", presented, mapped);
+            ck(presented == 5, "5 x Present through the hook");
+            ck(mapped == 5, "5 x Map through the hook");
+
+            if (ss) ss->lpVtbl->Release(ss);
+            if (cb) cb->lpVtbl->Release(cb);
+            ctx->lpVtbl->Release(ctx); sc->lpVtbl->Release(sc); dev->lpVtbl->Release(dev);
+        }
+        if (hwnd) DestroyWindow(hwnd);
+    }
 
     /* Does FreeLibrary actually unload us here?
      *

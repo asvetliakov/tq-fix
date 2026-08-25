@@ -18,12 +18,13 @@ BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 command -v "$CXX" >/dev/null || { echo "missing $CXX - run: npm run doctor" >&2; exit 1; }
 
 bash scripts/gen-winmm-proxy.sh build/gen "$REAL"
+bash scripts/gen-slots.sh build/gen
 
 mkdir -p build
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
   src/dllmain.cpp src/log.cpp src/winmm_proxy.cpp \
-  src/patch.cpp src/modules.cpp src/device.cpp \
+  src/patch.cpp src/modules.cpp src/device.cpp src/frames.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
   -DTQFLICKER_BUILD="\"$BUILD_ID\"" \

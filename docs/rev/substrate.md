@@ -125,6 +125,37 @@ documents it and a range would make catching a defective frame far cheaper.
 config keys — no `cxbottle.conf` edit, so no quitting CrossOver. Confirmed by
 DXMT itself: `TQ_dxgi.log` prints `info: Found config file: dxmt.conf` (O11a).
 
+## Vtable layout, as the DLL uses it
+
+Read off the MinGW `*Vtbl` structs by `scripts/gen-slots.sh` at build time into
+`build/gen/slots.h`; never typed by hand. Confirmed in the running DXMT by the
+off-game self-test (O28): the patched slots are the ones that fire.
+
+| Interface (methods) | Slot | Method |
+|---|---|---|
+| `IDXGISwapChain` (18) | 8 | `Present` |
+| `ID3D11DeviceContext` (115) | 12 / 13 / 20 / 21 | `DrawIndexed` / `Draw` / `DrawIndexedInstanced` / `DrawInstanced` |
+| | 38 / 39 / 40 | `DrawAuto` / `DrawIndexedInstancedIndirect` / `DrawInstancedIndirect` |
+| | 14 / 15 / 58 | `Map` / `Unmap` / `ExecuteCommandList` |
+| `ID3D11Device` (43) | 3 / 12 / 15 / 23 | `CreateBuffer` / `CreateVertexShader` / `CreatePixelShader` / `CreateSamplerState` |
+
+`ID3D11Device1` and `ID3D11DeviceContext1` are the same objects with the same
+vtables as their base interfaces under DXMT (O20, O28).
+
+`D3DReflect` is taken from the `D3DCOMPILER_43.dll` already in the process; its
+`IID_ID3D11ShaderReflection` is the compiler-43 one,
+`{0a233719-3960-4578-9d7c-203b8b1d9cc1}` (47's differs).
+
+## Our own files and switches
+
+| | |
+|---|---|
+| `%TEMP%\tqflicker.log` | the main log, appended forever, pid on every line |
+| `%TEMP%\tqflicker-frames.log` | the per-frame table, **truncated at device creation** — keep it with `npm run keep-log` before relaunching |
+| `TQFLICKER_HOOK=0` | install nothing (the control); reaches the renderer only via a Steam started under `cxstart` (O24) |
+| `TQFLICKER_D3D_HOST=<module>` | hook that module's `d3d11.dll` import instead of `Direct3D11.dll`'s — the off-game self-test |
+| `TQFLICKER_LOG=<path>` | log somewhere else — the self-test again |
+
 ## Bottle environment as configured
 
 ```ini

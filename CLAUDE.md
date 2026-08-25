@@ -64,7 +64,11 @@ CrossOver **Preview 27.0.0** (build 20260821), bottle **"New Bottle"**, on an
   `-static -static-libgcc -static-libstdc++`, and **no exception ever crosses
   back into the game**.
 - **The host-side tooling is TypeScript**, `"type": "module"`, strict, run with
-  `tsx`, consistent with the sibling repos.
+  `tsx`, consistent with the sibling repos. The one exception is
+  `tools/recording.py` — the frame-by-frame recording analysis is numpy work,
+  and it runs from `cache/venv` (`npm run doctor` says whether that exists).
+- **No vtable slot index is typed by hand.** `scripts/gen-slots.sh` reads them
+  off the MinGW headers at build time; the log prints which slot each build used.
 - **Never commit game-derived data.** Extracted archives, shader dumps and
   texture output regenerate into `cache/` and stay out of git. Game data is
   © THQ Nordic / Iron Lore.
