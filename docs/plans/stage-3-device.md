@@ -1,9 +1,9 @@
-# Stage 2 — Reach the device
+# Stage 3 — Reach the device
 
 **Goal:** hold a valid `ID3D11Device*` and `ID3D11DeviceContext*`, log them, and
 change nothing else.
 
-**Precondition:** Stage 1's gate met.
+**Precondition:** Stage 2's gate met.
 
 ## The hook point
 
@@ -34,9 +34,9 @@ to a hook that does not work.
 
 - **`QueryInterface` may hand back a different object.** DXMT may implement
   `ID3D11Device1` on a separate object with a separate vtable. Whatever we patch
-  in Stage 3 must be the vtable of the pointer the game is actually calling
+  in Stage 4 must be the vtable of the pointer the game is actually calling
   through. Log the result of `QueryInterface` for `ID3D11Device1` now, while it
-  is cheap, so Stage 3 knows what it is dealing with. This is Risk 3.
+  is cheap, so Stage 4 knows what it is dealing with. This is Risk 3.
 - **Do not hold a reference you do not release**, and do not `AddRef` casually —
   a device the game thinks it destroyed but we are keeping alive is a shutdown
   hang, and a hang at exit is hard to attribute.

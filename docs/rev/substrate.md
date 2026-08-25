@@ -61,8 +61,11 @@ the DX11 renderer:
 | `d3dmetal`  | Black screen; also not offered in the Preview's UI selector |
 | `wine`      | Black screen                    |
 
-**`/dx9` has never been tried, on any backend.** See
-`docs/plans/stage-0-free-experiments.md`.
+**`/dx9` has never been tried, on any backend** — and it is now **descoped**
+rather than pending. The requirement is that the DX11 renderer work, so falling
+back to D3D9 is not an acceptable outcome even if it renders perfectly (D1 in
+`observed.md`). It remains the cheapest unspent experiment in the repo should
+the DX11 route ever prove impossible.
 
 ## DXMT
 
@@ -87,14 +90,40 @@ DXMT_CAPTURE_EXECUTABLE    DXMT_CAPTURE_FRAME
 DXMT_METALFX_SPATIAL_SWAPCHAIN                        DXMT_ENABLE_NVEXT
 ```
 
-`DXMT_LOG_LEVEL` takes `trace|debug|info|warn|error|none`.
+`DXMT_LOG_LEVEL` takes `trace|debug|info|warn|error|none`. **`debug` prints no
+more than `info`** (O3) but **`trace` prints substantially more** (O16) — 526
+extra lines in a short session. Its entire vocabulary is five messages:
+`Start compiling 1 PSO`, `Compiled 1 PSO`, `staging map ready`, command-queue
+construct/destruct, and the init/warning lines. **There is no per-draw, per-frame
+or per-`Present` logging at any level**, so the trace log cannot be turned into a
+frame trace.
 **`DXMT_LOG_PATH` must name a directory that already exists** — DXMT silently
 writes nothing otherwise, which cost one launch to discover. It then writes
 `<exe>_d3d11.log` and `<exe>_dxgi.log` into it, fresh each launch.
 
 `DXMT_CAPTURE_EXECUTABLE` + `DXMT_CAPTURE_FRAME` (with `MTL_CAPTURE_ENABLED=1`)
 produce a Metal `.gputrace` openable in Xcode. **This is the only real graphics
-debugger available here** and it has not been used yet.
+debugger available here** and it has not been used yet — it is Stage 1.
+
+The implementation, from symbols in the shipped 32-bit `d3d11.dll`:
+
+```
+dxmt::CaptureState::shouldCaptureNextFrame()
+dxmt::CaptureState::scheduleNextFrameCapture(unsigned long long)
+dxmt::CaptureState::getNextAction(unsigned long long)
+MTLCaptureManager_{sharedCaptureManager,startCapture,stopCapture}
+"DXMT capture enabled"   "A new capture will be saved to "
+_%H'%M'%S_%m-%d-%y.gputrace
+```
+
+`scheduleNextFrameCapture` taking a frame number means the capture is **keyed on
+a frame index**. **Whether `DXMT_CAPTURE_FRAME` accepts a count or a range is not
+known** — Stage 1 must find out and record the answer here, because nothing
+documents it and a range would make catching a defective frame far cheaper.
+
+**A `dxmt.conf` placed beside `TQ.exe` is read** and is the preferred way to set
+config keys — no `cxbottle.conf` edit, so no quitting CrossOver. Confirmed by
+DXMT itself: `TQ_dxgi.log` prints `info: Found config file: dxmt.conf` (O11a).
 
 ## Bottle environment as configured
 
@@ -112,9 +141,24 @@ debugger available here** and it has not been used yet.
 CrossOver **rewrites `cxbottle.conf` when it exits**, so quit CrossOver before
 hand-editing that file or the edits are lost.
 
-`FEX_X87REDUCEDPRECISION=1` is set and **has never been tested at `0`**. Prior is
-low — 32-bit MSVC 11.0 defaults to SSE2 codegen, so little of the hot float math
-is x87 — but it is one flip.
+**For experiments, do not edit it at all.** Environment variables can be injected
+per-run and layered on top of the bottle's own, with CrossOver already running
+(O15):
+
+```sh
+CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
+G="C:\Program Files (x86)\Steam\steamapps\common\Titan Quest Anniversary Edition"
+DXMT_LOG_LEVEL=trace "$CX/bin/cxstart" --bottle "New Bottle" --no-convert \
+  --workdir "$G" -- "$G\TQ.exe"
+```
+
+**Launch `TQ.exe` directly, not from the Steam UI** — a game started by Steam is
+a child of the running Steam process and inherits *its* environment, not ours.
+Steam must still be running in the background.
+
+`FEX_X87REDUCEDPRECISION=1` is set. **Tested at `0`: no effect on the flicker**
+(O8). The prior was low — 32-bit MSVC 11.0 defaults to SSE2 codegen, so little of
+the hot float math is x87 — and the experiment agreed. Do not re-test.
 
 ## Injection surface
 

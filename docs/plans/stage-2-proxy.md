@@ -1,4 +1,4 @@
-# Stage 1 — Get inside the process
+# Stage 2 — Get inside the process
 
 **Goal:** a 32-bit `winmm.dll` sitting beside `TQ.exe` that forwards every call
 to the real one and writes a single line to a log. Nothing else. If this stage

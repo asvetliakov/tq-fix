@@ -2,37 +2,86 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. We are at **Stage 0**.
-> Run the free experiments in `docs/plans/stage-0-free-experiments.md` — they may
-> end the project without a line of code. Report each result, then update
-> `docs/rev/observed.md` and this block before doing anything else.
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 0 is done** and
+> it changed the model: there is **one** defect, not two — individual draws fail
+> to render for exactly one frame, independently, each on 1–2% of frames. H-A
+> (sampler border colour) and H-E (`Map` DO_NOT_WAIT) are both **refuted**, and
+> there is no configuration fix left. We are at **Stage 1**, the **Metal frame
+> capture**, which needs no code — run
+> `docs/plans/stage-1-frame-capture.md`. It answers the one question everything
+> else depends on: **was the missing draw ever submitted?**
+>
+> Before measuring anything, set up the instrument from O12: cap the frame rate
+> to 10 in `dxmt.conf` and screen-record. At 10fps a macOS screen recording is a
+> 1:1 per-frame trace of the renderer, and it is the only reason Stage 0
+> produced numbers instead of impressions.
 
 ---
 
 ## Where things stand
 
 Titan Quest Anniversary Edition runs correctly under CrossOver's DXMT backend
-**except that moving things flicker**. Investigation on 2026-08-25 established
-that there are **two independent defects** (`docs/rev/observed.md`, O1):
+**except that moving things flicker**. Stage 0 (2026-08-25) measured the artefact
+rather than describing it, and the result replaced the model the project started
+with.
 
-- **Defect A — the shadow pass.** The majority of the artefact. Turning shadows
-  off greatly reduces it. The prime suspect is DXMT's inability to honour the
-  game's sampler border colour of `-FLT_MAX` (O2, H-A) — the only warning DXMT
-  emits all session.
-- **Defect B — the residual.** Survives shadows-off. Seen on the FX/light in
-  front of the resurrection shrine and on character hair or clothes. Cause
-  unknown; alpha-blended/alpha-tested dynamic geometry is the common thread.
-  Two live hypotheses (H-B1 constant-buffer range, H-B2 something else in the
-  transparency pass).
+### The defect, as measured
 
-**No configuration fixes either one** — DXMT has seven tunables and none is
-relevant (O7). Ambient occlusion is cleared (O1); the THQ Nordic overlay is
-cleared (O5).
+> **Individual draws fail to render for exactly one frame, independently of one
+> another, each at a rate of one to two percent of frames.**
 
-The intended endgame is `tqflicker.dll`, a 32-bit shim loaded via a `winmm.dll`
-proxy, which corrects the sampler description on its way into DXMT and whatever
-Defect B turns out to need. But Stage 0 comes first, because the project may not
-need to exist.
+Per-object, never global. Always exactly one frame, never two. Irregular — no
+period. Counted in **frames**, not seconds. It hits the shadow pass, the FX pass
+and skinned character geometry alike. Full evidence in `docs/rev/observed.md`
+O9–O16; the pictures are in `cache/captures/`.
+
+**There is no Defect A and Defect B.** O1 read the artefact as two defects
+because turning shadows off "greatly reduced" it. O10b and O14 show that shadows
+are simply the most numerous dynamic draws on screen — removing them removes
+*victims*, not a *cause*. One defect, many victims.
+
+### What is dead
+
+| | Was | Killed by |
+|---|---|---|
+| **H-A** — sampler border colour `-FLT_MAX` | the prime suspect | **O10a** — flicker does not move when shadow-map resolution moves the frustum boundary, which H-A required |
+| **H-E** — `Map` with `DO_NOT_WAIT` fails, engine skips draw | best-fitting hypothesis of Stage 0 | **O13** — `ignoreMapFlagNoWait=True` changes nothing, p = 0.803 |
+| **H-C** — FEX reduced x87 precision | listed as one cheap flip | **O8** — tested at `0`, no effect |
+| **Configuration fixes** | seven DXMT tunables | **O7 + O13** — none relevant, and the one plausible knob measured as doing nothing |
+
+DXMT's border-colour warning (O2) is still real and still unexplained. It is no
+longer a suspect; it is **evidence for the Stage 6 bug report**.
+
+### What is alive
+
+- **H-B1** — out-of-range constant-buffer reads. Strengthened, not weakened, by
+  Stage 0: garbage in a transform flings geometry off-screen, which looks
+  identical to "not drawn", and DXVK ships `constantBufferRangeCheck` keyed on
+  **`TQ.exe`** specifically. DXMT has no equivalent knob, so it cannot be tested
+  for free.
+- **H-D** — draws or their resources intermittently missing. The general form;
+  true almost by construction, and too unspecific to act on until Stage 1 or
+  Stage 4 says which side of the translation it lives on.
+
+### The one question
+
+**Was the missing draw ever submitted?** The two answers need opposite fixes, and
+nothing in the project distinguishes them yet. Stage 1 asks Metal; Stage 4 asks
+the game.
+
+### The instrument, which outlasts every stage
+
+Cap the frame rate to 10 (`dxmt.conf`, `d3d11.preferredMaxFrameRate = 10`) and
+screen-record. macOS records only on change, so at 10fps **one recorded frame ==
+one game frame**, and a 60-second recording becomes a per-frame trace of the
+renderer (O12). Every number in `observed.md` came from this. It is **not** a
+workaround for the user (O11b) — it is the oscilloscope.
+
+Two supporting facts that make experiments cheap:
+- **`dxmt.conf` beside `TQ.exe` works** (O11a) — no `cxbottle.conf` edit, so
+  Risk 8 does not apply.
+- **Environment variables can be injected per-run via `cxstart`** with CrossOver
+  already running (O15) — which is what makes Stage 1 free.
 
 ---
 
@@ -41,67 +90,76 @@ need to exist.
 Each stage has a **gate**. Do not tick a box until its gate has actually been
 met, in the game, with your own eyes on the screen.
 
-### ☐ Stage 0 — Free experiments
+*Re-ordered at the end of Stage 0. The `winmm` proxy was Stage 1; the Metal
+capture was Stage 5. The capture needs no code and answers the central question,
+so the house rule — free experiments before expensive ones — moved it to the
+front.*
 
-**Plan:** `docs/plans/stage-0-free-experiments.md`
-Four things that cost one launch each and could each end the project outright.
-The big one is `/dx9`, which **has never been tried on any backend**.
-**Gate:** every experiment run, every result written into `observed.md`, and an
-explicit decision recorded on whether to continue.
+### ☑ Stage 0 — Free experiments
 
-### ☐ Stage 1 — Get inside the process
+**Plan:** `docs/plans/stage-0-free-experiments.md` — **complete, 2026-08-25.**
+Eight experiments (E0–E7; E1 descoped, E5–E7 added mid-stage). Produced O8–O16,
+refuted H-A, H-C and H-E, unified the two defects into one, and built the
+measuring instrument.
+**Gate met:** every experiment recorded in `observed.md` including the negative
+results, and an explicit decision — **continue**.
 
-**Plan:** `docs/plans/stage-1-proxy.md`
+### ☐ Stage 1 — Metal frame capture
+
+**Plan:** `docs/plans/stage-1-frame-capture.md`
+No code. `DXMT_CAPTURE_FRAME` + `MTL_CAPTURE_ENABLED` via `cxstart` (O15),
+producing a `.gputrace` for Xcode. **The only real graphics debugger here, and
+still entirely unspent.**
+**Gate:** a trace opens, we can describe the frame's pass structure and name the
+draw that makes the shrine beam, the actual `DXMT_CAPTURE_FRAME` syntax is
+written into `substrate.md`, and either a bad frame is captured and answered — or
+the attempts are counted and recorded as a negative result.
+
+### ☐ Stage 2 — Get inside the process
+
+**Plan:** `docs/plans/stage-2-proxy.md`
 A 32-bit `winmm.dll` proxy that forwards everything and writes one line to a log.
 Adapted from `../grimdawn-trash/scripts/gen-winmm-proxy.sh`, with stdcall
 decoration handled.
 **Gate:** the game launches, plays normally, and our log file exists with our
 line in it. Plus an off-game self-test that loads the DLL and checks forwarding.
 
-### ☐ Stage 2 — Reach the device
+### ☐ Stage 3 — Reach the device
 
-**Plan:** `docs/plans/stage-2-device.md`
+**Plan:** `docs/plans/stage-3-device.md`
 Wait for `Direct3D11.dll`, IAT-hook its imported `D3D11CreateDevice` /
 `D3D11CreateDeviceAndSwapChain`, capture the `ID3D11Device*` and
 `ID3D11DeviceContext*`.
 **Gate:** our log prints the device pointer, the context pointer and the feature
-level (expect `11_0`), and the game still reaches gameplay and plays normally.
+level (expect `11_0`), the game still reaches gameplay and plays normally, and
+exit is clean.
 
-### ☐ Stage 3 — Observe the samplers, and the buffers
+### ☐ Stage 4 — Count the draws, and find the one that goes missing
 
-**Plan:** `docs/plans/stage-3-observe.md`
-Vtable data-patch on `ID3D11Device::CreateSamplerState`; log every
-`D3D11_SAMPLER_DESC` in full. While we are in there and it is nearly free, log
-every constant-buffer `CreateBuffer` width too, for H-B1.
-**Gate:** the `-FLT_MAX` sampler appears in **our** log with its complete
-description, we know how many samplers exist and how many use `ADDRESS_BORDER`,
-and the game is unharmed.
+**Plan:** `docs/plans/stage-4-observe-draws.md`
+*Replaces the original Stage 3, which was built on the refuted H-A.* Hook
+`Present` for a frame counter and all four `Draw*` entry points for a per-frame
+count; align the log against a 10fps recording and compare the bad frame's draw
+count with its neighbours. Log constant-buffer widths for H-B1 while in there.
+**Gate:** an explicit, recorded answer to **did the game issue the draw?**
 
-### ☐ Stage 4 — Fix Defect A
+### ☐ Stage 5 — Fix it
 
-**Plan:** stub — write it once Stage 3 has produced the descriptions.
-Rewrite the offending desc on its way through. At least three variants worth
-A/B-ing behind a config key: address mode → `CLAMP`, border → opaque white,
-border → transparent black.
-**Gate:** the same scene, shadows **on**, no shadow flicker, no new artefact, no
-crash.
-
-### ☐ Stage 5 — Attack Defect B
-
-**Plan:** stub — write it once Stage 4 has cleared Defect A out of the picture.
-Two lines of attack, in this order: a **Metal frame capture** of a frame
-containing the shrine-FX flicker (`DXMT_CAPTURE_FRAME`, the only real graphics
-debugger here and still entirely unspent), then the constant-buffer reflection
-check if the capture does not settle it.
-**Gate:** a named cause backed by an observation, not a guess.
+**Plan:** `docs/plans/stage-5-fix.md` — stub. Write it once Stages 1 and 4 have
+said which side of the translation the defect lives on. *Replaces the deleted
+`stage-4-fix-defect-a.md` (targeted refuted H-A) and `stage-5-defect-b.md` (there
+is no separate Defect B).*
+**Gate:** the same scene, shadows **on**, no dropouts in a 60-second 10fps
+recording measured the same way as O12/O14 — **a number, not an impression** — no
+new artefact, no crash.
 
 ### ☐ Stage 6 — Ship it
 
-**Plan:** stub.
+**Plan:** `docs/plans/stage-6-ship.md` — stub.
 Config file, install/uninstall scripts, a ZIP a stranger can unpack, the THQ
-overlay put back, and a CodeWeavers bug report carrying the evidence — DXMT's
-own warning line, and the note that DXVK ships a per-app profile for this exact
-executable.
+overlay put back, and a CodeWeavers bug report carrying the evidence — DXMT's own
+border-colour warning (O2), the frame-counted dropout measurements (O12/O14), and
+the note that DXVK ships a per-app profile for this exact executable.
 **Gate:** a clean bottle, a fresh install, someone else's hands.
 
 ---
@@ -110,13 +168,15 @@ executable.
 
 | # | Risk | State | Note |
 |---|------|-------|------|
-| 1 | The whole project is unnecessary because `/dx9` works | **OPEN** | Stage 0. Never tried on any backend. Cheapest possible outcome |
-| 2 | 32-bit stdcall decoration breaks the winmm proxy | **OPEN** | The sibling repo is 64-bit; its `.def` and stub generation do not transfer unexamined |
+| 1 | The whole project is unnecessary because `/dx9` works | **OPEN — descoped** | **Never tested.** The reporter requires the DX11 renderer to work, so `/dx9` is not an acceptable outcome (D1). Still the cheapest experiment in the repo if the DX11 route ever proves impossible |
+| 2 | 32-bit stdcall decoration breaks the winmm proxy | **OPEN** | Deferred to Stage 2. The sibling repo is 64-bit; its `.def` and stub generation do not transfer unexamined |
 | 3 | DXMT hands out different vtables per interface version | **OPEN** | Patch what `D3D11CreateDevice` returned; `QueryInterface` for `ID3D11Device1` may yield a different object. Verify before assuming one vtable |
 | 4 | Patching a vtable a thread is already inside | **OPEN** | Hook at device creation, before the render thread is running. Never patch mid-frame |
-| 5 | H-A is wrong and the border colour is a red herring | **OPEN** | Stage 3's log settles it. Shadows-off evidence is correlational, not causal |
-| 6 | Defect B is unfixable from outside the game | **OPEN** | If the capture shows a shader-internal problem, the honest outcome is a bug report, not a hack |
+| 5 | H-A is wrong and the border colour is a red herring | **CLOSED — the risk happened** | **O10a refuted H-A.** The flicker does not move when shadow-map resolution moves the frustum boundary. The shadows-off evidence was correlational and was labelled as such; it was correlational. O2's warning survives as bug-report evidence only |
+| 6 | The defect is unfixable from outside the game | **OPEN** | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
 | 7 | A fix that crashes is worse than the flicker | **OPEN** | Standing. Every patch guarded; anything uncertain is logged and skipped |
-| 8 | CrossOver rewrites `cxbottle.conf` on exit | **CLOSED** | Known: quit CrossOver before editing it |
-| 9 | Measurements polluted by the THQ overlay's Present hook | **CLOSED** | Renamed to `overlay-disabled`; flicker unchanged (O5) |
+| 8 | CrossOver rewrites `cxbottle.conf` on exit | **CLOSED** | Known: quit CrossOver before editing it. Largely moot for experiments now — `dxmt.conf` (O11a) and `cxstart` env injection (O15) both avoid the file entirely |
+| 9 | Measurements polluted by the THQ overlay's Present hook | **CLOSED** | Cleared in O5. **Note: it has since been restored to `THQNOnline/overlay` and was enabled for all Stage 0 measurements** (O9). Re-disable it if a future measurement needs it excluded |
 | 10 | Trusting DXVK's log when DXVK does not work here | **CLOSED** | Only the app-profile line and the capability report are used, and why is written down (O6) |
+| 11 | Judging "did it help?" by eye | **CLOSED** | Cost this project a wrong entry: O7 recorded `ignoreMapFlagNoWait` as tried-and-useless by eyeball, which was right, but only O13's frame count could prove it. **Every future "did it help?" is a frame count from a 10fps recording, never an impression** |
+| 12 | Deleting evidence while tidying up | **CLOSED** | Happened. A completed `DXMT_LOG_LEVEL=trace` run was destroyed by an `rm` of `C:\dxmtlog\TQ_*.log` issued to "clear stale logs", costing one launch. **Copy logs into `cache/` before clearing anything, and never clear a directory the user may have just written to** |

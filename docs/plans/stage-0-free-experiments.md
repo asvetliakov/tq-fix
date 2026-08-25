@@ -105,4 +105,54 @@ an explicit decision: continue to Stage 1, or stop because `/dx9` works.
 
 ## Outcome
 
-*(fill in at the end of the stage)*
+**Complete, 2026-08-25. Decision: continue — but not to Stage 1 as it was
+written.**
+
+### What was run
+
+| | Experiment | Result |
+|---|---|---|
+| **E0** | Baseline at the shrine | **O9** — flicker with the player static; bursts; binary on/off, not a wrong value |
+| **E1** | `/dx9` | **Descoped by the reporter (D1).** The requirement is that the DX11 renderer work. Never run; Risk 1 stays open, not closed |
+| **E2** | `FEX_X87REDUCEDPRECISION=0` | **O8** — no effect. H-C dead |
+| **E3** | `DXMT_LOG_LEVEL=trace` | **O16** — trace *does* print more than info, but nothing per-frame or per-draw. Cannot answer the key question |
+| **E4** | Shadow quality; shadows-off; vsync | **O10** — one defect, not two; scales with frame rate |
+| **E5** | `d3d11.preferredMaxFrameRate=30` | **O11** — periodic in *frames*, not time. Not a workaround |
+| **E6** | 10fps cap + screen recording | **O12**, **O14** — the measurement that broke it open |
+| **E7** | `d3d11.ignoreMapFlagNoWait=True` | **O13** — no effect, p = 0.803. H-E refuted |
+
+E5–E7 were not in the original plan. They were added because E4's vsync result
+turned frame rate into the live variable, and the plan said to fix the plan when
+it is wrong.
+
+### What changed in the model
+
+The plan was written expecting to confirm H-A and split the work into two
+defects. Both expectations were wrong:
+
+- **There is one defect, not two.** O10b/O14. Individual draws fail to render for
+  exactly one frame, independently, each at 1–2% of frames. Shadows are simply
+  the most numerous victims.
+- **H-A is refuted.** O10a — the flicker does not move when shadow-map resolution
+  moves the frustum boundary, which H-A required. **Stage 4 as originally written
+  had no target and has been replaced.**
+- **H-E was raised and refuted inside the stage** (O13), which retired the last
+  configuration knob.
+
+### The methodological result, which outlasts the stage
+
+Capping the frame rate to 10 turns a macOS screen recording into a **1:1
+per-frame trace of the renderer** (O12). Every quantitative claim in `observed.md`
+comes from that. It is not a fix for the user; it is the project's measuring
+instrument, and it should be the first thing set up in any later stage that needs
+to judge whether something helped.
+
+Two supporting wins: `dxmt.conf` beside the exe works (O11a), and environment
+variables can be injected per-run via `cxstart` with CrossOver still running
+(O15) — which is what makes the Metal capture cheap.
+
+### Decision
+
+**Continue.** But the next step is **not** the `winmm` proxy. The Metal frame
+capture needs no code, and "free experiments before expensive ones" puts it
+first. See the re-ordered stages in `RUNBOOK.md`.
