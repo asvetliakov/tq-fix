@@ -26,10 +26,10 @@ mkdir -p build
   src/fix.cpp src/dxbc_patch.cpp src/frustum_fix.cpp src/visual.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
-  -O2 -Wall -Wextra \
+  -O2 -DNDEBUG -Wall -Wextra \
   -static -static-libgcc -static-libstdc++ \
   -fno-exceptions \
-  -Wl,--exclude-all-symbols
+  -Wl,--strip-all,--exclude-all-symbols
 
 # ---------------------------------------------------------------- verify
 exports_of() {
@@ -40,6 +40,11 @@ exports_of() {
 
 if ! i686-w64-mingw32-objdump -f "$OUT" | grep -q 'pei-i386'; then
   echo "FAIL: $OUT is not a 32-bit x86 PE" >&2
+  exit 1
+fi
+
+if i686-w64-mingw32-objdump -h "$OUT" | grep -q '\.debug_'; then
+  echo "FAIL: $OUT contains debug sections" >&2
   exit 1
 fi
 
