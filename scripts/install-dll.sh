@@ -12,9 +12,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/New Bottle}"
+BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
 CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
-GAME="$BOTTLE/drive_c/Program Files (x86)/Steam/steamapps/common/Titan Quest Anniversary Edition"
+GAME="${TQ_GAME:-$BOTTLE/drive_c/GOG Games/Titan Quest - Anniversary Edition}"
 
 [ -f build/winmm.dll ] || { echo "no build/winmm.dll - run: npm run build" >&2; exit 1; }
 [ -f "$GAME/TQ.exe" ]  || { echo "no TQ.exe under: $GAME" >&2; exit 1; }

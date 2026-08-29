@@ -8,8 +8,8 @@ numbers after any CrossOver update; the rest is stable.
 - macOS on **Apple M5 Pro** (as reported to the guest by the graphics backend).
 - **CrossOver Preview 27.0.0**, build `20260821`,
   `/Applications/CrossOver Preview.app`.
-- Bottle **"New Bottle"** —
-  `~/Library/Application Support/CrossOver/Bottles/New Bottle`.
+- Bottle **"Titan Quest"** —
+  `~/Library/Application Support/CrossOver/Bottles/Titan Quest`.
   Contains Steam and Titan Quest Anniversary Edition and nothing else of note.
 
 ## Guest
@@ -179,7 +179,7 @@ per-run and layered on top of the bottle's own, with CrossOver already running
 ```sh
 CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
 G="C:\Program Files (x86)\Steam\steamapps\common\Titan Quest Anniversary Edition"
-DXMT_LOG_LEVEL=trace "$CX/bin/cxstart" --bottle "New Bottle" --no-convert \
+DXMT_LOG_LEVEL=trace "$CX/bin/cxstart" --bottle "Titan Quest" --no-convert \
   --workdir "$G" -- "$G\TQ.exe"
 ```
 

@@ -1310,6 +1310,58 @@ whether any of it actually goes wrong. This is source reading, not
 observation. It produces **H-F** below and the experiments in "Ideas after
 Stage 4", not a finding.
 
+## O38 — **The reroute changes the artefact.** Menu flicker gone; in-game shadows/FX now mostly missing
+
+*Established 2026-08-29, GOG build, bottle "Titan Quest", 10fps cap, the
+reporter's own eyes, three launches. The first result in the project that
+MOVED the artefact.*
+
+**Setup.** `TQFLICKER_REROUTE=1` compiled in: the game's two `DYNAMIC`
+2048-byte constant buffers are created `DEFAULT`, `Map` returns a shadow copy
+in our heap, `Unmap` pushes it with `UpdateSubresource`. What that does inside
+DXMT (read from source, O37): the buffer still has a `DynamicBuffer` — DXMT
+gives one to **every** non-output buffer regardless of usage — so
+`UpdateSubresource` is an internal `Map(WRITE_DISCARD)` + `updateContents` +
+`Unmap`, **still renaming through the same FIFO**, but the allocations are
+`GpuManaged` full-size buffers instead of `CpuPlaced` suballocated pages.
+
+**Result, as seen by the reporter:**
+
+1. **Main menu: no more flicker.** The character that flickered in O36 and
+   in the validation run an hour earlier (same scene, same cap) stopped.
+2. **In game: much worse, and different in kind.** Before: ~20 good frames,
+   one frame with a shadow/FX draw missing, back. After: shadows and FX are
+   **absent for ~15 frames, present for a few, absent again.**
+
+**Reading.** The draws are reading their constants from the wrong rename of
+the buffer, and *which* rename — and how often — depends on DXMT's allocation
+strategy for that buffer. The menu (~330 maps/frame) has become correct; the
+game (~1800 maps/frame) has become mostly wrong. Nothing about the game
+changed. **This is H-F's mechanism observed from two directions**, without
+Xcode: the fault is in DXMT's dynamic-buffer renaming, and it is sensitive to
+allocation type and to the number of renames in flight.
+
+**What it cost, worth not repeating:**
+
+- The env var never reached the game: the reporter launches from CrossOver's
+  UI, not from `cxstart`, so `TQFLICKER_REROUTE` must be **compiled in**
+  (`TQFLICKER_REROUTE_DEFAULT` in `frames.cpp`). Two launches lost.
+- **Black screen #1:** `Map` hooked, but `Unmap` → `UpdateSubresource` →
+  DXMT's own internal `Map`/`Unmap` **through the patched vtable** → our
+  hooks → recursion; render thread hung after frame ~170 while the watchdog
+  ticked. Fixed with a per-thread bypass. One launch lost to a wrong guess
+  (interface-pointer identity: DXMT's `ID3D11Buffer`, `ID3D11Resource` and
+  `IUnknown` are the **same address** — recorded so nobody re-checks).
+- The DXMT trace lines around `Map`/`Unmap` are what found the recursion.
+  Instrument first; the log is the debugger.
+
+**Next (mode 3, built the same night):** give the buffer an output bind flag
+(`BIND_UNORDERED_ACCESS`) so DXMT creates **no `DynamicBuffer`** at all, and
+`UpdateSubresource` becomes a staging-ring + GPU blit into **one allocation
+that is never renamed**, hazard-tracked. If the artefact vanishes in both
+scenes, renaming is the fault, full stop. Slow by construction (a blit
+encoder switch per update) — a diagnostic, not yet a fix.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.

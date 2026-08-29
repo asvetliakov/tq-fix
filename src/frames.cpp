@@ -7,6 +7,9 @@
 
 #include "log.h"
 #include "patch.h"
+#ifndef TQFLICKER_REROUTE_DEFAULT
+#define TQFLICKER_REROUTE_DEFAULT 3
+#endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
 namespace tq {
@@ -28,6 +31,8 @@ struct Counts {
     volatile LONG verts;        // index or vertex count, times instance count, summed
     volatile LONG maps, mapsBusy;   // Map calls; Map returning WAS_STILL_DRAWING
     volatile LONG newBuffers;   // CreateBuffer calls landing inside the frame
+    volatile LONG discardMaps;  // Map(WRITE_DISCARD) calls - the DXMT page-rotation path (O37)
+    volatile LONG rerouted;     // Maps served from our shadow copy (TQFLICKER_REROUTE, H-F)
 };
 Counts g_now;
 
@@ -77,7 +82,8 @@ void tableOpen() {
     // the kernel, which survives the process dying. Flushing to disk on every
     // frame would be a per-frame stall we added ourselves.
     const char* hdr = "time\tpid\tframe\tdt_ms\tsync\tdraws\tDrawIndexed\tDraw\tDrawIndexedInstanced"
-                      "\tDrawInstanced\tother\tempty\tverts\tmaps\tmaps_busy\tnew_buffers\r\n";
+                      "\tDrawInstanced\tother\tempty\tverts\tmaps\tmaps_busy\tnew_buffers"
+                      "\tdiscard_maps\tmap_ptrs\tmin_reuse\trerouted\r\n";
     DWORD wrote;
     WriteFile(h, hdr, (DWORD)strlen(hdr), &wrote, NULL);
 }
@@ -86,6 +92,116 @@ void tableRow(const char* s, int n) {
     if (g_table == INVALID_HANDLE_VALUE) return;
     DWORD wrote;
     WriteFile(g_table, s, (DWORD)n, &wrote, NULL);
+}
+
+// ------------------------------------------- Map pointer diagnostic (H-F)
+//
+// Every `Map(WRITE_DISCARD)` on a dynamic buffer hands back a pointer into one
+// of DXMT's pages. Reuse of the same pointer is expected - a 2048-byte buffer
+// has a handful of slots per page and the page FIFO turns over hundreds of
+// times a frame - so this does not judge; it measures. Per frame: how many
+// distinct pointers were handed out, and the shortest distance in frames since
+// any of them was last handed out. Render thread only, so no locking.
+CRITICAL_SECTION g_devLock;     // the cbuffer tables and g_rr; device calls may be off the render thread
+struct PtrSlot { void* p; LONG frame; };
+const unsigned kPtrSlots = 1u << 16;
+PtrSlot g_ptrs[kPtrSlots];
+LONG g_frDistinct, g_frMinReuse = -1;
+
+void notePtr(void* p, LONG frame) {
+    unsigned h = (unsigned)(((UINT_PTR)p >> 4) * 2654435761u) >> 16;
+    for (unsigned i = 0; i < 8; i++) {
+        PtrSlot& sl = g_ptrs[(h + i) & (kPtrSlots - 1)];
+        if (sl.p == p) {
+            LONG d = frame - sl.frame;
+            if (d > 0) {
+                g_frDistinct++;
+                if (g_frMinReuse < 0 || d < g_frMinReuse) g_frMinReuse = d;
+            }
+            sl.frame = frame;
+            return;
+        }
+        if (!sl.p) { sl.p = p; sl.frame = frame; g_frDistinct++; return; }
+    }
+    PtrSlot& sl = g_ptrs[h & (kPtrSlots - 1)];   // table full here: evict
+    sl.p = p; sl.frame = frame; g_frDistinct++;
+}
+
+// ----------------------------------------------- reroute (H-F's experiment)
+//
+// TQFLICKER_REROUTE=1: the game's DYNAMIC constant buffers are created DEFAULT
+// instead, and their Map/Unmap are served from a shadow copy in our heap that
+// is pushed with UpdateSubresource at Unmap. =2 does the same for dynamic
+// vertex and index buffers. This takes those buffers off DXMT's i386-only
+// CpuPlaced page path entirely (docs/rev/observed.md O37). Off by default.
+int g_reroute;
+struct Rr { void* res; void* shadow; UINT size; bool alias; };
+const unsigned kRrSlots = 4096;
+Rr g_rr[kRrSlots];             // open addressing by resource pointer, under g_devLock
+LONG g_rrCount, g_rrMaps, g_rrBadMaps;
+const LONG kRrTraceEvents = 12;
+// DXMT's UpdateSubresource on any non-output buffer calls Map/Unmap through
+// the vtable - i.e. through these hooks (a recursion that hung the render
+// thread on 2026-08-29). While this thread is inside our own UpdateSubresource,
+// both hooks pass straight through.
+volatile DWORD g_rrBypassThread;   // the first few served maps/unmaps, timestamped, to see where a hang is
+
+unsigned rrHash(void* p) { return (unsigned)(((UINT_PTR)p >> 3) * 2654435761u) >> 20; }
+
+Rr* rrFind(void* res) {
+    unsigned h = rrHash(res);
+    for (unsigned i = 0; i < kRrSlots; i++) {
+        Rr& r = g_rr[(h + i) & (kRrSlots - 1)];
+        if (r.res == res) return &r;
+        if (!r.res) return nullptr;
+    }
+    return nullptr;
+}
+
+void rrForget(void* res) {   // the address is being reused by a new buffer
+    Rr* r = rrFind(res);
+    if (!r) return;
+    if (!r->alias) { free(r->shadow); g_rrCount--; }
+    r->shadow = nullptr; r->size = 0;
+    r->res = (void*)1;       // tombstone: keeps probe chains intact
+}
+
+// `alias` entries share the owner's shadow: the same object seen through
+// another interface pointer (DXMT's ID3D11Buffer, ID3D11Resource and IUnknown
+// are not at one address, which cost a black screen on 2026-08-29).
+bool rrAdd(void* res, UINT size, void* shadow = nullptr) {
+    unsigned h = rrHash(res);
+    for (unsigned i = 0; i < kRrSlots; i++) {
+        Rr& r = g_rr[(h + i) & (kRrSlots - 1)];
+        if (!r.res || r.res == (void*)1) {
+            void* sh = shadow ? shadow : calloc(1, size ? size : 16);
+            if (!sh) return false;
+            r.res = res; r.shadow = sh; r.size = size; r.alias = shadow != nullptr;
+            if (!shadow) g_rrCount++;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The other identities of a freshly created buffer. Released immediately: we
+// keep addresses, not references, and CreateBuffer's own reference keeps the
+// object alive for as long as the game holds it.
+void otherIdentities(ID3D11Buffer* b, void** resOut, void** unkOut) {
+    *resOut = *unkOut = nullptr;
+    ID3D11Resource* r = nullptr; IUnknown* u = nullptr;
+    if (SUCCEEDED(b->QueryInterface(__uuidof(ID3D11Resource), (void**)&r)) && r) { *resOut = r; r->Release(); }
+    if (SUCCEEDED(b->QueryInterface(__uuidof(IUnknown), (void**)&u)) && u) { *unkOut = u; u->Release(); }
+}
+
+bool wantReroute(const D3D11_BUFFER_DESC* d) {
+    if (!g_reroute || !d) return false;
+    if (d->Usage != D3D11_USAGE_DYNAMIC) return false;
+    if (!(d->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE) || (d->CPUAccessFlags & D3D11_CPU_ACCESS_READ)) return false;
+    if (d->MiscFlags) return false;
+    UINT ok = D3D11_BIND_CONSTANT_BUFFER;
+    if (g_reroute == 2) ok |= D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER;
+    return (d->BindFlags & ~ok) == 0 && (d->BindFlags & ok) != 0;
 }
 
 // ----------------------------------------------------------------- Present
@@ -117,6 +233,10 @@ HRESULT WINAPI hookPresent(IDXGISwapChain* self, UINT sync, UINT flags) {
     c.maps            = take(&g_now.maps);
     c.mapsBusy        = take(&g_now.mapsBusy);
     c.newBuffers      = take(&g_now.newBuffers);
+    c.discardMaps     = take(&g_now.discardMaps);
+    c.rerouted        = take(&g_now.rerouted);
+    LONG ptrDistinct  = g_frDistinct;  g_frDistinct = 0;
+    LONG ptrMinReuse  = g_frMinReuse;  g_frMinReuse = -1;
     LONG draws = c.drawIndexed + c.draw + c.drawIndexedInst + c.drawInst + c.other;
 
     LARGE_INTEGER now;
@@ -128,12 +248,14 @@ HRESULT WINAPI hookPresent(IDXGISwapChain* self, UINT sync, UINT flags) {
 
     SYSTEMTIME t;
     GetLocalTime(&t);
-    char row[256];
+    char row[320];
     int n = _snprintf(row, sizeof(row),
-                      "%02d:%02d:%02d.%03d\t%lu\t%ld\t%.1f\t%u\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\r\n",
+                      "%02d:%02d:%02d.%03d\t%lu\t%ld\t%.1f\t%u\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld"
+                      "\t%ld\t%ld\t%ld\t%ld\r\n",
                       t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, (unsigned long)g_pid, frame, dt,
                       sync, draws, c.drawIndexed, c.draw, c.drawIndexedInst, c.drawInst, c.other,
-                      c.empty, c.verts, c.maps, c.mapsBusy, c.newBuffers);
+                      c.empty, c.verts, c.maps, c.mapsBusy, c.newBuffers,
+                      c.discardMaps, ptrDistinct, ptrMinReuse, c.rerouted);
     if (n > 0 && n < (int)sizeof(row)) tableRow(row, n);
 
     // Dip detection is on the *previous* frame, now that both its neighbours
@@ -198,6 +320,8 @@ DrawIndirectFn         g_realDrawIndexedInstancedIndirect;
 DrawIndirectFn         g_realDrawInstancedIndirect;
 ExecuteCommandListFn   g_realExecuteCommandList;
 MapFn                  g_realMap;
+typedef void(WINAPI* UnmapFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
+UnmapFn                g_realUnmap;
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* c, UINT count, UINT start, INT base) {
     add(&g_now.drawIndexed, 1);
@@ -261,9 +385,58 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
                        UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
     if (!g_realMap) return E_FAIL;
     add(&g_now.maps, 1);
+    if (type == D3D11_MAP_WRITE_DISCARD) add(&g_now.discardMaps, 1);
+
+    if (g_reroute && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
+        EnterCriticalSection(&g_devLock);
+        Rr* r = rrFind(res);
+        void* shadow = r ? r->shadow : nullptr;
+        UINT  size   = r ? r->size : 0;
+        LeaveCriticalSection(&g_devLock);
+        if (shadow) {
+            if (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) {
+                out->pData = shadow;
+                out->RowPitch = out->DepthPitch = size;
+                add(&g_now.rerouted, 1);
+                if (++g_rrMaps <= kRrTraceEvents)
+                    tqlog("reroute:  Map #%ld %p type %d -> shadow %p (%u B), frame %ld", g_rrMaps, (void*)res,
+                          (int)type, shadow, (unsigned)size, (long)g_frame);
+                return S_OK;
+            }
+            // A map type the shadow cannot honour. The buffer is DEFAULT now, so
+            // the real Map would fail too; count it and say so once.
+            if (!g_rrBadMaps++) tqlog("!! reroute: Map type %d on a rerouted buffer %p", (int)type, (void*)res);
+            return E_INVALIDARG;
+        }
+    }
+
     HRESULT hr = g_realMap(c, res, sub, type, flags, out);
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) add(&g_now.mapsBusy, 1);
+    if (SUCCEEDED(hr) && out && type == D3D11_MAP_WRITE_DISCARD) notePtr(out->pData, g_frame);
     return hr;
+}
+
+void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
+    if (!g_realUnmap) return;
+    if (g_reroute && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
+        EnterCriticalSection(&g_devLock);
+        Rr* r = rrFind(res);
+        void* shadow = r ? r->shadow : nullptr;
+        LeaveCriticalSection(&g_devLock);
+        if (shadow) {
+            g_rrBypassThread = GetCurrentThreadId();
+            // Not hooked, so this is DXMT's own UpdateSubresource: a DEFAULT-buffer
+            // write, which on i386 takes the updateContents path, not the page path.
+            static LONG n;
+            LONG k = ++n;
+            if (k <= kRrTraceEvents) tqlog("reroute:  Unmap #%ld %p -> UpdateSubresource...", k, (void*)res);
+            c->UpdateSubresource(res, 0, nullptr, shadow, 0, 0);
+            g_rrBypassThread = 0;
+            if (k <= kRrTraceEvents) tqlog("reroute:  Unmap #%ld %p <- returned", k, (void*)res);
+            return;
+        }
+    }
+    g_realUnmap(c, res, sub);
 }
 
 // ------------------------------------------------------- device: resources
@@ -295,7 +468,7 @@ LONG  g_cbTotal, g_cbOther, g_buffersTotal;
 UINT  g_cbLargest;
 const LONG kMaxCbLines = 96;    // per-creation lines before we stop detailing
 
-CRITICAL_SECTION g_devLock;     // the tables above; device calls may be off the render thread
+// g_devLock is declared with the pointer tables above.
 
 const char* usageName(D3D11_USAGE u) {
     switch (u) {
@@ -322,8 +495,50 @@ void noteCbWidth(UINT bytes) {
 HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc,
                                 const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
     if (!g_realCreateBuffer) return E_FAIL;
-    HRESULT hr = g_realCreateBuffer(dev, desc, init, out);
+    bool reroute = wantReroute(desc);
+    D3D11_BUFFER_DESC alt;
+    if (reroute) {
+        alt = *desc;
+        alt.Usage = D3D11_USAGE_DEFAULT;
+        alt.CPUAccessFlags = 0;
+        // Mode 3: an output bind flag keeps DXMT from giving the buffer a
+        // DynamicBuffer at all, so UpdateSubresource becomes a GPU blit into
+        // one allocation that is never renamed (O37/O38).
+        if (g_reroute == 3) alt.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    }
+    HRESULT hr = g_realCreateBuffer(dev, reroute ? &alt : desc, init, out);
+    if (reroute && FAILED(hr)) {
+        tqlog("!! reroute: CreateBuffer refused the altered desc (hr 0x%08lx, bind 0x%x) - creating it as the game asked",
+              (unsigned long)hr, (unsigned)alt.BindFlags);
+        reroute = false;
+        hr = g_realCreateBuffer(dev, desc, init, out);
+    }
     add(&g_now.newBuffers, 1);
+
+    if (SUCCEEDED(hr) && out && *out) {
+        void *asRes, *asUnk;
+        otherIdentities(*out, &asRes, &asUnk);
+        EnterCriticalSection(&g_devLock);
+        rrForget((void*)*out);     // an address coming back around is a new object
+        if (asRes && asRes != (void*)*out) rrForget(asRes);
+        if (asUnk && asUnk != (void*)*out && asUnk != asRes) rrForget(asUnk);
+        bool added = reroute && rrAdd((void*)*out, desc->ByteWidth);
+        if (added) {
+            Rr* own = rrFind((void*)*out);
+            if (asRes && asRes != (void*)*out) rrAdd(asRes, own->size, own->shadow);
+            if (asUnk && asUnk != (void*)*out && asUnk != asRes) rrAdd(asUnk, own->size, own->shadow);
+        }
+        LONG nr = g_rrCount;
+        LeaveCriticalSection(&g_devLock);
+        if (added && nr <= 24)
+            tqlog("reroute:  identities buffer %p resource %p unknown %p", (void*)*out, asRes, asUnk);
+        if (reroute && !added) {
+            tqlog("!! reroute: table full or out of memory for %p - buffer left DEFAULT and UNSERVED", (void*)*out);
+        } else if (added && nr <= 24) {
+            tqlog("reroute:  #%ld %p  %u bytes, bind 0x%x: DYNAMIC -> DEFAULT + shadow, frame %ld", nr,
+                  (void*)*out, (unsigned)desc->ByteWidth, (unsigned)desc->BindFlags, (long)g_frame);
+        }
+    }
 
     if (SUCCEEDED(hr) && desc && (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER)) {
         EnterCriticalSection(&g_devLock);
@@ -558,6 +773,7 @@ void patchContext(void** vt, const char* name) {
     slot(vt, TQ_SLOT_ID3D11DeviceContext_ExecuteCommandList, name, (void*)&hookExecuteCommandList,
          &g_realExecuteCommandList);
     slot(vt, TQ_SLOT_ID3D11DeviceContext_Map, name, (void*)&hookMap, &g_realMap);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_Unmap, name, (void*)&hookUnmap, &g_realUnmap);
 }
 
 }  // namespace
@@ -574,6 +790,19 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
     }
     g_installed = true;
     InitializeCriticalSection(&g_devLock);
+    {
+        wchar_t v[8] = L"";
+        DWORD n = GetEnvironmentVariableW(L"TQFLICKER_REROUTE", v, 8);
+        // Compiled-in default (the env var did not reach the game on 2026-08-29,
+        // reason unknown); the variable can still override it either way.
+        g_reroute = TQFLICKER_REROUTE_DEFAULT;
+        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'3') ? (int)(v[0] - L'0') : 0;
+        tqlog("frames:   TQFLICKER_REROUTE=%d - %s", g_reroute,
+              g_reroute == 0 ? "observing only (dynamic buffers untouched)"
+              : g_reroute == 1 ? "dynamic CONSTANT buffers -> DEFAULT + shadow + UpdateSubresource (H-F)"
+              : g_reroute == 2 ? "dynamic constant, VERTEX and INDEX buffers -> DEFAULT + shadow (H-F)"
+                               : "dynamic CONSTANT buffers -> DEFAULT|UAV: no DXMT rename at all, GPU blit (H-F)");
+    }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
 
@@ -609,7 +838,7 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
     tqlog("frames:   %d vtable slot(s) patched%s. Present=%s Draw*=%s Map=%s CreateBuffer=%s shaders=%s/%s"
           " sampler=%s",
           made, g_realPresent && g_realDrawIndexed ? "" : "  <-- INCOMPLETE",
-          g_realPresent ? "ok" : "NO", g_realDrawIndexed && g_realDraw ? "ok" : "NO", g_realMap ? "ok" : "NO",
+          g_realPresent ? "ok" : "NO", g_realDrawIndexed && g_realDraw ? "ok" : "NO", g_realMap && g_realUnmap ? "ok" : "NO",
           g_realCreateBuffer ? "ok" : "NO", g_realCreateVS ? "ok" : "NO", g_realCreatePS ? "ok" : "NO",
           g_realCreateSampler ? "ok" : "NO");
     return g_realPresent && g_realDrawIndexed;
@@ -646,6 +875,9 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
+    if (g_reroute)
+        tqlog("reroute (%s): mode %d, %ld buffer(s) rerouted, %ld map(s) served from shadow, %ld unservable",
+              when, g_reroute, g_rrCount, g_rrMaps, g_rrBadMaps);
 }
 
 }  // namespace frames

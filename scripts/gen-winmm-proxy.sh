@@ -43,7 +43,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/New Bottle}"
+BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
 OUTDIR="${1:?usage: gen-winmm-proxy.sh OUTDIR [real-winmm.dll]}"
 SRC="${2:-$BOTTLE/drive_c/windows/syswow64/winmm.dll}"
 

@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LABEL="${1:?label, e.g. stage4-run1}"
-BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/New Bottle}"
+BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
 T="$BOTTLE/drive_c/users/crossover/AppData/Local/Temp"
 STAMP="$(date +%H%M%S)"
 mkdir -p cache/logs

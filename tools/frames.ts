@@ -18,7 +18,7 @@ import { join } from 'node:path';
 
 const bottle =
   process.env.TQ_BOTTLE ??
-  join(homedir(), 'Library/Application Support/CrossOver/Bottles/New Bottle');
+  join(homedir(), 'Library/Application Support/CrossOver/Bottles/Titan Quest');
 const DEFAULT = join(bottle, 'drive_c/users/crossover/AppData/Local/Temp/tqflicker-frames.log');
 
 const args = process.argv.slice(2);

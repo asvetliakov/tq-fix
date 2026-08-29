@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/New Bottle}"
+BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
 CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
 DRIVE="$BOTTLE/drive_c"
 WORK="$DRIVE/tqflicker-selftest"

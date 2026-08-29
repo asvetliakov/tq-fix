@@ -5,8 +5,8 @@
 # and forgiven, with the stage they matter to.
 cd "$(dirname "$0")/.."
 
-BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/New Bottle}"
-GAME="$BOTTLE/drive_c/Program Files (x86)/Steam/steamapps/common/Titan Quest Anniversary Edition"
+BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
+GAME="${TQ_GAME:-$BOTTLE/drive_c/GOG Games/Titan Quest - Anniversary Edition}"
 CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
 fail=0
 

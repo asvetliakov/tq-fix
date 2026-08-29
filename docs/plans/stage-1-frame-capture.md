@@ -86,7 +86,7 @@ game started from Steam's UI inherits Steam's environment, not ours:
 CX="/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver"
 G="C:\Program Files (x86)\Steam\steamapps\common\Titan Quest Anniversary Edition"
 MTL_CAPTURE_ENABLED=1 DXMT_CAPTURE_EXECUTABLE=TQ.exe DXMT_CAPTURE_FRAME=<n> \
-  "$CX/bin/cxstart" --bottle "New Bottle" --no-convert --workdir "$G" -- "$G\TQ.exe"
+  "$CX/bin/cxstart" --bottle "Titan Quest" --no-convert --workdir "$G" -- "$G\TQ.exe"
 ```
 
 ## The sampling problem, and how to beat it

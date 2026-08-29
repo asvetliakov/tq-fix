@@ -52,7 +52,7 @@ the plan as part of the stage.
 
 ## The environment, in one paragraph
 
-CrossOver **Preview 27.0.0** (build 20260821), bottle **"New Bottle"**, on an
+CrossOver **Preview 27.0.0** (build 20260821), bottle **"Titan Quest"** (renamed from "New Bottle" on or before 2026-08-29), on an
 **Apple M5 Pro**. `TQ.exe` is 32-bit, so it runs under **FEX**
 (`libwow64fex.so`), not Rosetta. The game is on its **DX11** renderer
 (`Direct3D11.dll`), translated by **DXMT**. Full numbers in
