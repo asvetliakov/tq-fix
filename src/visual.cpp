@@ -3,7 +3,9 @@
 #include "streaming.h"
 
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <stdint.h>
+#include <stdio.h>
 #include <string>
 #include <string.h>
 
@@ -15,8 +17,8 @@ namespace tq {
 namespace visual {
 namespace {
 
-struct Options { bool smaa, shadows, streaming; UINT anisotropy; };
-Options g_options = {true, true, true, 16};
+struct Options { bool smaa, shadows, streaming, frameOverlay; UINT anisotropy; };
+Options g_options = {true, true, true, false, 16};
 
 struct Patch { void** slot; void* original; void* replacement; };
 Patch g_patches[24];
@@ -140,6 +142,41 @@ struct SmaaResources {
     ID3D11RasterizerState* raster;
 } g_smaa;
 
+const UINT kTextWidth = 532;
+const UINT kTextHeight = 66;
+const UINT kGraphTextureWidth = 4104;
+const UINT kGraphTextureHeight = 110;
+const UINT kGraphPointCount = 4096;
+const unsigned kFrameSampleCount = 16384;
+
+struct OverlayResources {
+    ID3D11VertexShader* vs;
+    ID3D11PixelShader* ps;
+    ID3D11Texture2D* textTexture;
+    ID3D11ShaderResourceView* textSrv;
+    ID3D11Texture2D* graphTexture;
+    ID3D11ShaderResourceView* graphSrv;
+    ID3D11SamplerState* sampler;
+    ID3D11BlendState* blend;
+    ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* raster;
+} g_overlay;
+
+struct FrameSample {
+    LONGLONG ticks;
+    float milliseconds;
+};
+
+uint32_t g_textPixels[kTextWidth * kTextHeight];
+uint32_t g_graphPixels[kGraphTextureWidth * kGraphTextureHeight];
+FrameSample g_frameSamples[kFrameSampleCount];
+float g_sortedFrameTimes[kFrameSampleCount];
+unsigned g_frameWrite;
+unsigned g_frameCount;
+LONGLONG g_lastOverlayRefresh;
+LARGE_INTEGER g_frameFrequency;
+LARGE_INTEGER g_lastFrame;
+
 template <typename T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
 bool readable(const void* address) {
@@ -190,6 +227,8 @@ void readOptions() {
     GetPrivateProfileStringW(L"performance", L"streaming", L"optimized",
                              value, 32, path);
     g_options.streaming = tq::streaming::optimizationEnabled(value);
+    g_options.frameOverlay =
+        GetPrivateProfileIntW(L"performance", L"frame_overlay", 0, path) == 1;
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
@@ -814,6 +853,218 @@ void releaseSmaa() {
     release(g_smaa.depth); release(g_smaa.raster);
 }
 
+void releaseOverlay() {
+    release(g_overlay.vs); release(g_overlay.ps);
+    release(g_overlay.textSrv); release(g_overlay.textTexture);
+    release(g_overlay.graphSrv); release(g_overlay.graphTexture);
+    release(g_overlay.sampler); release(g_overlay.blend);
+    release(g_overlay.depth); release(g_overlay.raster);
+}
+
+uint32_t rgba(unsigned r, unsigned g, unsigned b, unsigned a) {
+    return (a << 24) | (b << 16) | (g << 8) | r;
+}
+
+void fillRect(uint32_t* pixels, UINT canvasWidth, UINT canvasHeight,
+              int x, int y, int width, int height, uint32_t color) {
+    if (!pixels) return;
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    if (x + width > (int)canvasWidth) width = (int)canvasWidth - x;
+    if (y + height > (int)canvasHeight) height = (int)canvasHeight - y;
+    if (width <= 0 || height <= 0) return;
+    for (int row = 0; row < height; ++row)
+        std::fill(pixels + (y + row) * canvasWidth + x,
+                  pixels + (y + row) * canvasWidth + x + width,
+                  color);
+}
+
+#define TQ_GLYPH(a, b, c, d, e) \
+    ((uint16_t)((a) << 12 | (b) << 9 | (c) << 6 | (d) << 3 | (e)))
+
+uint16_t glyphBits(char character) {
+    static const uint16_t digits[10] = {
+        TQ_GLYPH(7,5,5,5,7), TQ_GLYPH(2,6,2,2,7),
+        TQ_GLYPH(7,1,7,4,7), TQ_GLYPH(7,1,7,1,7),
+        TQ_GLYPH(5,5,7,1,1), TQ_GLYPH(7,4,7,1,7),
+        TQ_GLYPH(7,4,7,5,7), TQ_GLYPH(7,1,2,2,2),
+        TQ_GLYPH(7,5,7,5,7), TQ_GLYPH(7,5,7,1,7)
+    };
+    static const uint16_t letters[26] = {
+        TQ_GLYPH(2,5,7,5,5), TQ_GLYPH(6,5,6,5,6),
+        TQ_GLYPH(7,4,4,4,7), TQ_GLYPH(6,5,5,5,6),
+        TQ_GLYPH(7,4,6,4,7), TQ_GLYPH(7,4,6,4,4),
+        TQ_GLYPH(7,4,5,5,7), TQ_GLYPH(5,5,7,5,5),
+        TQ_GLYPH(7,2,2,2,7), TQ_GLYPH(1,1,1,5,7),
+        TQ_GLYPH(5,5,6,5,5), TQ_GLYPH(4,4,4,4,7),
+        TQ_GLYPH(5,7,7,5,5), TQ_GLYPH(5,7,7,7,5),
+        TQ_GLYPH(7,5,5,5,7), TQ_GLYPH(7,5,7,4,4),
+        TQ_GLYPH(7,5,5,7,1), TQ_GLYPH(6,5,6,5,5),
+        TQ_GLYPH(7,4,7,1,7), TQ_GLYPH(7,2,2,2,2),
+        TQ_GLYPH(5,5,5,5,7), TQ_GLYPH(5,5,5,5,2),
+        TQ_GLYPH(5,5,7,7,5), TQ_GLYPH(5,5,2,5,5),
+        TQ_GLYPH(5,5,2,2,2), TQ_GLYPH(7,1,2,4,7)
+    };
+    if (character >= '0' && character <= '9') return digits[character - '0'];
+    if (character >= 'A' && character <= 'Z') return letters[character - 'A'];
+    switch (character) {
+        case ':': return TQ_GLYPH(0,2,0,2,0);
+        case '.': return TQ_GLYPH(0,0,0,0,2);
+        case '>': return TQ_GLYPH(4,2,1,2,4);
+        case '/': return TQ_GLYPH(1,1,2,4,4);
+        case '-': return TQ_GLYPH(0,0,7,0,0);
+        default: return 0;
+    }
+}
+
+#undef TQ_GLYPH
+
+void drawText(int x, int y, const char* text, uint32_t color) {
+    const int scale = 2;
+    if (!text) return;
+    for (; *text; ++text, x += 4 * scale) {
+        uint16_t bits = glyphBits(*text);
+        for (int row = 0; row < 5; ++row) {
+            unsigned pixels = (bits >> ((4 - row) * 3)) & 7;
+            for (int column = 0; column < 3; ++column)
+                if (pixels & (1u << (2 - column)))
+                    fillRect(g_textPixels, kTextWidth, kTextHeight,
+                             x + column * scale, y + row * scale,
+                             scale, scale, color);
+        }
+    }
+}
+
+void recordFrameTime() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!g_frameFrequency.QuadPart) QueryPerformanceFrequency(&g_frameFrequency);
+    if (g_lastFrame.QuadPart && g_frameFrequency.QuadPart) {
+        double milliseconds = (double)(now.QuadPart - g_lastFrame.QuadPart) * 1000.0
+                            / (double)g_frameFrequency.QuadPart;
+        if (milliseconds > 0.01 && milliseconds < 10000.0) {
+            g_frameSamples[g_frameWrite].ticks = now.QuadPart;
+            g_frameSamples[g_frameWrite].milliseconds = (float)milliseconds;
+            g_frameWrite = (g_frameWrite + 1) % kFrameSampleCount;
+            if (g_frameCount < kFrameSampleCount) ++g_frameCount;
+        }
+    }
+    g_lastFrame = now;
+}
+
+void renderOverlayPixels() {
+    const uint32_t panel = rgba(9, 14, 20, 188);
+    const uint32_t graphPanel = rgba(4, 7, 11, 198);
+    const uint32_t white = rgba(195, 210, 222, 232);
+    const uint32_t muted = rgba(128, 148, 165, 218);
+    const uint32_t mode = g_options.streaming
+                        ? rgba(55, 190, 218, 238) : rgba(232, 146, 58, 238);
+    std::fill(g_textPixels, g_textPixels + kTextWidth * kTextHeight, panel);
+    std::fill(g_graphPixels,
+              g_graphPixels + kGraphTextureWidth * kGraphTextureHeight,
+              graphPanel);
+    fillRect(g_textPixels, kTextWidth, kTextHeight, 0, 0, kTextWidth, 2, mode);
+    fillRect(g_textPixels, kTextWidth, kTextHeight,
+             0, kTextHeight - 2, kTextWidth, 2, mode);
+    fillRect(g_textPixels, kTextWidth, kTextHeight, 0, 0, 2, kTextHeight, mode);
+    fillRect(g_textPixels, kTextWidth, kTextHeight,
+             kTextWidth - 2, 0, 2, kTextHeight, mode);
+    fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+             0, 0, kGraphTextureWidth, 2, mode);
+    fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+             0, kGraphTextureHeight - 2, kGraphTextureWidth, 2, mode);
+    fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+             0, 0, 2, kGraphTextureHeight, mode);
+    fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+             kGraphTextureWidth - 2, 0, 2, kGraphTextureHeight, mode);
+
+    double sum = 0.0;
+    float latest = 0.0f, maximum = 0.0f;
+    unsigned included = 0, hitches = 0;
+    unsigned visible = g_frameCount < kGraphPointCount
+                     ? g_frameCount : kGraphPointCount;
+    unsigned oldest = (g_frameWrite + kFrameSampleCount - visible)
+                    % kFrameSampleCount;
+    LONGLONG firstIncluded = visible ? g_frameSamples[oldest].ticks
+                                    : g_lastFrame.QuadPart;
+    for (unsigned i = 0; i < visible; ++i) {
+        const FrameSample& sample =
+            g_frameSamples[(oldest + i) % kFrameSampleCount];
+        if (!sample.ticks) continue;
+        float value = sample.milliseconds;
+        g_sortedFrameTimes[included++] = value;
+        sum += value;
+        if (value > maximum) maximum = value;
+        if (value > 25.0f) ++hitches;
+    }
+    if (included) {
+        unsigned latestIndex = (g_frameWrite + kFrameSampleCount - 1)
+                             % kFrameSampleCount;
+        latest = g_frameSamples[latestIndex].milliseconds;
+        std::sort(g_sortedFrameTimes, g_sortedFrameTimes + included);
+    }
+    float average = included ? (float)(sum / included) : 0.0f;
+    float p99 = included ? g_sortedFrameTimes[(included - 1) * 99 / 100] : 0.0f;
+    float fps = latest > 0.01f ? 1000.0f / latest : 0.0f;
+    float historySeconds = included && g_frameFrequency.QuadPart
+        ? (float)(g_lastFrame.QuadPart - firstIncluded)
+          / (float)g_frameFrequency.QuadPart : 0.0f;
+
+    char line[96];
+    snprintf(line, sizeof(line), "STREAMING: %s",
+             g_options.streaming ? "OPTIMIZED" : "ORIGINAL");
+    drawText(12, 9, line, mode);
+    snprintf(line, sizeof(line), "FRAME: %.1F MS  FPS: %.1F", latest, fps);
+    drawText(12, 23, line, white);
+    snprintf(line, sizeof(line), "AVG: %.1F  P99: %.1F  MAX: %.1F",
+             average, p99, maximum);
+    drawText(12, 37, line, white);
+    snprintf(line, sizeof(line), "HITCHES >25 MS: %u / %.1F S",
+             hitches, historySeconds);
+    drawText(12, 51, line, muted);
+
+    const int graphLeft = 4;
+    const int graphTop = 4;
+    const int graphWidth = kGraphTextureWidth - 8;
+    const int graphHeight = kGraphTextureHeight - 8;
+    const float graphMaximum = 66.7f;
+    const float thresholds[3] = {16.7f, 33.3f, 50.0f};
+    const uint32_t gridColors[3] = {
+        rgba(38, 83, 61, 175), rgba(101, 88, 37, 175), rgba(105, 47, 45, 175)
+    };
+    const uint32_t divisionGrid = rgba(54, 65, 76, 105);
+    for (unsigned division = 1; division < 8; ++division) {
+        int x = graphLeft + (int)(division * graphWidth / 8);
+        fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+                 x, graphTop, 1, graphHeight, divisionGrid);
+    }
+    for (unsigned i = 0; i < 3; ++i) {
+        int y = graphTop + graphHeight - 1
+              - (int)(thresholds[i] / graphMaximum * (graphHeight - 1));
+        fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+                 graphLeft, y, graphWidth, 1, gridColors[i]);
+    }
+
+    int previousY = graphTop + graphHeight - 1;
+    for (unsigned i = 0; i < visible; ++i) {
+        float value = g_frameSamples[(oldest + i) % kFrameSampleCount].milliseconds;
+        float clipped = value < graphMaximum ? value : graphMaximum;
+        int y = graphTop + graphHeight - 1
+              - (int)(clipped / graphMaximum * (graphHeight - 1));
+        int x = graphLeft + graphWidth - visible + i;
+        uint32_t color = value > 33.3f ? rgba(235, 88, 78, 238)
+                       : value > 20.0f ? rgba(225, 187, 70, 232)
+                                       : rgba(80, 190, 125, 225);
+        int top = i && y < previousY ? y : previousY;
+        int height = i ? (y < previousY ? previousY - y + 1
+                                        : y - previousY + 1) : 2;
+        if (!i) top = y;
+        fillRect(g_graphPixels, kGraphTextureWidth, kGraphTextureHeight,
+                 x, top, 1, height, color);
+        previousY = y;
+    }
+}
+
 bool createLookupTexture(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT format,
                          UINT pitch, const void* bytes, ID3D11Texture2D** texture,
                          ID3D11ShaderResourceView** srv) {
@@ -826,7 +1077,7 @@ bool createLookupTexture(ID3D11Device* device, UINT width, UINT height, DXGI_FOR
         && SUCCEEDED(device->CreateShaderResourceView(*texture, nullptr, srv));
 }
 
-bool createProgramResources(ID3D11Device* device) {
+bool createSmaaProgramResources(ID3D11Device* device) {
     if (g_smaa.edgePS) return true;
     std::string canonical((const char*)third_party_smaa_SMAA_hlsl,
                           third_party_smaa_SMAA_hlsl_len);
@@ -870,6 +1121,83 @@ bool createProgramResources(ID3D11Device* device) {
                              SEARCHTEX_PITCH, searchTexBytes, &g_smaa.searchTex, &g_smaa.searchSRV);
     if (!ok) releaseSmaa();
     return ok;
+}
+
+const char* kOverlayVertexShader =
+"struct Output{float4 position:SV_POSITION;float2 uv:TEXCOORD0;};"
+"Output main(uint id:SV_VertexID){Output o;"
+"float2 uv=float2((id<<1)&2,id&2);o.uv=uv;"
+"o.position=float4(uv*float2(2,-2)+float2(-1,1),0,1);return o;}";
+
+const char* kOverlayPixelShader =
+"Texture2D image:register(t0);SamplerState pointSampler:register(s0);"
+"float4 main(float4 position:SV_POSITION,float2 uv:TEXCOORD0):SV_TARGET{"
+"return image.Sample(pointSampler,uv);}";
+
+bool createOverlayResources(ID3D11Device* device) {
+    if (g_overlay.vs && g_overlay.ps && g_overlay.textTexture
+        && g_overlay.graphTexture) return true;
+    ID3DBlob *vertex = nullptr, *pixel = nullptr;
+    bool ok = compileShader(kOverlayVertexShader, "vs_5_0", &vertex)
+           && compileShader(kOverlayPixelShader, "ps_5_0", &pixel);
+    if (ok) ok = SUCCEEDED(device->CreateVertexShader(
+        vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &g_overlay.vs));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &g_overlay.ps));
+    release(vertex); release(pixel);
+
+    D3D11_TEXTURE2D_DESC textTexture = {};
+    textTexture.Width = kTextWidth;
+    textTexture.Height = kTextHeight;
+    textTexture.MipLevels = textTexture.ArraySize = 1;
+    textTexture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textTexture.SampleDesc.Count = 1;
+    textTexture.Usage = D3D11_USAGE_DEFAULT;
+    textTexture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_TEXTURE2D_DESC graphTexture = textTexture;
+    graphTexture.Width = kGraphTextureWidth;
+    graphTexture.Height = kGraphTextureHeight;
+    D3D11_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    D3D11_BLEND_DESC blend = {};
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    D3D11_DEPTH_STENCIL_DESC depth = {};
+    depth.DepthEnable = FALSE;
+    depth.StencilEnable = FALSE;
+    D3D11_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D11_FILL_SOLID;
+    raster.CullMode = D3D11_CULL_NONE;
+    raster.DepthClipEnable = TRUE;
+    raster.ScissorEnable = FALSE;
+    if (ok) ok = SUCCEEDED(g_createTexture2D(device, &textTexture, nullptr,
+                                              &g_overlay.textTexture));
+    if (ok) ok = SUCCEEDED(g_createShaderResourceView(
+        device, g_overlay.textTexture, nullptr, &g_overlay.textSrv));
+    if (ok) ok = SUCCEEDED(g_createTexture2D(device, &graphTexture, nullptr,
+                                              &g_overlay.graphTexture));
+    if (ok) ok = SUCCEEDED(g_createShaderResourceView(
+        device, g_overlay.graphTexture, nullptr, &g_overlay.graphSrv));
+    if (ok) ok = SUCCEEDED(g_createSamplerState(device, &sampler, &g_overlay.sampler));
+    if (ok) ok = SUCCEEDED(device->CreateBlendState(&blend, &g_overlay.blend));
+    if (ok) ok = SUCCEEDED(device->CreateDepthStencilState(&depth, &g_overlay.depth));
+    if (ok) ok = SUCCEEDED(device->CreateRasterizerState(&raster, &g_overlay.raster));
+    if (!ok) releaseOverlay();
+    return ok;
+}
+
+bool createProgramResources(ID3D11Device* device) {
+    bool smaaOk = !g_options.smaa || createSmaaProgramResources(device);
+    if (g_options.frameOverlay) createOverlayResources(device);
+    return smaaOk;
 }
 
 bool createTarget(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT format,
@@ -942,6 +1270,74 @@ void restoreState(ID3D11DeviceContext* c, SavedState& s) {
     for (UINT i = 0; i < 2; ++i) release(s.samplers[i]);
     for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) release(s.rtvs[i]);
     release(s.dsv); release(s.blend); release(s.depth); release(s.raster);
+}
+
+void drawFrameOverlay(ID3D11DeviceContext* context) {
+    if (!g_options.frameOverlay || !context || !g_overlay.vs || !g_overlay.ps
+        || !g_overlay.textTexture || !g_overlay.textSrv
+        || !g_overlay.graphTexture || !g_overlay.graphSrv || !g_overlay.sampler
+        || !g_overlay.blend || !g_overlay.depth || !g_overlay.raster) return;
+    LONGLONG refreshTicks = g_frameFrequency.QuadPart / 10;
+    if (!g_lastOverlayRefresh || !refreshTicks
+        || g_lastFrame.QuadPart - g_lastOverlayRefresh >= refreshTicks) {
+        renderOverlayPixels();
+        context->UpdateSubresource(g_overlay.textTexture, 0, nullptr, g_textPixels,
+                                   kTextWidth * sizeof(uint32_t), 0);
+        context->UpdateSubresource(g_overlay.graphTexture, 0, nullptr, g_graphPixels,
+                                   kGraphTextureWidth * sizeof(uint32_t), 0);
+        g_lastOverlayRefresh = g_lastFrame.QuadPart;
+    }
+
+    SavedState old;
+    saveState(context, old);
+    if (!old.rtvs[0]) {
+        restoreState(context, old);
+        return;
+    }
+
+    FLOAT renderWidth = old.viewportCount ? old.viewports[0].Width : 1920.0f;
+    ID3D11Resource* outputResource = nullptr;
+    ID3D11Texture2D* outputTexture = nullptr;
+    old.rtvs[0]->GetResource(&outputResource);
+    if (outputResource)
+        outputResource->QueryInterface(__uuidof(ID3D11Texture2D),
+                                       (void**)&outputTexture);
+    if (outputTexture) {
+        D3D11_TEXTURE2D_DESC outputDesc = {};
+        outputTexture->GetDesc(&outputDesc);
+        if (outputDesc.Width) renderWidth = (FLOAT)outputDesc.Width;
+    }
+    release(outputTexture);
+    release(outputResource);
+    if (renderWidth < 200.0f) renderWidth = 1920.0f;
+    D3D11_VIEWPORT textViewport = {20.0f, 20.0f, (FLOAT)kTextWidth,
+                                   (FLOAT)kTextHeight, 0.0f, 1.0f};
+    D3D11_VIEWPORT graphViewport = {20.0f, 96.0f, renderWidth - 40.0f,
+                                    (FLOAT)kGraphTextureHeight, 0.0f, 1.0f};
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(g_overlay.vs, nullptr, 0);
+    context->GSSetShader(nullptr, nullptr, 0);
+    context->HSSetShader(nullptr, nullptr, 0);
+    context->DSSetShader(nullptr, nullptr, 0);
+    context->PSSetShader(g_overlay.ps, nullptr, 0);
+    context->PSSetSamplers(0, 1, &g_overlay.sampler);
+    context->OMSetRenderTargets(1, &old.rtvs[0], nullptr);
+    context->OMSetBlendState(g_overlay.blend, nullptr, 0xffffffff);
+    context->OMSetDepthStencilState(g_overlay.depth, 0);
+    context->RSSetState(g_overlay.raster);
+    bool previousInside = g_inside;
+    g_inside = true;
+    context->PSSetShaderResources(0, 1, &g_overlay.textSrv);
+    context->RSSetViewports(1, &textViewport);
+    context->Draw(3, 0);
+    context->PSSetShaderResources(0, 1, &g_overlay.graphSrv);
+    context->RSSetViewports(1, &graphViewport);
+    context->Draw(3, 0);
+    g_inside = previousInside;
+    ID3D11ShaderResourceView* nullView = nullptr;
+    context->PSSetShaderResources(0, 1, &nullView);
+    restoreState(context, old);
 }
 
 void issueDraw(ID3D11DeviceContext* c, bool indexed, UINT count, UINT start, INT base) {
@@ -1025,8 +1421,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
     if (g_options.streaming) {
         InitializeCriticalSection(&g_uploadLock);
         g_uploadLockReady = true;
-        tq::streaming::setPresentCallback(&onPresent);
     }
+    if (g_options.streaming || g_options.frameOverlay)
+        tq::streaming::setPresentCallback(&onPresent);
     g_device = device;
     g_context = context;
     void** dv = *(void***)device;
@@ -1060,6 +1457,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
+    if (ok && g_options.frameOverlay) startProgramBuild(device);
     if (!ok) {
         restoreSlots();
         g_context->Release();
@@ -1074,7 +1472,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
 }
 
 void onPresent() {
+    if (g_options.frameOverlay) recordFrameTime();
     advanceTextureUploadsInternal();
+    if (g_options.frameOverlay) drawFrameOverlay(g_context);
 }
 
 void shutdown() {
@@ -1107,6 +1507,7 @@ void shutdown() {
     // safer than freeing them beneath a worker that DXMT has not returned.
     if (workerStopped) {
         releaseSmaa();
+        releaseOverlay();
         if (g_compiler) { FreeLibrary(g_compiler); g_compiler = nullptr; }
     }
     memset(g_fxaa, 0, sizeof(g_fxaa)); g_fxaaCount = 0;
@@ -1119,6 +1520,11 @@ void shutdown() {
     g_psSetShaderResources = nullptr;
     g_updateSubresource = nullptr;
     g_archiveUnmap = nullptr;
+    memset(g_frameSamples, 0, sizeof(g_frameSamples));
+    memset(g_sortedFrameTimes, 0, sizeof(g_sortedFrameTimes));
+    g_frameWrite = g_frameCount = 0;
+    g_lastOverlayRefresh = 0;
+    g_frameFrequency.QuadPart = g_lastFrame.QuadPart = 0;
     InterlockedExchange(&g_archiveVtablePatched, 0);
     InterlockedExchange(&g_programState, 0);
     InterlockedExchange(&g_installed, 0);

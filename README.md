@@ -48,6 +48,7 @@ edge_updates=expanded
 
 [performance]
 streaming=optimized
+frame_overlay=0
 ```
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
@@ -69,6 +70,14 @@ condition falls back to the game's original synchronous upload. Use
 `streaming=original` to disable the optimization. The mod does not replace the
 resource thread or move D3D11 immediate-context work onto an unsafe worker
 thread.
+
+Set `frame_overlay=1` to show a temporary frame-pacing overlay for A/B tests.
+It displays the active streaming mode, current frame time and FPS, rolling
+average, 99th percentile, worst frame, hitch count above 25 ms, and a graph of
+the latest 4,096 individual frames with no time bucketing or aggregation. This
+is about 68 seconds at 60 FPS, and the overlay reports the actual time covered.
+The border is cyan for optimized streaming and orange for the original path.
+Leave it at `0` for normal play.
 
 The shadow enhancement deliberately does not quantize per-object matrices. No
 safely isolated global light-projection upload has been established, so the
