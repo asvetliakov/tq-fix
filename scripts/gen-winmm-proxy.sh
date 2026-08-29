@@ -1,145 +1,48 @@
 #!/usr/bin/env bash
-# Generate the winmm proxy: the export list, the stubs it points at, and the
-# names to resolve them from.
-#
-#   scripts/gen-winmm-proxy.sh OUTDIR [path-to-real-winmm.dll]
-#
-# Writes three files into OUTDIR, all from one read of the real winmm so they
-# cannot disagree about how many exports there are or what order they are in:
-#
-#   winmm.def         LIBRARY winmm + every export name, pointing at our stubs
-#   winmm_stubs.S     one `jmp *slot` per export, and the slot table
-#   winmm_names.inc   the same names, in the same order, for src/winmm_proxy.cpp
-#
-# Adapted from ../grimdawn-trash/scripts/gen-winmm-proxy.sh. Its reason for
-# existing is unchanged and is distribution: a `.def` forwarder names a module,
-# and ours is already called `winmm`, so it would have to forward to a second
-# file the installer copied — which can never go in a ZIP. The same names are
-# exported as code instead, and src/winmm_proxy.cpp fills the slots at attach.
-#
-# ---------------------------------------------------------------------------
-# WHAT CHANGED FOR i386, AND WHY IT IS NOT JUST A DIFFERENT COMPILER
-# ---------------------------------------------------------------------------
-#
-#   * **`jmp *slot(%rip)` does not exist on i386.** x86-64 addresses the slot
-#     relative to the instruction pointer; i386 has no such mode, so the stub is
-#     `jmp *slot` — an absolute indirect jump, opcode `ff 25`. Verified by
-#     disassembly, not assumed.
-#   * **`.quad` -> `.long`**, and `.p2align 3` -> `.p2align 2`. Pointers are 4
-#     bytes, and a table aligned for 8 would leave every odd slot misread.
-#   * **Symbols carry a leading underscore.** On i386 MinGW the C symbol `foo` is
-#     the assembler symbol `_foo`. The labels below are emitted with it and the
-#     `.def` exports the undecorated name; the linker joins them up. Confirmed by
-#     building and reading the export table back.
-#   * **The exports are NOT `@N`-decorated.** Windows' own winmm exports plain
-#     names (checked: 186 of them, none with `@`, none with `_`), so the `.def`
-#     lists plain names and no `--kill-at` is needed. This is the trap Risk 2 in
-#     RUNBOOK.md is about, and this is how it was actually settled: by reading
-#     the real 32-bit DLL's export table rather than by reasoning about stdcall.
-#   * **The real i386 winmm is in `syswow64`, not `system32`.** This bottle is
-#     ARM64, so `system32\winmm.dll` is a PE32+ Aarch64 binary. The default
-#     below points at syswow64; the DLL itself asks `GetSystemDirectoryW`, which
-#     under WOW64 answers correctly without hard-coding either.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 BOTTLE="${TQ_BOTTLE:-$HOME/Library/Application Support/CrossOver/Bottles/Titan Quest}"
 OUTDIR="${1:?usage: gen-winmm-proxy.sh OUTDIR [real-winmm.dll]}"
-SRC="${2:-$BOTTLE/drive_c/windows/syswow64/winmm.dll}"
+SOURCE="${2:-$BOTTLE/drive_c/windows/syswow64/winmm.dll}"
 
-if [ ! -f "$SRC" ]; then
-  cat >&2 <<MSG
-no winmm.dll at: $SRC
-
-The proxy exports every name the real winmm does, so it needs the real one to
-read them from. Note this must be the **32-bit** winmm: on an ARM64 bottle
-system32\\winmm.dll is Aarch64 and the i386 one is in syswow64.
-
-Set TQ_BOTTLE to a CrossOver bottle, or pass a path:
-  scripts/gen-winmm-proxy.sh "$OUTDIR" /path/to/32-bit/winmm.dll
-MSG
+[ -f "$SOURCE" ] || { echo "missing 32-bit winmm.dll: $SOURCE" >&2; exit 1; }
+i686-w64-mingw32-objdump -f "$SOURCE" | grep -q pei-i386 || {
+  echo "not a 32-bit x86 DLL: $SOURCE" >&2
   exit 1
-fi
+}
 
-# Refuse the wrong architecture outright rather than emitting 186 stubs against
-# an Aarch64 export table, which would build and then fail at load with nothing
-# in the log to explain it.
-if ! i686-w64-mingw32-objdump -f "$SRC" 2>/dev/null | grep -q 'pei-i386'; then
-  echo "not a 32-bit x86 PE: $SRC" >&2
-  echo "  $(i686-w64-mingw32-objdump -f "$SRC" 2>&1 | grep 'file format' || true)" >&2
-  echo "on an ARM64 bottle the i386 winmm is in syswow64, not system32." >&2
-  exit 1
-fi
-
-names=$(i686-w64-mingw32-objdump -p "$SRC" \
+names="$(i686-w64-mingw32-objdump -p "$SOURCE" \
   | awk '/\[Ordinal\/Name Pointer\] Table/,0' \
-  | awk '/^\t\[/ {print $NF}' | sort)
-
-[ -n "$names" ] || { echo "no exports found in $SRC" >&2; exit 1; }
-count=$(echo "$names" | wc -l | tr -d ' ')
-
-# A name with an `@` would mean this winmm decorates its exports, which would
-# make the .def wrong in a way that only shows up as the game refusing to start.
-if echo "$names" | grep -q '@'; then
-  echo "decorated (@N) export names found in $SRC - the .def below would be wrong." >&2
-  echo "$names" | grep '@' | head -5 >&2
+  | awk '/^\t\[/ {print $NF}' | sort)"
+[ -n "$names" ] || { echo "no winmm exports found" >&2; exit 1; }
+if grep -q '@' <<<"$names"; then
+  echo "decorated winmm exports are unsupported" >&2
   exit 1
 fi
 
 mkdir -p "$OUTDIR"
-
-# ------------------------------------------------------------------ the .def
 {
-  echo "; Generated by scripts/gen-winmm-proxy.sh from:"
-  echo ";   $SRC - $count exports"
-  echo "; Do not edit by hand, and do not commit. Each name is a stub in"
-  echo "; winmm_stubs.S that jumps to the real winmm, resolved at attach."
   echo "LIBRARY winmm"
   echo "EXPORTS"
-  echo "$names" | sed 's/^/  /'
+  sed 's/^/  /' <<<"$names"
 } > "$OUTDIR/winmm.def"
 
-# ---------------------------------------------------------------- the stubs
-#
-# Each slot gets its own label rather than an offset off the head of the table:
-# `jmp *_tq_wt_17` is checkable by eye against the name above it, and an
-# arithmetic slip in a generator that emits 186 of them would be a jump into the
-# middle of a pointer.
 {
-  echo "/* Generated by scripts/gen-winmm-proxy.sh - do not edit, do not commit."
-  echo "   $count exports of $SRC, each a one-instruction jump through a slot that"
-  echo "   src/winmm_proxy.cpp fills at DLL_PROCESS_ATTACH."
-  echo "   i386: absolute indirect jumps (ff 25), 4-byte slots. See the header"
-  echo "   comment in the generator for why this is not the x86-64 form. */"
-  echo
-  printf '\t.data\n'
-  printf '\t.p2align 2\n'
-  printf '\t.globl\t_tq_winmm_targets\n'
-  printf '_tq_winmm_targets:\n'
-  i=0
-  while IFS= read -r n; do
-    # Every slot starts out pointing at a function that returns zero, so a name
-    # the real winmm does not have is a wrong answer rather than a jump to null.
-    printf '_tq_wt_%s:\t.long\t_tq_winmm_unresolved\t/* %s */\n' "$i" "$n"
-    i=$((i + 1))
-  done <<< "$names"
+  printf '\t.data\n\t.p2align 2\n\t.globl\t_tq_winmm_targets\n_tq_winmm_targets:\n'
+  index=0
+  while IFS= read -r name; do
+    printf '_tq_wt_%s:\t.long\t_tq_winmm_unresolved\t/* %s */\n' "$index" "$name"
+    index=$((index + 1))
+  done <<<"$names"
   printf '\n\t.text\n'
-  i=0
-  while IFS= read -r n; do
-    printf '\t.globl\t_%s\n' "$n"
-    printf '\t.def\t_%s;\t.scl\t2;\t.type\t32;\t.endef\n' "$n"
-    printf '_%s:\n' "$n"
-    printf '\tjmp\t*_tq_wt_%s\n' "$i"
-    i=$((i + 1))
-  done <<< "$names"
+  index=0
+  while IFS= read -r name; do
+    printf '\t.globl\t_%s\n' "$name"
+    printf '\t.def\t_%s;\t.scl\t2;\t.type\t32;\t.endef\n' "$name"
+    printf '_%s:\n\tjmp\t*_tq_wt_%s\n' "$name" "$index"
+    index=$((index + 1))
+  done <<<"$names"
 } > "$OUTDIR/winmm_stubs.S"
 
-# ---------------------------------------------------------------- the names
-{
-  echo "/* Generated by scripts/gen-winmm-proxy.sh - do not edit, do not commit."
-  echo "   The same $count names as winmm_stubs.S, in the same order: slot i is"
-  echo "   name i. src/winmm_proxy.cpp defines TQ_WINMM_NAME and includes this. */"
-  echo "$names" | sed 's/^\(.*\)$/TQ_WINMM_NAME("\1")/'
-} > "$OUTDIR/winmm_names.inc"
-
-echo "wrote $OUTDIR/{winmm.def,winmm_stubs.S,winmm_names.inc} ($count exports)"
+sed 's/^\(.*\)$/TQ_WINMM_NAME("\1")/' <<<"$names" > "$OUTDIR/winmm_names.inc"
+echo "generated $(( $(wc -l <<<"$names") )) winmm exports"

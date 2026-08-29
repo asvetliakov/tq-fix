@@ -1,33 +1,34 @@
-# Titan Quest Flicker
+# Titan Quest DX11 Flicker Fix
 
-Titan Quest Anniversary Edition runs well under CrossOver on Apple Silicon — at
-full speed, on the DXMT backend — **except that things which move flicker**:
-shadows, light and FX effects, and some character geometry. Static scenery is
-fine.
+A minimal fix for flickering skinned objects in Titan Quest Anniversary Edition
+when its DirectX 11 renderer runs through CrossOver/DXMT.
 
-This repo is the investigation into why, and the fix if one is reachable: a
-32-bit shim loaded into `TQ.exe` that corrects what the D3D11→Metal translation
-cannot express.
+Titan Quest sometimes supplies bone indices outside its 27-entry animation
+matrix array. DXMT can read undefined constant-buffer data for those indices,
+making an object disappear for a frame. This DLL recognizes the affected Titan
+Quest vertex shaders and inserts one integer clamp before the bone lookup.
 
-**It is not a mod.** It changes nothing about the game, its saves or its balance.
-It sits between the game and the graphics translation layer and adjusts one
-sampler description on the way past.
+The runtime consists of:
 
-## Status
+- a `winmm.dll` proxy that loads the fix into `TQ.exe`;
+- one hook for D3D11 device creation;
+- one hook for `CreateVertexShader`;
+- the narrow DXBC transformer.
 
-**Stage 0.** Two defects identified and separated; no code written yet. The
-free experiments in `docs/plans/stage-0-free-experiments.md` come first, because
-one of them — running the game's own DirectX 9 renderer instead — could make the
-whole thing unnecessary.
+There are no settings, modes, log files, per-frame hooks, buffer copies, waits,
+or rendering synchronizations.
 
-## Where to start
+## Build and install
 
-`CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. The notebook in `docs/rev/` is
-the point of the project: most of what is known here cost a game launch to learn,
-and none of it is visible in a diff.
+```sh
+npm run doctor
+npm run build
+npm run selftest
+npm run install-dll
+```
 
-## Requires
+`npm run uninstall-dll` removes the proxy and the TQ-specific Wine override.
 
-macOS on Apple Silicon, CrossOver (Preview 27.0.0 is what this was developed
-against), Titan Quest Anniversary Edition, and `i686-w64-mingw32-g++` for the
-DLL. `npm run doctor` will tell you what is missing.
+The tested environment is Titan Quest Anniversary Edition (32-bit GOG build),
+CrossOver Preview with DXMT, and Apple Silicon. The regression test runs all 37
+captured shader variants through the real 32-bit DXMT device.
