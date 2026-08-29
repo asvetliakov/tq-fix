@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 17
+#define TQFLICKER_REROUTE_DEFAULT 0
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -1207,16 +1207,32 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
         DWORD n = GetEnvironmentVariableW(L"TQFLICKER_REROUTE", v, 8);
         // Compiled-in default (the env var did not reach the game on 2026-08-29,
         // reason unknown); the variable can still override it either way.
+        // Precedence: env var > tqflicker.ini beside TQ.exe > compiled default.
+        // The ini exists because a CrossOver-UI launch gets no env vars (O38),
+        // and a mode change should not cost a recompile.
+        const char* src = "default";
         g_reroute = TQFLICKER_REROUTE_DEFAULT;
+        {
+            wchar_t ini[MAX_PATH];
+            DWORD ln = GetModuleFileNameW(NULL, ini, MAX_PATH);
+            if (ln && ln < MAX_PATH) {
+                wchar_t* slash = wcsrchr(ini, L'\\');
+                if (slash && (slash - ini) + 15 < MAX_PATH) {
+                    lstrcpyW(slash + 1, L"tqflicker.ini");
+                    UINT got = GetPrivateProfileIntW(L"tqflicker", L"reroute", 0xFFFF, ini);
+                    if (got != 0xFFFF) { g_reroute = (int)got; src = "tqflicker.ini"; }
+                }
+            }
+        }
         if (n && n < 8) {
             int m = 0; bool ok = v[0] != 0;
             for (DWORD i = 0; i < n && v[i]; i++) {
                 if (v[i] < L'0' || v[i] > L'9') { ok = false; break; }
                 m = m * 10 + (int)(v[i] - L'0');
             }
-            if (ok) g_reroute = m;
+            if (ok) { g_reroute = m; src = "environment"; }
         }
-        tqlog("frames:   TQFLICKER_REROUTE=%d - %s", g_reroute,
+        tqlog("frames:   TQFLICKER_REROUTE=%d (from %s) - %s", g_reroute, src,
               g_reroute == 0 ? "observing only (dynamic buffers untouched)"
               : g_reroute == 1 ? "dynamic CONSTANT buffers -> DEFAULT + shadow + UpdateSubresource (H-F)"
               : g_reroute == 2 ? "dynamic constant, VERTEX and INDEX buffers -> DEFAULT + shadow (H-F)"

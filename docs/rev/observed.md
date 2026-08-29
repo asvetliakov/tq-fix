@@ -1551,6 +1551,17 @@ see and we cannot. The Stage 6 report is no longer "here is a flicker" — it is
 "here is the component, the path, the dose-response, and sixteen eliminated
 mechanisms."
 
+## O44 — DXVK in this Preview shows black geometry — reporter-tested, new bottle
+
+*2026-08-29, reported from the reporter's own earlier test.* O6 recorded
+`dxvk` as "black screen" in the old bottle; the reporter has since tried it
+against the GOG install in the "Titan Quest" bottle: **it renders, but the
+geometry is black.** Not usable, so the DXVK escape route (its built-in
+`TQ.exe` profile, a different translation stack) is closed in this CrossOver
+Preview. DXMT remains the only workable DX11 backend here, which makes the
+Stage 6 report to CodeWeavers the real fix path and the shim's mode 4 / mode
+13 the interim mitigations.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.

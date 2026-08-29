@@ -54,3 +54,18 @@ echo "  $BOTTLE/drive_c/users/crossover/AppData/Local/Temp/tqflicker.log"
 echo "(not users/crossover/Temp - that path does not exist here)"
 echo
 echo "tail it with:  npm run log"
+
+# A mode file beside the game, because a CrossOver-UI launch carries no env
+# vars. Never overwrite one the user has edited.
+if [ ! -f "$GAME/tqflicker.ini" ]; then
+  cat > "$GAME/tqflicker.ini" <<'INI'
+; tq-flicker (docs/rev/observed.md O38-O44)
+;   reroute=0   observe only: the flicker is DXMT's, unmitigated
+;   reroute=4   NO flicker, full speed; some offscreen FX can vanish
+;               (confirmed: the rebirth fountain's light pillar, O40)
+;   reroute=13  no flicker seen, all FX intact, measurably slower (GPU sync)
+[tqflicker]
+reroute=4
+INI
+  echo "wrote $GAME/tqflicker.ini (reroute=4)"
+fi
