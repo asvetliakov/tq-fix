@@ -2,35 +2,35 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is done:
-> the game issues the draw, DXMT renders nothing for it (O30).** Stage 1's
-> `.gputrace` still needs Xcode — but **2026-08-29 found three things to do
-> without it**, all in `observed.md` under "Ideas after Stage 4":
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/observed.md` O35–O43.
+> **2026-08-29 was the breakthrough session: seventeen experiments (modes
+> 1–17, `TQFLICKER_REROUTE_DEFAULT` in `frames.cpp`), and the fault is
+> localized to DXMT's upload path for CPU-mapped dynamic memory, i386.**
 >
-> 1. **Metal validation without Xcode** — `MTL_DEBUG_LAYER=1` /
->    `MTL_SHADER_VALIDATION=1` on the Steam launch (O24 route). One launch,
->    may name the fault; and its zero-fill of out-of-bounds reads is DXVK's
->    `constantBufferRangeCheck` for free, so "flicker gone under validation"
->    would revive H-B1.
-> 2. **Map-pointer reuse diagnostic** in `hookMap` — shortest reuse distance
->    per frame into the frame table, correlated with the recording.
-> 3. **Reroute the game's DYNAMIC constant buffers to DEFAULT +
->    `UpdateSubresource`** from the shim (`docs/plans/stage-5-fix.md`) — if the
->    flicker stops, that is the diagnosis and the fix in one.
+> The law (O42, O43): GPU-blit uploads into a stable allocation (modes 3/4/16)
+> or GPU-idle sync (8, 13) remove the flicker entirely; every CPU-mapped
+> arrangement — renaming or not, rings, padding, barriers, latency, chunk
+> boundaries, argument re-encode, 16KB alignment — flickers, and more
+> allocations/chunks make it worse. Dose-response on sync frequency.
 >
-> Why these: **O37** — the shipped DXMT is a CodeWeavers fork of `3Shain/dxmt`
-> (`v0.80-131-g2befd18`), and on **i386 only** dynamic buffers are `CpuPlaced`
-> pages rotated per `Map(DISCARD)`; the game discards its two 2048-byte
-> constant buffers per draw. That is **H-F**, untested. Two new facts from the
-> reporter: **`/dx9` has no flicker** (O35, Risk 1 closed) and **the main-menu
-> character flickers with no shadows** (O36) — use the menu as the bench.
+> **Working mitigations:** mode 4 (complete fix; per-update blits split render
+> passes and cost offscreen FX — the rebirth-fountain pillar, O40) and mode 13
+> with `kSyncEvery=4` (no flicker seen in one test, full 10fps-capped rate,
+> but real CPU cost — not a solution, a lever). The game is UNHARMED in all
+> modes; mode 15's garbage was our own shallow-ring bug, withdrawn.
 >
-> Housekeeping: the 10fps cap is **commented out** (normal play). Logs from the
-> last run are in `cache/logs/stage4-run1-002554-*`; re-derive with
-> `cache/venv/bin/python tools/recording.py cache/captures/*12.24.39*.mov
-> cache/logs/stage4-run1-002554-tqflicker-frames.log`. `npm run doctor` reports
-> whether Xcode has appeared. Upstream DXMT source is cloned to the scratchpad
-> of session `b8b5af5a…`; re-clone `3Shain/dxmt` if it is gone.
+> **Next:** the reporter's decision on the default mode + whether to install
+> Xcode. A `.gputrace` of a bad frame (Stage 1) is now surgical: capture at a
+> flagged frame, inspect the victim draw's constant/vertex buffer bytes in GPU
+> memory — stale bytes = the last question answered. Stage 6's report is
+> report-grade already: component, path, dose-response, sixteen eliminated
+> mechanisms, DXVK's profile, O2's warning.
+>
+> Housekeeping: 10fps cap still ACTIVE in `dxmt.conf` beside TQ.exe; proxy
+> installed with mode 17 default — **change the default before anyone plays
+> normally**. Logs all kept under `cache/logs/`. Bottle is "Titan Quest"
+> (GOG build, 4GB-patched); launch via `scripts/launch.sh` or CrossOver UI
+> (env vars do NOT reach a UI launch - compile defaults in).
 
 ---
 

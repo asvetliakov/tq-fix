@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 13
+#define TQFLICKER_REROUTE_DEFAULT 17
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -267,6 +267,44 @@ LONG g_padded;
 ID3D11Buffer* g_scratchCb;
 LONG g_redirties;
 void forceRedirty(ID3D11DeviceContext* c, void* res);
+
+// ------------------------------------------ mode 17: 16KB-align the pages
+//
+// DXMT's i386 build backs every dynamic buffer with `_aligned_malloc`'d heap
+// memory wrapped by `newBufferWithBytesNoCopy:` (O37). The pointers it hands
+// out are 4KB-aligned but NOT host-page-aligned (O42, `mapptr:`), and Apple
+// Silicon documents a 16KB page-alignment requirement for bytesNoCopy. This
+// mode redirects d3d11.dll's import of `_aligned_malloc` - one IAT data
+// write - to a wrapper that rounds the alignment up to 16KB and the size up
+// to a 16KB multiple. If the flicker dies with nothing else changed, the
+// fork's handling of unaligned bytesNoCopy memory is the fault.
+typedef void* (__cdecl* AlignedMallocFn)(size_t, size_t);
+AlignedMallocFn g_realAlignedMalloc;
+LONG g_alignCalls, g_alignWidened;
+const size_t kHostPage = 16384;
+
+void* __cdecl hookAlignedMalloc(size_t size, size_t align) {
+    if (!g_realAlignedMalloc) return nullptr;
+    g_alignCalls++;
+    size_t a = align, sz = size;
+    if (a < kHostPage) a = kHostPage;
+    if (sz % kHostPage) sz += kHostPage - (sz % kHostPage);
+    if (a != align || sz != size) g_alignWidened++;
+    return g_realAlignedMalloc(sz, a);
+}
+
+void installAlignHook() {
+    HMODULE dxmt = GetModuleHandleW(L"d3d11.dll");
+    if (!dxmt) { tqlog("!! align: d3d11.dll not in the process?"); return; }
+    // The device exists, so d3d11.dll is long loaded and its imports snapped -
+    // the wait device.cpp needs at process start does not apply here.
+    void* orig = patch::iat(dxmt, "d3d11.dll", "api-ms-win-crt-heap-l1-1-0.dll", "_aligned_malloc",
+                            (void*)&hookAlignedMalloc);
+    if (!orig) { tqlog("!! align: d3d11.dll does not import _aligned_malloc where expected"); return; }
+    g_realAlignedMalloc = (AlignedMallocFn)orig;
+    tqlog("align:    d3d11.dll!_aligned_malloc -> ours; every allocation now %u-aligned, %u-multiple",
+          (unsigned)kHostPage, (unsigned)kHostPage);
+}
 
 
 // Mode 7: no rerouting at all; at every Present, an event query + Flush + spin
@@ -1195,12 +1233,14 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
               : g_reroute == 13 ? "NO rerouting; a full GPU sync every 4th discard (cheap-mitigation probe)"
               : g_reroute == 14 ? "small DYNAMIC buffers PADDED past DXMT's 4096-byte page: no suballocation, no blit"
               : g_reroute == 15 ? "RINGS of dynamic buffers mapped NO_OVERWRITE: DXMT never renames or allocates, and no blit"
-                                : "mode 4 PLUS a forced per-draw re-dirty of the binding (does the argument re-encode flicker?)");
+              : g_reroute == 16 ? "mode 4 PLUS a forced per-draw re-dirty of the binding (does the argument re-encode flicker?)"
+                                : "NO rerouting; d3d11.dll's _aligned_malloc IAT-hooked to 16KB alignment and size (H: bytesNoCopy)");
     }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
 
     if (g_reroute == 12) setFrameLatency(dev, 1);   // after the mode is known, not before (cost one launch)
+    if (g_reroute == 17) installAlignHook();
 
     void** vtSc  = vtableOf(sc);
     void** vtCtx = vtableOf(ctx);
@@ -1271,6 +1311,8 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
+    if (g_reroute == 17)
+        tqlog("align (%s): %ld _aligned_malloc call(s) seen, %ld widened to 16KB", when, g_alignCalls, g_alignWidened);
     if (g_reroute == 16)
         tqlog("redirty (%s): %ld forced re-dirt(ies) after updates", when, g_redirties);
     if (g_reroute == 14)

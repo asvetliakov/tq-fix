@@ -1525,6 +1525,32 @@ mode 4 (complete fix, but its per-update blits split render passes and cost
 offscreen FX — O40) and mode 13 (partial, tunable sync-every-N at full frame
 rate). Next: N=4.
 
+## O43 — Mode 17 refutes the bytesNoCopy-alignment hypothesis, with the treatment verified
+
+*2026-08-29 07:38–07:40, one launch. Log: `cache/logs/align17-run1-*`.*
+
+`d3d11.dll!_aligned_malloc` IAT-hooked (one data write) to force 16KB
+alignment and 16KB-multiple size on every allocation. **Treatment verified
+twice over:** 7,020 of 7,020 calls widened, and the `mapptr:` lines now show
+every whole allocation at `mod16k 0x0000` where the previous run showed
+0x1000/0x2000/0x3000. **Flicker unchanged, pillar unaffected.**
+
+So `newBufferWithBytesNoCopy:` over non-host-page-aligned memory is NOT the
+fault — the fork evidently handles it, and handles it correctly. O42's law
+stands with its last cheap explanation removed: the GPU intermittently reads
+CPU-written mapped dynamic memory wrongly, for exactly one frame per victim,
+at 1–2%, and no D3D11-side arrangement of allocations, alignments, barriers,
+bindings or chunk boundaries changes that — only GPU-blit uploads (mode 4) or
+GPU-idle synchronization (modes 8/13) do.
+
+**The shim-reachable hypothesis space is exhausted.** Seventeen modes, each a
+recorded experiment. What remains is inside the translation: the encoder
+thread's handling of mapped-memory reads, or something in winemetal/Metal that
+a `.gputrace` (Stage 1, needs Xcode) or the fork's source (CodeWeavers) can
+see and we cannot. The Stage 6 report is no longer "here is a flicker" — it is
+"here is the component, the path, the dose-response, and sixteen eliminated
+mechanisms."
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.
