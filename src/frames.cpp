@@ -246,7 +246,7 @@ void setFrameLatency(ID3D11Device* dev, UINT want) {
 
 // Mode 13: mode 8's wait, but only every kSyncEvery-th discard - a cheaper
 // mitigation if the full wait turns out to be the only thing that works.
-const LONG kSyncEvery = 16;
+const LONG kSyncEvery = 4;
 
 // Mode 14: DXMT suballocates any buffer whose size is <= DXMT_PAGE_SIZE (4096)
 // into one shared page, and rotates a cursor through it on every discard
@@ -1192,7 +1192,7 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
               : g_reroute == 10 ? "NO rerouting; Flush (no wait) before EVERY Map(WRITE_DISCARD)"
               : g_reroute == 11 ? "NO rerouting; a full memory BARRIER at every Unmap (store visibility, one instruction)"
               : g_reroute == 12 ? "NO rerouting; SetMaximumFrameLatency(1) - one frame, and so few chunks, in flight"
-              : g_reroute == 13 ? "NO rerouting; a full GPU sync every 16th discard (cheap-mitigation probe)"
+              : g_reroute == 13 ? "NO rerouting; a full GPU sync every 4th discard (cheap-mitigation probe)"
               : g_reroute == 14 ? "small DYNAMIC buffers PADDED past DXMT's 4096-byte page: no suballocation, no blit"
               : g_reroute == 15 ? "RINGS of dynamic buffers mapped NO_OVERWRITE: DXMT never renames or allocates, and no blit"
                                 : "mode 4 PLUS a forced per-draw re-dirty of the binding (does the argument re-encode flicker?)");

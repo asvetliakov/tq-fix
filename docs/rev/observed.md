@@ -1482,6 +1482,49 @@ path) and why the rate **scales with frame rate** (O10c).
 **H-G, and it is one instruction to test:** a full memory barrier in `Unmap`,
 after the game's writes and before DXMT sees them (mode 11). Tested next.
 
+## O42 — Modes 11–16: barrier, latency, padding and the argument re-encode all exonerated; a sync dose-response; and the fork's pages are not 16KB-aligned
+
+*2026-08-29 07:05–07:35, one launch each, same scene. Logs in
+`cache/logs/{latency12,sync13,redirty16}-*`.*
+
+| Mode | What it does | Flicker |
+|---|---|---|
+| 11 | full memory barrier (`__sync_synchronize`) at every `Unmap` | **yes** — store visibility on the CPU side is not it |
+| 12 | `SetMaximumFrameLatency(1)` (accepted: log shows 3 → 1) | **yes** |
+| 13 | full GPU sync every **16th** discard, full 9.9 fps | **rarer** — shadows apparently clean, FX (pillar) still flickers |
+| 14 | small dynamic buffers padded past the page: whole allocation per discard | **worse** |
+| 15 | rings mapped `NO_OVERWRITE` — stable allocations, no rename, no blit | **yes** (+ own garbage-geometry artefact: the 8-deep big-VB rings wrap onto in-flight data; a shim bug, not DXMT's) |
+| 16 | mode 4 **plus** forced per-draw re-dirty of the binding (562,096 re-dirties) | **NO** — the per-draw argument re-encode is exonerated |
+
+**The law all sixteen modes obey.** Clean: GPU-blit updates into one stable
+allocation (3/4/16) and GPU-idle-at-discard (8, at 3.6 fps — confounded but
+consistent). Dose-response: partial sync (13) → partial fix. Everything else —
+renaming or not, fresh allocations or ringed, rebound or not, barriers,
+latency, chunk boundaries — flickers, and adding allocations/chunks makes it
+worse (1, 10, 14). **What separates clean from flickering is HOW THE BYTES
+REACH GPU MEMORY: staging-ring + GPU blit is clean; the GPU reading
+CPU-written mapped memory intermittently is not.**
+
+**And the map pointers say something concrete** (`mapptr:` lines, sync13 run):
+
+- A 256-byte dynamic buffer strides `+0x100` continuously through `0x1C00`,
+  crossing 4KB boundaries without renaming: **the fork's page is ≥16KB**, not
+  upstream's `DXMT_PAGE_SIZE=4096`. CodeWeavers changed this code.
+- Whole CpuPlaced allocations come back 4KB-aligned but **not 16KB-aligned**
+  (`mod16k` 0x1000/0x2000/0x3000): every one is wrapped by
+  `newBufferWithBytesNoCopy:`, which on Apple Silicon documents a host-page
+  (16KB) alignment requirement, from `_aligned_malloc` on the wow64 heap.
+  However the fork copes with that — rounding, splitting, or a private
+  API — it copes on **every dynamic buffer**, i386 only, and a 1–2%
+  intermittent miss in that machinery fits every observation in this file.
+  **This is the standing suspect, and it is beyond a shim's reach: it needs
+  the fork's source or a Metal capture.**
+
+**Where this leaves Stage 5.** Two workable mitigations, both measured:
+mode 4 (complete fix, but its per-update blits split render passes and cost
+offscreen FX — O40) and mode 13 (partial, tunable sync-every-N at full frame
+rate). Next: N=4.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.
