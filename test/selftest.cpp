@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
         void* createVertexShader = (*(void***)device)[12];
         void* createTexture2D = (*(void***)device)[5];
         void* createPixelShader = (*(void***)device)[15];
+        void* createSamplerState = (*(void***)device)[23];
         MEMORY_BASIC_INFORMATION info = {};
         bool queried = VirtualQuery(createVertexShader, &info, sizeof(info)) != 0;
         check(queried && info.AllocationBase == proxy,
@@ -156,6 +157,9 @@ int main(int argc, char** argv) {
         queried = VirtualQuery(createPixelShader, &info, sizeof(info)) != 0;
         check(queried && info.AllocationBase == proxy,
               "CreatePixelShader is redirected into the visual proxy");
+        queried = VirtualQuery(createSamplerState, &info, sizeof(info)) != 0;
+        check(queried && info.AllocationBase == proxy,
+              "CreateSamplerState is redirected into the visual proxy");
         void* draw = (*(void***)context)[13];
         queried = VirtualQuery(draw, &info, sizeof(info)) != 0;
         check(queried && info.AllocationBase == proxy,
@@ -163,6 +167,42 @@ int main(int argc, char** argv) {
     }
 
     if (device) {
+        D3D11_SAMPLER_DESC samplerDesc = {};
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW
+                             = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        ID3D11SamplerState* sampler = nullptr;
+        D3D11_SAMPLER_DESC observedSampler = {};
+        HRESULT samplerResult = device->CreateSamplerState(&samplerDesc, &sampler);
+        if (sampler) sampler->GetDesc(&observedSampler);
+        check(SUCCEEDED(samplerResult) && sampler
+              && observedSampler.Filter == D3D11_FILTER_ANISOTROPIC
+              && observedSampler.MaxAnisotropy == 16,
+              "trilinear wrap sampling is upgraded to 16x anisotropy");
+        if (sampler) sampler->Release();
+
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler = nullptr;
+        memset(&observedSampler, 0, sizeof(observedSampler));
+        samplerResult = device->CreateSamplerState(&samplerDesc, &sampler);
+        if (sampler) sampler->GetDesc(&observedSampler);
+        check(SUCCEEDED(samplerResult) && sampler
+              && observedSampler.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+              "clamped post-process sampling retains its original filter");
+        if (sampler) sampler->Release();
+
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sampler = nullptr;
+        memset(&observedSampler, 0, sizeof(observedSampler));
+        samplerResult = device->CreateSamplerState(&samplerDesc, &sampler);
+        if (sampler) sampler->GetDesc(&observedSampler);
+        check(SUCCEEDED(samplerResult) && sampler
+              && observedSampler.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT,
+              "point sampling retains its original filter");
+        if (sampler) sampler->Release();
+
         D3D11_TEXTURE2D_DESC shadow = {};
         shadow.Width = shadow.Height = 512;
         shadow.MipLevels = shadow.ArraySize = 1;

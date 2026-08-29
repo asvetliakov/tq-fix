@@ -14,7 +14,7 @@ namespace tq {
 namespace visual {
 namespace {
 
-struct Options { bool smaa, shadows; } g_options = {true, true};
+struct Options { bool smaa, shadows; UINT anisotropy; } g_options = {true, true, 16};
 
 struct Patch { void** slot; void* original; void* replacement; };
 Patch g_patches[10];
@@ -25,6 +25,8 @@ typedef HRESULT(WINAPI* CreateTexture2DFn)(ID3D11Device*, const D3D11_TEXTURE2D_
                                            const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
 typedef HRESULT(WINAPI* CreatePixelShaderFn)(ID3D11Device*, const void*, SIZE_T,
                                              ID3D11ClassLinkage*, ID3D11PixelShader**);
+typedef HRESULT(WINAPI* CreateSamplerStateFn)(ID3D11Device*, const D3D11_SAMPLER_DESC*,
+                                              ID3D11SamplerState**);
 typedef void(WINAPI* PSSetShaderFn)(ID3D11DeviceContext*, ID3D11PixelShader*,
                                     ID3D11ClassInstance* const*, UINT);
 typedef void(WINAPI* DrawFn)(ID3D11DeviceContext*, UINT, UINT);
@@ -36,6 +38,7 @@ typedef void(WINAPI* RSSetScissorsFn)(ID3D11DeviceContext*, UINT, const D3D11_RE
 
 CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
+CreateSamplerStateFn g_createSamplerState;
 PSSetShaderFn g_psSetShader;
 DrawFn g_draw;
 DrawIndexedFn g_drawIndexed;
@@ -134,6 +137,9 @@ void readOptions() {
     g_options.smaa = _wcsicmp(value, L"fxaa") != 0;
     GetPrivateProfileStringW(L"graphics", L"shadows", L"enhanced", value, 32, path);
     g_options.shadows = _wcsicmp(value, L"original") != 0;
+    int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
+    g_options.anisotropy = anisotropy == 1 ? 1
+                         : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
 }
 
 bool contains(const BYTE* bytes, SIZE_T size, const char* text) {
@@ -239,6 +245,19 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
         startProgramBuild(device);
     }
     return hr;
+}
+
+HRESULT WINAPI hookCreateSamplerState(ID3D11Device* device, const D3D11_SAMPLER_DESC* desc,
+                                      ID3D11SamplerState** sampler) {
+    if (!desc || desc->Filter != D3D11_FILTER_MIN_MAG_MIP_LINEAR
+        || desc->AddressU != D3D11_TEXTURE_ADDRESS_WRAP
+        || desc->AddressV != D3D11_TEXTURE_ADDRESS_WRAP)
+        return g_createSamplerState(device, desc, sampler);
+    D3D11_SAMPLER_DESC enhanced = *desc;
+    enhanced.Filter = D3D11_FILTER_ANISOTROPIC;
+    enhanced.MaxAnisotropy = g_options.anisotropy;
+    HRESULT hr = g_createSamplerState(device, &enhanced, sampler);
+    return FAILED(hr) ? g_createSamplerState(device, desc, sampler) : hr;
 }
 
 void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* shader,
@@ -415,8 +434,8 @@ bool createProgramResources(ID3D11Device* device) {
     raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
     raster.DepthClipEnable = TRUE; raster.ScissorEnable = FALSE;
     ok = SUCCEEDED(device->CreateBuffer(&bd, nullptr, &g_smaa.metrics))
-      && SUCCEEDED(device->CreateSamplerState(&linear, &g_smaa.linearSampler))
-      && SUCCEEDED(device->CreateSamplerState(&point, &g_smaa.pointSampler))
+      && SUCCEEDED(g_createSamplerState(device, &linear, &g_smaa.linearSampler))
+      && SUCCEEDED(g_createSamplerState(device, &point, &g_smaa.pointSampler))
       && SUCCEEDED(device->CreateBlendState(&blend, &g_smaa.blend))
       && SUCCEEDED(device->CreateDepthStencilState(&depth, &g_smaa.depth))
       && SUCCEEDED(device->CreateRasterizerState(&raster, &g_smaa.raster))
@@ -582,6 +601,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
     void** dv = *(void***)device;
     void** cv = *(void***)context;
     bool ok = true;
+    if (g_options.anisotropy > 1)
+        ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
+    else g_createSamplerState = (CreateSamplerStateFn)dv[23];
     if (g_options.shadows)
         ok &= patchSlot(&dv[5], (void*)&hookCreateTexture2D, (void**)&g_createTexture2D);
     else g_createTexture2D = (CreateTexture2DFn)dv[5];

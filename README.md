@@ -13,6 +13,8 @@ it:
 
 - replaces the FXAA draw with canonical SMAA 1x High (luma edges, lookup-based
   pattern weights, and neighborhood blending) at the same pre-UI point;
+- upgrades the game's trilinear wrapped material samplers to 16x anisotropic
+  filtering for clearer terrain and surface textures at oblique angles;
 - doubles eligible square shadow depth maps and their viewport/scissor;
 - changes TQ's four cardinal bilinear shadow taps into the corners of an
   optimized 3x3 PCF footprint.
@@ -37,13 +39,16 @@ original game paths, create `tqflicker.ini` beside `TQ.exe`:
 ```ini
 [graphics]
 aa=smaa
+anisotropy=16
 shadows=enhanced
 edge_updates=expanded
 ```
 
-Accepted rollback values are `aa=fxaa` and `shadows=original`. The in-game AA
-toggle remains authoritative: SMAA replaces the FXAA draw only while the game
-has AA enabled. Shadow Quality should remain High for the intended result.
+Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
+game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
+`shadows=original`. The in-game AA toggle remains authoritative: SMAA replaces
+the FXAA draw only while the game has AA enabled. Shadow Quality should remain
+High for the intended result.
 Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.

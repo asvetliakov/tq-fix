@@ -1,13 +1,13 @@
 {
-  "name": "tq-dx11-fix",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "doctor": "bash scripts/doctor.sh",
-    "build": "bash scripts/build.sh",
-    "release": "bash scripts/release.sh",
-    "selftest": "bash scripts/selftest-offgame.sh",
-    "install-dll": "bash scripts/install-dll.sh",
-    "uninstall-dll": "bash scripts/uninstall-dll.sh"
-  }
+    "name": "tq-dx11-fix",
+    "version": "1.1.0",
+    "private": true,
+    "scripts": {
+        "doctor": "bash scripts/doctor.sh",
+        "build": "bash scripts/build.sh",
+        "release": "bash scripts/release.sh",
+        "selftest": "bash scripts/selftest-offgame.sh",
+        "install-dll": "bash scripts/install-dll.sh",
+        "uninstall-dll": "bash scripts/uninstall-dll.sh"
+    }
 }
