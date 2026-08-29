@@ -18,6 +18,8 @@ it:
 - doubles eligible square shadow depth maps and their viewport/scissor;
 - changes TQ's four cardinal bilinear shadow taps into the corners of an
   optimized 3x3 PCF footprint.
+- progressively uploads large streamed terrain textures in bounded,
+  frame-paced chunks instead of submitting every high-resolution mip at once.
 
 For widescreen play, it also replaces the game's fixed 4:3 CPU-side
 entity-update frustum construction (expressed internally as 1024x768) with the
@@ -33,8 +35,9 @@ synchronization. Resolution-dependent AA targets are reused.
 
 ## Visual settings
 
-Visual upgrades are enabled when no configuration file exists. To select the
-original game paths, create `tqflicker.ini` beside `TQ.exe`:
+Visual upgrades are enabled when no configuration file exists. To customize
+them or select individual original game paths, create `tqflicker.ini` beside
+`TQ.exe`:
 
 ```ini
 [graphics]
@@ -42,6 +45,9 @@ aa=smaa
 anisotropy=16
 shadows=enhanced
 edge_updates=expanded
+
+[performance]
+streaming=optimized
 ```
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
@@ -52,6 +58,17 @@ High for the intended result.
 Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
+
+Streaming keeps the game's original level/entity preload distances. Large
+eligible BC1/BC2/BC3 terrain textures are created with their low mips ready
+immediately, then their high mips are uploaded progressively using an adaptive
+512 KiB–2 MiB frame budget. The original mapped archive data is retained only
+until those uploads finish, avoiding an extra texture-sized copy. Exact Engine
+and renderer build checks guard this path; any mismatch or resource-pressure
+condition falls back to the game's original synchronous upload. Use
+`streaming=original` to disable the optimization. The mod does not replace the
+resource thread or move D3D11 immediate-context work onto an unsafe worker
+thread.
 
 The shadow enhancement deliberately does not quantize per-object matrices. No
 safely isolated global light-projection upload has been established, so the

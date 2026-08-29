@@ -6,6 +6,7 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "streaming.h"
 
 namespace {
 
@@ -42,6 +43,13 @@ int main(int argc, char** argv) {
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
     g_report = fopen(report, "w");
     if (!g_report) return 99;
+
+    check(tq::streaming::optimizationEnabled(nullptr),
+          "streaming optimization defaults on when the setting is absent");
+    check(tq::streaming::optimizationEnabled(L"optimized"),
+          "streaming=optimized enables progressive uploads");
+    check(!tq::streaming::optimizationEnabled(L"original"),
+          "streaming=original restores synchronous uploads");
 
     const uintptr_t viewportSlot = 0x12345678u;
     const uintptr_t frustumSlot = 0x23456789u;

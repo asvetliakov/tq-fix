@@ -5,6 +5,7 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "streaming.h"
 #include "visual.h"
 
 extern "C" void* tq_winmm_targets[];
@@ -172,9 +173,11 @@ void patchDevice(ID3D11Device* device) {
     }
 }
 
-void installHooks(ID3D11Device* device, ID3D11DeviceContext* context) {
+void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
+                  IDXGISwapChain* swapChain = nullptr) {
     patchDevice(device);
     if (device) tq::visual::install(device, context);
+    if (swapChain) tq::streaming::installSwapChain(swapChain);
 }
 
 HRESULT WINAPI hookCreateDevice(
@@ -184,7 +187,8 @@ HRESULT WINAPI hookCreateDevice(
     ID3D11DeviceContext** context) {
     HRESULT result = g_createDevice(adapter, driverType, software, flags, levels,
                                     levelCount, sdkVersion, device, selectedLevel, context);
-    if (SUCCEEDED(result) && device) installHooks(*device, context ? *context : nullptr);
+    if (SUCCEEDED(result) && device)
+        installHooks(*device, context ? *context : nullptr);
     return result;
 }
 
@@ -197,7 +201,9 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
     HRESULT result = g_createDeviceAndSwapChain(
         adapter, driverType, software, flags, levels, levelCount, sdkVersion,
         description, swapChain, device, selectedLevel, context);
-    if (SUCCEEDED(result) && device) installHooks(*device, context ? *context : nullptr);
+    if (SUCCEEDED(result) && device)
+        installHooks(*device, context ? *context : nullptr,
+                     swapChain ? *swapChain : nullptr);
     return result;
 }
 
@@ -268,6 +274,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         tq::frustum::shutdown();
         tq::visual::shutdown();
         restorePatches();
+        tq::streaming::shutdown();
         if (g_thread) CloseHandle(g_thread);
         if (g_done) CloseHandle(g_done);
         if (g_stop) CloseHandle(g_stop);

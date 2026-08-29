@@ -1,5 +1,6 @@
 #include "visual.h"
 #include "dxbc_patch.h"
+#include "streaming.h"
 
 #include <d3dcompiler.h>
 #include <stdint.h>
@@ -14,10 +15,11 @@ namespace tq {
 namespace visual {
 namespace {
 
-struct Options { bool smaa, shadows; UINT anisotropy; } g_options = {true, true, 16};
+struct Options { bool smaa, shadows, streaming; UINT anisotropy; };
+Options g_options = {true, true, true, 16};
 
 struct Patch { void** slot; void* original; void* replacement; };
-Patch g_patches[10];
+Patch g_patches[24];
 int g_patchCount;
 LONG g_installed;
 
@@ -27,26 +29,37 @@ typedef HRESULT(WINAPI* CreatePixelShaderFn)(ID3D11Device*, const void*, SIZE_T,
                                              ID3D11ClassLinkage*, ID3D11PixelShader**);
 typedef HRESULT(WINAPI* CreateSamplerStateFn)(ID3D11Device*, const D3D11_SAMPLER_DESC*,
                                               ID3D11SamplerState**);
+typedef HRESULT(WINAPI* CreateShaderResourceViewFn)(ID3D11Device*, ID3D11Resource*,
+                                                     const D3D11_SHADER_RESOURCE_VIEW_DESC*,
+                                                     ID3D11ShaderResourceView**);
 typedef void(WINAPI* PSSetShaderFn)(ID3D11DeviceContext*, ID3D11PixelShader*,
                                     ID3D11ClassInstance* const*, UINT);
+typedef void(WINAPI* PSSetShaderResourcesFn)(ID3D11DeviceContext*, UINT, UINT,
+                                             ID3D11ShaderResourceView* const*);
 typedef void(WINAPI* DrawFn)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(WINAPI* DrawIndexedFn)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(WINAPI* OMSetRenderTargetsFn)(ID3D11DeviceContext*, UINT,
                                            ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
 typedef void(WINAPI* RSSetViewportsFn)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*);
 typedef void(WINAPI* RSSetScissorsFn)(ID3D11DeviceContext*, UINT, const D3D11_RECT*);
+typedef void(WINAPI* UpdateSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                          const D3D11_BOX*, const void*, UINT, UINT);
 
 CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
 CreateSamplerStateFn g_createSamplerState;
+CreateShaderResourceViewFn g_createShaderResourceView;
 PSSetShaderFn g_psSetShader;
+PSSetShaderResourcesFn g_psSetShaderResources;
 DrawFn g_draw;
 DrawIndexedFn g_drawIndexed;
 OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
 RSSetScissorsFn g_rsSetScissors;
+UpdateSubresourceFn g_updateSubresource;
 
 ID3D11Device* g_device;
+ID3D11DeviceContext* g_context;
 ID3D11PixelShader* g_fxaa[8];
 unsigned g_fxaaCount;
 bool g_fxaaBound;
@@ -54,6 +67,43 @@ bool g_inside;
 LONG g_programState;  // 0 idle, 1 building, 2 ready, 3 failed
 HANDLE g_programThread;
 HMODULE g_compiler;
+
+const UINT kUploadChunkBytes = 2 * 1024 * 1024;
+const unsigned kMaxUploadJobs = 256;
+const unsigned kMaxMappingLeases = 128;
+const unsigned kMaxTextureMips = 16;
+
+typedef void (__thiscall* ArchiveUnmapFn)(void*);
+ArchiveUnmapFn g_archiveUnmap;
+LONG g_archiveVtablePatched;
+CRITICAL_SECTION g_uploadLock;
+bool g_uploadLockReady;
+
+struct MappingLease {
+    bool used;
+    bool sealed;
+    void* source;
+    void* mappedBase;
+    LONG jobs;
+};
+
+struct UploadJob {
+    LONG state;  // 0 free, 1 reserved, 2 uploading
+    ID3D11Texture2D* texture;
+    ID3D11ShaderResourceView* fullView;
+    ID3D11ShaderResourceView* lowView;
+    MappingLease* lease;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_SUBRESOURCE_DATA source[kMaxTextureMips];
+    UINT lowMip;
+    UINT mip;
+    UINT blockRow;
+    UINT chunkBytes;
+    UINT maxChunkBytes;
+};
+
+MappingLease g_mappingLeases[kMaxMappingLeases];
+UploadJob g_uploadJobs[kMaxUploadJobs];
 
 struct ShadowTexture {
     void* identity;
@@ -137,6 +187,9 @@ void readOptions() {
     g_options.smaa = _wcsicmp(value, L"fxaa") != 0;
     GetPrivateProfileStringW(L"graphics", L"shadows", L"enhanced", value, 32, path);
     g_options.shadows = _wcsicmp(value, L"original") != 0;
+    GetPrivateProfileStringW(L"performance", L"streaming", L"optimized",
+                             value, 32, path);
+    g_options.streaming = tq::streaming::optimizationEnabled(value);
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
@@ -189,6 +242,372 @@ bool shadowDepthDesc(const D3D11_TEXTURE2D_DESC* d) {
     return d->BindFlags == need && d->Format == DXGI_FORMAT_R32_TYPELESS;
 }
 
+bool blockCompressedFormat(DXGI_FORMAT format, UINT* blockBytes) {
+    UINT bytes = 0;
+    switch (format) {
+        case DXGI_FORMAT_BC1_TYPELESS:
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB:
+            bytes = 8;
+            break;
+        case DXGI_FORMAT_BC2_TYPELESS:
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:
+        case DXGI_FORMAT_BC3_TYPELESS:
+        case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:
+            bytes = 16;
+            break;
+        default:
+            return false;
+    }
+    if (blockBytes) *blockBytes = bytes;
+    return true;
+}
+
+struct TextureOwner {
+    void* source;
+    void* mappedBase;
+    void** vtable;
+};
+
+bool findTextureOwner(const void* dds, TextureOwner* owner) {
+    if (!dds || !owner) return false;
+    BYTE* engine = (BYTE*)GetModuleHandleW(L"Engine.dll");
+    if (!engine || !readable(engine + 0x213cad)) return false;
+    const uintptr_t parserReturn = (uintptr_t)(engine + 0x213cad);
+
+    uintptr_t* stack = nullptr;
+    __asm__ __volatile__("movl %%esp, %0" : "=r"(stack));
+    MEMORY_BASIC_INFORMATION memory = {};
+    if (!stack || !VirtualQuery(stack, &memory, sizeof(memory))
+        || memory.State != MEM_COMMIT) return false;
+    const BYTE* regionEnd = (const BYTE*)memory.BaseAddress + memory.RegionSize;
+    const BYTE* scanEnd = (const BYTE*)stack + 16 * 1024;
+    if (scanEnd > regionEnd) scanEnd = regionEnd;
+
+    for (uintptr_t* slot = stack; (const BYTE*)(slot + 8) <= scanEnd; ++slot) {
+        if (*slot != parserReturn) continue;
+        BYTE* source = (BYTE*)slot[7];
+        if (!readable(source) || !readable(source + 0x34)) continue;
+        void** vtable = *(void***)source;
+        if (!readable(vtable + 4) || vtable != (void**)(engine + 0x2f71ec)
+            || vtable[2] != engine + 0x14e560) continue;
+        const BYTE* data = (const BYTE*)slot[1];
+        uint32_t bytes = (uint32_t)slot[2];
+        if (!data || !bytes || (const BYTE*)dds < data
+            || (const BYTE*)dds >= data + bytes) continue;
+        owner->source = source;
+        owner->mappedBase = *(void**)(source + 0x34);
+        owner->vtable = vtable;
+        return true;
+    }
+    return false;
+}
+
+MappingLease* findLease(void* source) {
+    MappingLease* sealed = nullptr;
+    for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
+        MappingLease& lease = g_mappingLeases[i];
+        if (!lease.used || lease.source != source) continue;
+        if (!lease.sealed) return &lease;
+        sealed = &lease;
+    }
+    return sealed;
+}
+
+MappingLease* createLease(void* source, void* mappedBase) {
+    if (!source || !mappedBase) return nullptr;
+    for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
+        MappingLease& lease = g_mappingLeases[i];
+        if (lease.used) continue;
+        lease.used = true;
+        lease.sealed = false;
+        lease.source = source;
+        lease.mappedBase = mappedBase;
+        lease.jobs = 0;
+        return &lease;
+    }
+    return nullptr;
+}
+
+void __fastcall hookArchiveUnmap(void* source, void*) {
+    bool retained = false;
+    void* unmap = nullptr;
+    if (g_uploadLockReady) {
+        EnterCriticalSection(&g_uploadLock);
+        MappingLease* lease = findLease(source);
+        if (lease && *(void**)((BYTE*)source + 0x34) == nullptr) {
+            lease->sealed = true;
+            retained = true;
+            if (!lease->jobs) {
+                unmap = lease->mappedBase;
+                memset(lease, 0, sizeof(*lease));
+            }
+        }
+        LeaveCriticalSection(&g_uploadLock);
+    }
+    if (unmap) UnmapViewOfFile(unmap);
+    if (!retained && g_archiveUnmap) g_archiveUnmap(source);
+}
+
+bool ensureArchiveUnmapHook(void** vtable) {
+    if (!vtable || !g_uploadLockReady) return false;
+    if (InterlockedCompareExchange(&g_archiveVtablePatched, 1, 1))
+        return vtable[4] == (void*)&hookArchiveUnmap;
+    if (vtable[4] != (void*)((BYTE*)GetModuleHandleW(L"Engine.dll") + 0x14e540))
+        return false;
+    g_archiveUnmap = (ArchiveUnmapFn)vtable[4];
+    if (!patchSlot(&vtable[4], (void*)&hookArchiveUnmap, nullptr)) {
+        g_archiveUnmap = nullptr;
+        return false;
+    }
+    InterlockedExchange(&g_archiveVtablePatched, 1);
+    return true;
+}
+
+UploadJob* reserveUploadJob() {
+    for (unsigned i = 0; i < kMaxUploadJobs; ++i)
+        if (InterlockedCompareExchange(&g_uploadJobs[i].state, 1, 0) == 0)
+            return &g_uploadJobs[i];
+    return nullptr;
+}
+
+UINT lowMipFor(const D3D11_TEXTURE2D_DESC* desc) {
+    UINT width = desc->Width, height = desc->Height, mip = 0;
+    while (mip + 1 < desc->MipLevels && (width > 512 || height > 512)) {
+        if (width > 1) width >>= 1;
+        if (height > 1) height >>= 1;
+        ++mip;
+    }
+    return mip;
+}
+
+bool progressiveTextureCandidate(const D3D11_TEXTURE2D_DESC* desc,
+                                 const D3D11_SUBRESOURCE_DATA* initial,
+                                 const void* caller, uint64_t* topBytes) {
+    if (!g_options.streaming || !desc || !initial || !initial[0].pSysMem
+        || desc->Usage != D3D11_USAGE_DEFAULT || desc->ArraySize != 1
+        || !desc->MipLevels || desc->MipLevels > kMaxTextureMips
+        || desc->BindFlags != D3D11_BIND_SHADER_RESOURCE) return false;
+    UINT blockBytes = 0;
+    if (!blockCompressedFormat(desc->Format, &blockBytes)) return false;
+    uint64_t rows = (desc->Height + 3u) / 4u;
+    if (!rows) rows = 1;
+    uint64_t bytes = (uint64_t)initial[0].SysMemPitch * rows;
+    if (bytes < 2ull * 1024ull * 1024ull) return false;
+    BYTE* renderer = (BYTE*)GetModuleHandleW(L"Direct3D11.dll");
+    if (!renderer || caller != renderer + 0x6aa5c) return false;
+    if (topBytes) *topBytes = bytes;
+    return true;
+}
+
+HRESULT createProgressiveTexture(ID3D11Device* device,
+                                 const D3D11_TEXTURE2D_DESC* desc,
+                                 const D3D11_SUBRESOURCE_DATA* initial,
+                                 ID3D11Texture2D** texture,
+                                 const void* caller, bool* handled) {
+    *handled = false;
+    uint64_t topBytes = 0;
+    if (!progressiveTextureCandidate(desc, initial, caller, &topBytes)
+        || !g_uploadLockReady) return E_FAIL;
+    TextureOwner owner = {};
+    const BYTE* dds = (const BYTE*)initial[0].pSysMem - 0x80;
+    if (!findTextureOwner(dds, &owner)) return E_FAIL;
+    UploadJob* job = reserveUploadJob();
+    if (!job) return E_FAIL;
+
+    UINT lowMip = lowMipFor(desc);
+    D3D11_SUBRESOURCE_DATA staged[kMaxTextureMips] = {};
+    for (UINT mip = lowMip; mip < desc->MipLevels; ++mip)
+        staged[mip] = initial[mip];
+    HRESULT hr = g_createTexture2D(device, desc, staged, texture);
+    if (FAILED(hr) || !texture || !*texture) {
+        InterlockedExchange(&job->state, 0);
+        return E_FAIL;
+    }
+
+    EnterCriticalSection(&g_uploadLock);
+    MappingLease* lease = findLease(owner.source);
+    if (owner.mappedBase
+        && (!lease || lease->sealed || lease->mappedBase != owner.mappedBase))
+        lease = createLease(owner.source, owner.mappedBase);
+    bool hooked = lease && ensureArchiveUnmapHook(owner.vtable);
+    if (hooked && owner.mappedBase) {
+        void** field = (void**)((BYTE*)owner.source + 0x34);
+        void* prior = InterlockedCompareExchangePointer(field, nullptr, owner.mappedBase);
+        hooked = prior == owner.mappedBase;
+    }
+    if (hooked && !owner.mappedBase)
+        hooked = lease->mappedBase != nullptr;
+    if (!hooked) {
+        if (lease && !lease->jobs) memset(lease, 0, sizeof(*lease));
+        LeaveCriticalSection(&g_uploadLock);
+        (*texture)->Release();
+        *texture = nullptr;
+        InterlockedExchange(&job->state, 0);
+        return E_FAIL;
+    }
+
+    memset((BYTE*)job + sizeof(job->state), 0, sizeof(*job) - sizeof(job->state));
+    job->texture = *texture;
+    job->texture->AddRef();
+    job->lease = lease;
+    job->desc = *desc;
+    memcpy(job->source, initial, desc->MipLevels * sizeof(*initial));
+    job->lowMip = lowMip;
+    job->mip = 0;
+    job->blockRow = 0;
+    job->maxChunkBytes = topBytes <= 4ull * 1024ull * 1024ull
+                       ? 1024 * 1024 : kUploadChunkBytes;
+    job->chunkBytes = job->maxChunkBytes;
+    ++lease->jobs;
+    InterlockedExchange(&job->state, 2);
+    LeaveCriticalSection(&g_uploadLock);
+
+    *handled = true;
+    return hr;
+}
+
+HRESULT WINAPI hookCreateShaderResourceView(
+    ID3D11Device* device, ID3D11Resource* resource,
+    const D3D11_SHADER_RESOURCE_VIEW_DESC* description,
+    ID3D11ShaderResourceView** view) {
+    HRESULT hr = g_createShaderResourceView(device, resource, description, view);
+    if (FAILED(hr) || !view || !*view || !g_uploadLockReady) return hr;
+
+    EnterCriticalSection(&g_uploadLock);
+    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
+        UploadJob& job = g_uploadJobs[i];
+        if (job.state != 2 || job.texture != resource || job.fullView) continue;
+        D3D11_SHADER_RESOURCE_VIEW_DESC low = {};
+        if (description) low = *description;
+        else {
+            low.Format = job.desc.Format;
+            low.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            low.Texture2D.MostDetailedMip = 0;
+            low.Texture2D.MipLevels = job.desc.MipLevels;
+        }
+        if (low.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D) {
+            low.Texture2D.MostDetailedMip = job.lowMip;
+            low.Texture2D.MipLevels = job.desc.MipLevels - job.lowMip;
+            ID3D11ShaderResourceView* lowView = nullptr;
+            if (SUCCEEDED(g_createShaderResourceView(device, resource, &low, &lowView))) {
+                job.fullView = *view;
+                job.lowView = lowView;
+            }
+        }
+        break;
+    }
+    LeaveCriticalSection(&g_uploadLock);
+    return hr;
+}
+
+void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
+                                     UINT count,
+                                     ID3D11ShaderResourceView* const* views) {
+    if (!views || !count || count > D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT
+        || !g_uploadLockReady) {
+        g_psSetShaderResources(context, start, count, views);
+        return;
+    }
+    ID3D11ShaderResourceView* substituted[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
+    memcpy(substituted, views, count * sizeof(*views));
+    EnterCriticalSection(&g_uploadLock);
+    for (UINT slot = 0; slot < count; ++slot) {
+        if (!substituted[slot]) continue;
+        for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
+            UploadJob& job = g_uploadJobs[i];
+            if (job.state == 2 && job.fullView == substituted[slot] && job.lowView) {
+                substituted[slot] = job.lowView;
+                break;
+            }
+        }
+    }
+    g_psSetShaderResources(context, start, count, substituted);
+    LeaveCriticalSection(&g_uploadLock);
+}
+
+void advanceTextureUploadsInternal() {
+    if (!g_uploadLockReady || !g_context || !g_updateSubresource) return;
+    ID3D11Texture2D* releaseTexture = nullptr;
+    ID3D11ShaderResourceView* releaseLowView = nullptr;
+    void* unmap = nullptr;
+
+    EnterCriticalSection(&g_uploadLock);
+    UploadJob* selected = nullptr;
+    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
+        if (g_uploadJobs[i].state == 2) {
+            selected = &g_uploadJobs[i];
+            break;
+        }
+    }
+    if (!selected) {
+        LeaveCriticalSection(&g_uploadLock);
+        return;
+    }
+
+    UploadJob& job = *selected;
+    if (job.mip < job.lowMip) {
+        UINT width = job.desc.Width >> job.mip;
+        UINT height = job.desc.Height >> job.mip;
+        if (!width) width = 1;
+        if (!height) height = 1;
+        UINT totalBlockRows = (height + 3u) / 4u;
+        if (!totalBlockRows) totalBlockRows = 1;
+        UINT pitch = job.source[job.mip].SysMemPitch;
+        UINT rows = pitch ? job.chunkBytes / pitch : 0;
+        if (!rows) rows = 1;
+        if (rows > totalBlockRows - job.blockRow)
+            rows = totalBlockRows - job.blockRow;
+        D3D11_BOX box = {};
+        box.left = 0;
+        box.right = width;
+        box.top = job.blockRow * 4u;
+        box.bottom = (job.blockRow + rows) * 4u;
+        if (box.bottom > height) box.bottom = height;
+        box.front = 0;
+        box.back = 1;
+        const BYTE* source = (const BYTE*)job.source[job.mip].pSysMem
+                           + (uint64_t)job.blockRow * pitch;
+        DWORD stepStartedMs = GetTickCount();
+        g_updateSubresource(g_context, job.texture, job.mip, &box,
+                            source, pitch, 0);
+        DWORD stepMs = GetTickCount() - stepStartedMs;
+        if (stepMs >= 6 && job.chunkBytes > 512 * 1024)
+            job.chunkBytes /= 2;
+        else if (stepMs <= 2 && job.chunkBytes < job.maxChunkBytes) {
+            job.chunkBytes += 256 * 1024;
+            if (job.chunkBytes > job.maxChunkBytes)
+                job.chunkBytes = job.maxChunkBytes;
+        }
+        job.blockRow += rows;
+        if (job.blockRow >= totalBlockRows) {
+            ++job.mip;
+            job.blockRow = 0;
+        }
+    }
+
+    if (job.mip >= job.lowMip) {
+        releaseTexture = job.texture;
+        releaseLowView = job.lowView;
+        MappingLease* lease = job.lease;
+        memset((BYTE*)&job + sizeof(job.state), 0,
+               sizeof(job) - sizeof(job.state));
+        InterlockedExchange(&job.state, 0);
+        if (lease && lease->jobs > 0) --lease->jobs;
+        if (lease && lease->sealed && !lease->jobs) {
+            unmap = lease->mappedBase;
+            memset(lease, 0, sizeof(*lease));
+        }
+    }
+    LeaveCriticalSection(&g_uploadLock);
+
+    if (releaseLowView) releaseLowView->Release();
+    if (releaseTexture) releaseTexture->Release();
+    if (unmap) UnmapViewOfFile(unmap);
+}
+
 bool createProgramResources(ID3D11Device* device);
 
 DWORD WINAPI programThread(void* argument) {
@@ -212,13 +631,19 @@ void startProgramBuild(ID3D11Device* device) {
 HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* desc,
                                    const D3D11_SUBRESOURCE_DATA* initial,
                                    ID3D11Texture2D** texture) {
+    const void* caller = __builtin_return_address(0);
+    bool progressivelyHandled = false;
+    HRESULT progressive = createProgressiveTexture(device, desc, initial, texture,
+                                                    caller, &progressivelyHandled);
+    if (progressivelyHandled) return progressive;
     if (!g_options.shadows || !shadowDepthDesc(desc) || initial)
         return g_createTexture2D(device, desc, initial, texture);
     D3D11_TEXTURE2D_DESC scaled = *desc;
     if (scaled.Width <= 8192 / 2) { scaled.Width *= 2; scaled.Height *= 2; }
     HRESULT hr = g_createTexture2D(device, &scaled, initial, texture);
-    if (FAILED(hr) || !texture || !*texture)
+    if (FAILED(hr) || !texture || !*texture) {
         return g_createTexture2D(device, desc, initial, texture);
+    }
     if (g_shadowTextureCount < sizeof(g_shadowTextures) / sizeof(g_shadowTextures[0])) {
         ShadowTexture& s = g_shadowTextures[g_shadowTextureCount++];
         s.identity = identityOf(*texture);
@@ -597,35 +1022,81 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
     readOptions();
     if (!context) device->GetImmediateContext(&context); else context->AddRef();
     if (!context) { InterlockedExchange(&g_installed, 0); return; }
+    if (g_options.streaming) {
+        InitializeCriticalSection(&g_uploadLock);
+        g_uploadLockReady = true;
+        tq::streaming::setPresentCallback(&onPresent);
+    }
     g_device = device;
+    g_context = context;
     void** dv = *(void***)device;
     void** cv = *(void***)context;
     bool ok = true;
     if (g_options.anisotropy > 1)
         ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
     else g_createSamplerState = (CreateSamplerStateFn)dv[23];
-    if (g_options.shadows)
+    if (g_options.shadows || g_options.streaming)
         ok &= patchSlot(&dv[5], (void*)&hookCreateTexture2D, (void**)&g_createTexture2D);
     else g_createTexture2D = (CreateTexture2DFn)dv[5];
-    if (g_options.smaa) {
+    if (g_options.streaming)
+        ok &= patchSlot(&dv[7], (void*)&hookCreateShaderResourceView,
+                        (void**)&g_createShaderResourceView);
+    else g_createShaderResourceView = (CreateShaderResourceViewFn)dv[7];
+    if (g_options.smaa)
         ok &= patchSlot(&dv[15], (void*)&hookCreatePixelShader, (void**)&g_createPixelShader);
+    else g_createPixelShader = (CreatePixelShaderFn)dv[15];
+    if (g_options.smaa) {
         ok &= patchSlot(&cv[9], (void*)&hookPSSetShader, (void**)&g_psSetShader);
         ok &= patchSlot(&cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
         ok &= patchSlot(&cv[13], (void*)&hookDraw, (void**)&g_draw);
-    } else {
-        g_createPixelShader = (CreatePixelShaderFn)dv[15];
     }
+    if (g_options.streaming)
+        ok &= patchSlot(&cv[8], (void*)&hookPSSetShaderResources,
+                        (void**)&g_psSetShaderResources);
+    else g_psSetShaderResources = (PSSetShaderResourcesFn)cv[8];
     if (g_options.shadows) {
         ok &= patchSlot(&cv[33], (void*)&hookOMSetRenderTargets, (void**)&g_omSetRenderTargets);
         ok &= patchSlot(&cv[44], (void*)&hookRSSetViewports, (void**)&g_rsSetViewports);
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
-    context->Release();
-    if (!ok) { restoreSlots(); InterlockedExchange(&g_installed, 0); }
+    g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
+    if (!ok) {
+        restoreSlots();
+        g_context->Release();
+        g_context = nullptr;
+        if (g_uploadLockReady) {
+            g_uploadLockReady = false;
+            DeleteCriticalSection(&g_uploadLock);
+        }
+        tq::streaming::setPresentCallback(nullptr);
+        InterlockedExchange(&g_installed, 0);
+    }
+}
+
+void onPresent() {
+    advanceTextureUploadsInternal();
 }
 
 void shutdown() {
+    tq::streaming::setPresentCallback(nullptr);
     restoreSlots();
+    if (g_uploadLockReady) {
+        EnterCriticalSection(&g_uploadLock);
+        for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
+            UploadJob& job = g_uploadJobs[i];
+            if (job.lowView) job.lowView->Release();
+            if (job.texture) job.texture->Release();
+            memset(&job, 0, sizeof(job));
+        }
+        for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
+            if (g_mappingLeases[i].used && g_mappingLeases[i].mappedBase)
+                UnmapViewOfFile(g_mappingLeases[i].mappedBase);
+            memset(&g_mappingLeases[i], 0, sizeof(g_mappingLeases[i]));
+        }
+        LeaveCriticalSection(&g_uploadLock);
+        g_uploadLockReady = false;
+        DeleteCriticalSection(&g_uploadLock);
+    }
     bool workerStopped = true;
     if (g_programThread) {
         workerStopped = WaitForSingleObject(g_programThread, 2000) == WAIT_OBJECT_0;
@@ -640,7 +1111,15 @@ void shutdown() {
     }
     memset(g_fxaa, 0, sizeof(g_fxaa)); g_fxaaCount = 0;
     memset(g_shadowTextures, 0, sizeof(g_shadowTextures)); g_shadowTextureCount = 0;
+    if (g_context) { g_context->Release(); g_context = nullptr; }
     g_device = nullptr; g_fxaaBound = g_shadowBound = false;
+    g_createTexture2D = nullptr;
+    g_createPixelShader = nullptr;
+    g_createShaderResourceView = nullptr;
+    g_psSetShaderResources = nullptr;
+    g_updateSubresource = nullptr;
+    g_archiveUnmap = nullptr;
+    InterlockedExchange(&g_archiveVtablePatched, 0);
     InterlockedExchange(&g_programState, 0);
     InterlockedExchange(&g_installed, 0);
 }
