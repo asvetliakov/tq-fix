@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 5
+#define TQFLICKER_REROUTE_DEFAULT 9
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -203,19 +203,46 @@ void otherIdentities(ID3D11Buffer* b, void** resOut, void** unkOut) {
 // kRingK identical buffers; Map(DISCARD) advances the ring, maps the next
 // member, and re-binds it wherever the game had the original bound.
 const int kRingK = 4096;
-const int kRings = 8;
+const int kRings = 64;
 const int kStages = 6;                // VS PS GS HS DS CS
 const int kCbSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;   // 14
+const int kVbSlots = D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;          // 32
+const UINT kRingBytes = 16u << 20;    // budget per ring; K = clamp(budget / size, 8, kRingK)
 struct Ring {
     ID3D11Buffer* handle;             // what the game holds
-    ID3D11Buffer** members;           // kRingK buffers, members[0] == handle
-    int cur;
-    UINT size;
+    ID3D11Buffer** members;           // k buffers, members[0] == handle
+    int cur, k;
+    UINT size, bind;
 };
 Ring g_rings[kRings];
 int  g_ringCount;
 signed char g_bound[kStages][kCbSlots];   // ring index bound at (stage, slot), or -1
-LONG g_ringMaps, g_ringRebinds;
+signed char g_vbBound[kVbSlots];          // ring index bound at IA slot, or -1
+UINT g_vbStride[kVbSlots], g_vbOffset[kVbSlots];
+signed char g_ibBound = -1; DXGI_FORMAT g_ibFormat; UINT g_ibOffset;
+LONG g_ringMaps, g_ringRebinds, g_dynSeen;
+
+// Mode 7: no rerouting at all; at every Present, an event query + Flush + spin
+// until the GPU reports it done. Kills pipelining on purpose: if the flicker
+// survives a GPU that is provably idle at every frame boundary, the race is
+// not GPU-side memory reuse.
+ID3D11Device*  g_dev;
+ID3D11Query*   g_syncQuery;
+LONG g_syncWaits, g_syncSpinsMax;
+void gpuSync(ID3D11DeviceContext* c) {
+    if (!g_dev) return;
+    if (!g_syncQuery) {
+        D3D11_QUERY_DESC qd = {D3D11_QUERY_EVENT, 0};
+        if (FAILED(g_dev->CreateQuery(&qd, &g_syncQuery)) || !g_syncQuery) { g_dev = nullptr; tqlog("!! sync: CreateQuery failed"); return; }
+    }
+    c->End(g_syncQuery);
+    c->Flush();
+    LONG spins = 0;
+    BOOL done = FALSE;
+    while (c->GetData(g_syncQuery, &done, sizeof(done), 0) == S_FALSE) { if (++spins > 2000000) break; if (spins & 1023) continue; Sleep(0); }
+    g_syncWaits++;
+    if (spins > g_syncSpinsMax) g_syncSpinsMax = spins;
+}
 
 Ring* ringOf(void* res) {
     for (int i = 0; i < g_ringCount; i++)
@@ -224,12 +251,12 @@ Ring* ringOf(void* res) {
 }
 
 bool wantReroute(const D3D11_BUFFER_DESC* d) {
-    if (!g_reroute || !d) return false;
+    if (!g_reroute || g_reroute >= 7 || !d) return false;
     if (d->Usage != D3D11_USAGE_DYNAMIC) return false;
     if (!(d->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE) || (d->CPUAccessFlags & D3D11_CPU_ACCESS_READ)) return false;
     if (d->MiscFlags) return false;
     UINT ok = D3D11_BIND_CONSTANT_BUFFER;
-    if (g_reroute == 2) ok |= D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER;
+    if (g_reroute == 2 || g_reroute == 6) ok |= D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER;
     return (d->BindFlags & ~ok) == 0 && (d->BindFlags & ok) != 0;
 }
 
@@ -250,6 +277,10 @@ HRESULT WINAPI hookPresent(IDXGISwapChain* self, UINT sync, UINT flags) {
     if (flags & DXGI_PRESENT_TEST) return g_realPresent(self, sync, flags);
 
     LONG frame = InterlockedIncrement(&g_frame);
+    if (g_reroute == 7) {
+        ID3D11DeviceContext* ctx = nullptr;
+        if (g_dev) { g_dev->GetImmediateContext(&ctx); if (ctx) { gpuSync(ctx); ctx->Release(); } }
+    }
 
     Counts c;
     c.drawIndexed     = take(&g_now.drawIndexed);
@@ -384,9 +415,57 @@ void WINAPI hookHSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* co
 void WINAPI hookDSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 4, s, n, b); }
 void WINAPI hookCSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 5, s, n, b); }
 
+typedef void(WINAPI* SetVBFn)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*, const UINT*, const UINT*);
+typedef void(WINAPI* SetIBFn)(ID3D11DeviceContext*, ID3D11Buffer*, DXGI_FORMAT, UINT);
+SetVBFn g_realSetVB; SetIBFn g_realSetIB;
+
+// Mode 9: a Flush at every render-target change. DXMT reorders and coalesces
+// encoders inside a command chunk; a Flush commits the chunk, so passes can
+// no longer be reordered across this boundary. No blits, no memory.
+typedef void(WINAPI* SetRTFn)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+SetRTFn g_realSetRT;
+LONG g_rtFlushes;
+void WINAPI hookSetRT(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    if (!g_realSetRT) return;
+    if (g_reroute == 9) { c->Flush(); g_rtFlushes++; }
+    g_realSetRT(c, n, rtvs, dsv);
+}
+
+void WINAPI hookSetVB(ID3D11DeviceContext* c, UINT start, UINT n, ID3D11Buffer* const* bufs, const UINT* strides,
+                      const UINT* offsets) {
+    if (!g_realSetVB) return;
+    if (!bufs || !n || start + n > (UINT)kVbSlots || !g_ringCount) {
+        if (n && start + n <= (UINT)kVbSlots) for (UINT i = 0; i < n; i++) g_vbBound[start + i] = -1;
+        g_realSetVB(c, start, n, bufs, strides, offsets);
+        return;
+    }
+    ID3D11Buffer* sub[kVbSlots];
+    for (UINT i = 0; i < n; i++) {
+        sub[i] = bufs[i];
+        g_vbBound[start + i] = -1;
+        g_vbStride[start + i] = strides ? strides[i] : 0;
+        g_vbOffset[start + i] = offsets ? offsets[i] : 0;
+        for (int r = 0; r < g_ringCount; r++)
+            if (g_rings[r].handle == bufs[i]) { sub[i] = g_rings[r].members[g_rings[r].cur]; g_vbBound[start + i] = (signed char)r; break; }
+    }
+    g_realSetVB(c, start, n, sub, strides, offsets);
+}
+
+void WINAPI hookSetIB(ID3D11DeviceContext* c, ID3D11Buffer* buf, DXGI_FORMAT fmt, UINT off) {
+    if (!g_realSetIB) return;
+    g_ibBound = -1; g_ibFormat = fmt; g_ibOffset = off;
+    for (int r = 0; r < g_ringCount; r++)
+        if (buf && g_rings[r].handle == buf) { g_ibBound = (signed char)r; buf = g_rings[r].members[g_rings[r].cur]; break; }
+    g_realSetIB(c, buf, fmt, off);
+}
+
 // After the ring advanced: every slot that held this ring gets the new member.
 void ringRebind(ID3D11DeviceContext* c, int r) {
     ID3D11Buffer* m = g_rings[r].members[g_rings[r].cur];
+    if (g_realSetVB)
+        for (int sl = 0; sl < kVbSlots; sl++)
+            if (g_vbBound[sl] == r) { g_realSetVB(c, (UINT)sl, 1, &m, &g_vbStride[sl], &g_vbOffset[sl]); g_ringRebinds++; }
+    if (g_realSetIB && g_ibBound == r) { g_realSetIB(c, m, g_ibFormat, g_ibOffset); g_ringRebinds++; }
     for (int st = 0; st < kStages; st++) {
         if (!g_realSetCB[st]) continue;
         for (int sl = 0; sl < kCbSlots; sl++)
@@ -457,11 +536,12 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
     if (!g_realMap) return E_FAIL;
     add(&g_now.maps, 1);
     if (type == D3D11_MAP_WRITE_DISCARD) add(&g_now.discardMaps, 1);
+    if (g_reroute == 8 && type == D3D11_MAP_WRITE_DISCARD) gpuSync(c);   // GPU provably idle at every discard
 
-    if (g_reroute == 5 && sub == 0 && out) {
+    if ((g_reroute == 5 || g_reroute == 6) && sub == 0 && out) {
         if (Ring* rg = ringOf((void*)res)) {
             if (type == D3D11_MAP_WRITE_DISCARD) {
-                rg->cur = (rg->cur + 1) % kRingK;
+                rg->cur = (rg->cur + 1) % rg->k;
                 ringRebind(c, (int)(rg - g_rings));
             } else if (type != D3D11_MAP_WRITE_NO_OVERWRITE) {
                 return g_realMap(c, res, sub, type, flags, out);
@@ -473,7 +553,7 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
         }
     }
 
-    if (g_reroute && g_reroute != 5 && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute && g_reroute < 5 && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -504,10 +584,10 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
 
 void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
     if (!g_realUnmap) return;
-    if (g_reroute == 5 && sub == 0) {
+    if ((g_reroute == 5 || g_reroute == 6) && sub == 0) {
         if (Ring* rg = ringOf((void*)res)) { g_realUnmap(c, rg->members[rg->cur], sub); return; }
     }
-    if (g_reroute && g_reroute != 5 && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute && g_reroute < 5 && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -585,30 +665,40 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
                                 const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
     if (!g_realCreateBuffer) return E_FAIL;
     bool reroute = wantReroute(desc);
-    if (reroute && g_reroute == 5) {
+    static LONG dynLines;
+    if (desc && desc->Usage == D3D11_USAGE_DYNAMIC) g_dynSeen++;
+    if (desc && desc->Usage == D3D11_USAGE_DYNAMIC && ++dynLines <= 80)
+        tqlog("dynamic:  #%ld %u bytes, bind 0x%x, cpu 0x%x, misc 0x%x, frame %ld%s", dynLines, (unsigned)desc->ByteWidth,
+              (unsigned)desc->BindFlags, (unsigned)desc->CPUAccessFlags, (unsigned)desc->MiscFlags, (long)g_frame,
+              reroute ? "  -> ring" : "");
+    if (reroute && (g_reroute == 5 || g_reroute == 6)) {
         HRESULT hr = g_realCreateBuffer(dev, desc, init, out);
-        add(&g_now.newBuffers, 1);
         if (SUCCEEDED(hr) && out && *out) {
+            // Big buffers get a smaller budget: 64 rings x 16 MB would not fit a 32-bit heap.
+            UINT budget = desc->ByteWidth > 4096 ? (8u << 20) : kRingBytes;
+            int k = (int)(budget / (desc->ByteWidth ? desc->ByteWidth : 1));
+            if (k > kRingK) k = kRingK;
+            if (k < 8) k = 8;
             EnterCriticalSection(&g_devLock);
             if (g_ringCount < kRings) {
                 Ring& rg = g_rings[g_ringCount];
-                rg.members = (ID3D11Buffer**)calloc(kRingK, sizeof(ID3D11Buffer*));
+                rg.members = (ID3D11Buffer**)calloc(k, sizeof(ID3D11Buffer*));
                 int made = 0;
                 if (rg.members) {
                     rg.members[0] = *out;
                     made = 1;
-                    for (; made < kRingK; made++) {
+                    for (; made < k; made++) {
                         if (FAILED(g_realCreateBuffer(dev, desc, init, &rg.members[made])) || !rg.members[made]) break;
                     }
                 }
-                if (made == kRingK) {
-                    rg.handle = *out; rg.cur = 0; rg.size = desc->ByteWidth;
+                if (made == k) {
+                    rg.handle = *out; rg.cur = 0; rg.k = k; rg.size = desc->ByteWidth; rg.bind = desc->BindFlags;
                     g_ringCount++;
                     tqlog("ring:     #%d %p  %u bytes, bind 0x%x: ring of %d dynamic buffers, frame %ld", g_ringCount,
-                          (void*)*out, (unsigned)desc->ByteWidth, (unsigned)desc->BindFlags, kRingK, (long)g_frame);
+                          (void*)*out, (unsigned)desc->ByteWidth, (unsigned)desc->BindFlags, k, (long)g_frame);
                 } else {
                     tqlog("!! ring: only %d of %d members created for %p - buffer left as the game made it", made,
-                          kRingK, (void*)*out);
+                          k, (void*)*out);
                     for (int i = 1; i < made; i++) if (rg.members[i]) rg.members[i]->Release();
                     free(rg.members); rg.members = nullptr;
                 }
@@ -616,6 +706,17 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
                 tqlog("!! ring: table full - %p left as the game made it", (void*)*out);
             }
             LeaveCriticalSection(&g_devLock);
+        }
+        reroute = false;              // fall through to the accounting below with the real result
+        add(&g_now.newBuffers, 1);
+        if (SUCCEEDED(hr) && desc && (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER)) {
+            EnterCriticalSection(&g_devLock);
+            g_cbTotal++; g_buffersTotal++;
+            noteCbWidth(desc->ByteWidth);
+            if (desc->ByteWidth > g_cbLargest) g_cbLargest = desc->ByteWidth;
+            LeaveCriticalSection(&g_devLock);
+        } else if (SUCCEEDED(hr)) {
+            EnterCriticalSection(&g_devLock); g_buffersTotal++; LeaveCriticalSection(&g_devLock);
         }
         return hr;
     }
@@ -904,6 +1005,9 @@ void patchContext(void** vt, const char* name) {
     slot(vt, TQ_SLOT_ID3D11DeviceContext_HSSetConstantBuffers, name, (void*)&hookHSSetCB, &g_realSetCB[3]);
     slot(vt, TQ_SLOT_ID3D11DeviceContext_DSSetConstantBuffers, name, (void*)&hookDSSetCB, &g_realSetCB[4]);
     slot(vt, TQ_SLOT_ID3D11DeviceContext_CSSetConstantBuffers, name, (void*)&hookCSSetCB, &g_realSetCB[5]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_IASetVertexBuffers, name, (void*)&hookSetVB, &g_realSetVB);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_IASetIndexBuffer, name, (void*)&hookSetIB, &g_realSetIB);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_OMSetRenderTargets, name, (void*)&hookSetRT, &g_realSetRT);
 }
 
 }  // namespace
@@ -921,20 +1025,26 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
     g_installed = true;
     InitializeCriticalSection(&g_devLock);
     memset(g_bound, -1, sizeof(g_bound));
+    g_dev = dev;
+    memset(g_vbBound, -1, sizeof(g_vbBound));
     {
         wchar_t v[8] = L"";
         DWORD n = GetEnvironmentVariableW(L"TQFLICKER_REROUTE", v, 8);
         // Compiled-in default (the env var did not reach the game on 2026-08-29,
         // reason unknown); the variable can still override it either way.
         g_reroute = TQFLICKER_REROUTE_DEFAULT;
-        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'5') ? (int)(v[0] - L'0') : 0;
+        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'9') ? (int)(v[0] - L'0') : 0;
         tqlog("frames:   TQFLICKER_REROUTE=%d - %s", g_reroute,
               g_reroute == 0 ? "observing only (dynamic buffers untouched)"
               : g_reroute == 1 ? "dynamic CONSTANT buffers -> DEFAULT + shadow + UpdateSubresource (H-F)"
               : g_reroute == 2 ? "dynamic constant, VERTEX and INDEX buffers -> DEFAULT + shadow (H-F)"
               : g_reroute == 3 ? "dynamic CONSTANT buffers -> DEFAULT|UAV: no DXMT rename at all, GPU blit (H-F)"
               : g_reroute == 4 ? "dynamic CONSTANT buffers -> DEFAULT|STREAM_OUTPUT: no rename, GPU blit (fountain test)"
-                               : "dynamic CONSTANT buffers -> a RING of dynamic buffers, rebound on every discard (the fix)");
+              : g_reroute == 5 ? "dynamic CONSTANT buffers -> a RING of dynamic buffers, rebound on every discard"
+              : g_reroute == 6 ? "dynamic constant, VERTEX and INDEX buffers -> RINGS of dynamic buffers, rebound on every discard"
+              : g_reroute == 7 ? "NO rerouting; full GPU sync (event query + Flush + wait) at every Present"
+              : g_reroute == 8 ? "NO rerouting; full GPU sync before EVERY Map(WRITE_DISCARD) - a slideshow, on purpose"
+                               : "NO rerouting; Flush at every OMSetRenderTargets (pins pass order across DXMT's encoder reordering)");
     }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
@@ -1008,9 +1118,14 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
-    if (g_reroute == 5)
-        tqlog("ring (%s): %d ring(s) of %d, %ld map(s) through the ring, %ld rebind(s)", when, g_ringCount, kRingK,
-              g_ringMaps, g_ringRebinds);
+    if (g_reroute == 9)
+        tqlog("rtflush (%s): %ld Flush(es) at OMSetRenderTargets, %.1f per frame", when, g_rtFlushes,
+              g_frame ? (double)g_rtFlushes / g_frame : 0.0);
+    if (g_reroute == 7 || g_reroute == 8)
+        tqlog("sync (%s): %ld GPU wait(s) at Present, longest %ld spin(s)", when, g_syncWaits, g_syncSpinsMax);
+    if (g_reroute == 5 || g_reroute == 6)
+        tqlog("ring (%s): %d ring(s) of %d, %ld map(s) through the rings, %ld rebind(s); %ld dynamic buffer(s) seen",
+              when, g_ringCount, kRings, g_ringMaps, g_ringRebinds, g_dynSeen);
     else if (g_reroute)
         tqlog("reroute (%s): mode %d, %ld buffer(s) rerouted, %ld map(s) served from shadow, %ld unservable",
               when, g_reroute, g_rrCount, g_rrMaps, g_rrBadMaps);
