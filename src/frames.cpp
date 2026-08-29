@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 3
+#define TQFLICKER_REROUTE_DEFAULT 5
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -194,6 +194,35 @@ void otherIdentities(ID3D11Buffer* b, void** resOut, void** unkOut) {
     if (SUCCEEDED(b->QueryInterface(__uuidof(IUnknown), (void**)&u)) && u) { *unkOut = u; u->Release(); }
 }
 
+// ------------------------------------------------ ring (mode 5, the fix)
+//
+// Modes 3/4 proved the fault is DXMT's rename path but cost a GPU blit per
+// update, which splits the render pass and loses FX drawn into offscreen
+// targets (O40). Mode 5 stays on ordinary DYNAMIC buffers and simply never
+// asks DXMT to rename one soon: each game constant buffer becomes a ring of
+// kRingK identical buffers; Map(DISCARD) advances the ring, maps the next
+// member, and re-binds it wherever the game had the original bound.
+const int kRingK = 4096;
+const int kRings = 8;
+const int kStages = 6;                // VS PS GS HS DS CS
+const int kCbSlots = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;   // 14
+struct Ring {
+    ID3D11Buffer* handle;             // what the game holds
+    ID3D11Buffer** members;           // kRingK buffers, members[0] == handle
+    int cur;
+    UINT size;
+};
+Ring g_rings[kRings];
+int  g_ringCount;
+signed char g_bound[kStages][kCbSlots];   // ring index bound at (stage, slot), or -1
+LONG g_ringMaps, g_ringRebinds;
+
+Ring* ringOf(void* res) {
+    for (int i = 0; i < g_ringCount; i++)
+        if ((void*)g_rings[i].handle == res) return &g_rings[i];
+    return nullptr;
+}
+
 bool wantReroute(const D3D11_BUFFER_DESC* d) {
     if (!g_reroute || !d) return false;
     if (d->Usage != D3D11_USAGE_DYNAMIC) return false;
@@ -322,6 +351,48 @@ ExecuteCommandListFn   g_realExecuteCommandList;
 MapFn                  g_realMap;
 typedef void(WINAPI* UnmapFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 UnmapFn                g_realUnmap;
+typedef void(WINAPI* SetCBFn)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
+SetCBFn g_realSetCB[kStages];
+const char* kStageName[kStages] = {"VS", "PS", "GS", "HS", "DS", "CS"};
+
+void ringSetCB(ID3D11DeviceContext* c, int stage, UINT start, UINT n, ID3D11Buffer* const* bufs) {
+    if (!g_realSetCB[stage]) return;
+    if (!g_ringCount || !bufs || n == 0 || start + n > (UINT)kCbSlots) {
+        if (bufs && n && start + n <= (UINT)kCbSlots)
+            for (UINT i = 0; i < n; i++) g_bound[stage][start + i] = -1;
+        g_realSetCB[stage](c, start, n, bufs);
+        return;
+    }
+    ID3D11Buffer* sub[kCbSlots];
+    for (UINT i = 0; i < n; i++) {
+        sub[i] = bufs[i];
+        g_bound[stage][start + i] = -1;
+        for (int r = 0; r < g_ringCount; r++) {
+            if (g_rings[r].handle == bufs[i]) {
+                sub[i] = g_rings[r].members[g_rings[r].cur];
+                g_bound[stage][start + i] = (signed char)r;
+                break;
+            }
+        }
+    }
+    g_realSetCB[stage](c, start, n, sub);
+}
+void WINAPI hookVSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 0, s, n, b); }
+void WINAPI hookPSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 1, s, n, b); }
+void WINAPI hookGSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 2, s, n, b); }
+void WINAPI hookHSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 3, s, n, b); }
+void WINAPI hookDSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 4, s, n, b); }
+void WINAPI hookCSSetCB(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) { ringSetCB(c, 5, s, n, b); }
+
+// After the ring advanced: every slot that held this ring gets the new member.
+void ringRebind(ID3D11DeviceContext* c, int r) {
+    ID3D11Buffer* m = g_rings[r].members[g_rings[r].cur];
+    for (int st = 0; st < kStages; st++) {
+        if (!g_realSetCB[st]) continue;
+        for (int sl = 0; sl < kCbSlots; sl++)
+            if (g_bound[st][sl] == r) { g_realSetCB[st](c, (UINT)sl, 1, &m); g_ringRebinds++; }
+    }
+}
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* c, UINT count, UINT start, INT base) {
     add(&g_now.drawIndexed, 1);
@@ -387,7 +458,22 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
     add(&g_now.maps, 1);
     if (type == D3D11_MAP_WRITE_DISCARD) add(&g_now.discardMaps, 1);
 
-    if (g_reroute && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute == 5 && sub == 0 && out) {
+        if (Ring* rg = ringOf((void*)res)) {
+            if (type == D3D11_MAP_WRITE_DISCARD) {
+                rg->cur = (rg->cur + 1) % kRingK;
+                ringRebind(c, (int)(rg - g_rings));
+            } else if (type != D3D11_MAP_WRITE_NO_OVERWRITE) {
+                return g_realMap(c, res, sub, type, flags, out);
+            }
+            HRESULT hr = g_realMap(c, rg->members[rg->cur], sub, type, flags, out);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) add(&g_now.mapsBusy, 1);
+            if (SUCCEEDED(hr)) { add(&g_now.rerouted, 1); g_ringMaps++; }
+            return hr;
+        }
+    }
+
+    if (g_reroute && g_reroute != 5 && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -418,7 +504,10 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
 
 void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
     if (!g_realUnmap) return;
-    if (g_reroute && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute == 5 && sub == 0) {
+        if (Ring* rg = ringOf((void*)res)) { g_realUnmap(c, rg->members[rg->cur], sub); return; }
+    }
+    if (g_reroute && g_reroute != 5 && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -496,6 +585,40 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
                                 const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
     if (!g_realCreateBuffer) return E_FAIL;
     bool reroute = wantReroute(desc);
+    if (reroute && g_reroute == 5) {
+        HRESULT hr = g_realCreateBuffer(dev, desc, init, out);
+        add(&g_now.newBuffers, 1);
+        if (SUCCEEDED(hr) && out && *out) {
+            EnterCriticalSection(&g_devLock);
+            if (g_ringCount < kRings) {
+                Ring& rg = g_rings[g_ringCount];
+                rg.members = (ID3D11Buffer**)calloc(kRingK, sizeof(ID3D11Buffer*));
+                int made = 0;
+                if (rg.members) {
+                    rg.members[0] = *out;
+                    made = 1;
+                    for (; made < kRingK; made++) {
+                        if (FAILED(g_realCreateBuffer(dev, desc, init, &rg.members[made])) || !rg.members[made]) break;
+                    }
+                }
+                if (made == kRingK) {
+                    rg.handle = *out; rg.cur = 0; rg.size = desc->ByteWidth;
+                    g_ringCount++;
+                    tqlog("ring:     #%d %p  %u bytes, bind 0x%x: ring of %d dynamic buffers, frame %ld", g_ringCount,
+                          (void*)*out, (unsigned)desc->ByteWidth, (unsigned)desc->BindFlags, kRingK, (long)g_frame);
+                } else {
+                    tqlog("!! ring: only %d of %d members created for %p - buffer left as the game made it", made,
+                          kRingK, (void*)*out);
+                    for (int i = 1; i < made; i++) if (rg.members[i]) rg.members[i]->Release();
+                    free(rg.members); rg.members = nullptr;
+                }
+            } else {
+                tqlog("!! ring: table full - %p left as the game made it", (void*)*out);
+            }
+            LeaveCriticalSection(&g_devLock);
+        }
+        return hr;
+    }
     D3D11_BUFFER_DESC alt;
     if (reroute) {
         alt = *desc;
@@ -505,6 +628,7 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
         // DynamicBuffer at all, so UpdateSubresource becomes a GPU blit into
         // one allocation that is never renamed (O37/O38).
         if (g_reroute == 3) alt.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+        if (g_reroute == 4) alt.BindFlags |= D3D11_BIND_STREAM_OUTPUT;   // same no-rename effect, no UAV semantics
     }
     HRESULT hr = g_realCreateBuffer(dev, reroute ? &alt : desc, init, out);
     if (reroute && FAILED(hr)) {
@@ -774,6 +898,12 @@ void patchContext(void** vt, const char* name) {
          &g_realExecuteCommandList);
     slot(vt, TQ_SLOT_ID3D11DeviceContext_Map, name, (void*)&hookMap, &g_realMap);
     slot(vt, TQ_SLOT_ID3D11DeviceContext_Unmap, name, (void*)&hookUnmap, &g_realUnmap);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_VSSetConstantBuffers, name, (void*)&hookVSSetCB, &g_realSetCB[0]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_PSSetConstantBuffers, name, (void*)&hookPSSetCB, &g_realSetCB[1]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_GSSetConstantBuffers, name, (void*)&hookGSSetCB, &g_realSetCB[2]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_HSSetConstantBuffers, name, (void*)&hookHSSetCB, &g_realSetCB[3]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_DSSetConstantBuffers, name, (void*)&hookDSSetCB, &g_realSetCB[4]);
+    slot(vt, TQ_SLOT_ID3D11DeviceContext_CSSetConstantBuffers, name, (void*)&hookCSSetCB, &g_realSetCB[5]);
 }
 
 }  // namespace
@@ -790,18 +920,21 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
     }
     g_installed = true;
     InitializeCriticalSection(&g_devLock);
+    memset(g_bound, -1, sizeof(g_bound));
     {
         wchar_t v[8] = L"";
         DWORD n = GetEnvironmentVariableW(L"TQFLICKER_REROUTE", v, 8);
         // Compiled-in default (the env var did not reach the game on 2026-08-29,
         // reason unknown); the variable can still override it either way.
         g_reroute = TQFLICKER_REROUTE_DEFAULT;
-        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'3') ? (int)(v[0] - L'0') : 0;
+        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'5') ? (int)(v[0] - L'0') : 0;
         tqlog("frames:   TQFLICKER_REROUTE=%d - %s", g_reroute,
               g_reroute == 0 ? "observing only (dynamic buffers untouched)"
               : g_reroute == 1 ? "dynamic CONSTANT buffers -> DEFAULT + shadow + UpdateSubresource (H-F)"
               : g_reroute == 2 ? "dynamic constant, VERTEX and INDEX buffers -> DEFAULT + shadow (H-F)"
-                               : "dynamic CONSTANT buffers -> DEFAULT|UAV: no DXMT rename at all, GPU blit (H-F)");
+              : g_reroute == 3 ? "dynamic CONSTANT buffers -> DEFAULT|UAV: no DXMT rename at all, GPU blit (H-F)"
+              : g_reroute == 4 ? "dynamic CONSTANT buffers -> DEFAULT|STREAM_OUTPUT: no rename, GPU blit (fountain test)"
+                               : "dynamic CONSTANT buffers -> a RING of dynamic buffers, rebound on every discard (the fix)");
     }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
@@ -875,7 +1008,10 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
-    if (g_reroute)
+    if (g_reroute == 5)
+        tqlog("ring (%s): %d ring(s) of %d, %ld map(s) through the ring, %ld rebind(s)", when, g_ringCount, kRingK,
+              g_ringMaps, g_ringRebinds);
+    else if (g_reroute)
         tqlog("reroute (%s): mode %d, %ld buffer(s) rerouted, %ld map(s) served from shadow, %ld unservable",
               when, g_reroute, g_rrCount, g_rrMaps, g_rrBadMaps);
 }

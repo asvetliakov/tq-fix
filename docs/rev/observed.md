@@ -1402,6 +1402,30 @@ CodeWeavers/upstream with this report in hand.
   rename path (batching updates, or one big ring of DEFAULT buffers).
 - Vertex/index dynamic buffers were **not** rerouted and did not need to be.
 
+## O40 — The blit-based reroute loses an FX: the rebirth fountain's pillar (modes 3 and 4)
+
+*2026-08-29, reporter's eyes, three launches: mode 3, DX9 control, mode 4.*
+
+With mode 3 the flicker was gone (O39) but the activated rebirth fountain
+at the start area had **no light pillar**. **DX9, same character, same
+fountain: pillar present** — so it is a regression of the reroute, not the
+game state. **Mode 4** (`STREAM_OUTPUT` instead of `UNORDERED_ACCESS`, the
+other bind flag that stops DXMT renaming): flicker still gone, **pillar
+still missing**. So it is not the UAV semantics; it is what both modes
+share — **`UpdateSubresource` as a GPU blit**, which makes DXMT end the
+render encoder and start a blit encoder on every constant update. An FX
+drawn into an offscreen target between two of those splits is what gets
+lost, and the fountain is only the one we noticed. **Modes 3 and 4 are
+diagnostics, not the fix.**
+
+The fix must stay on the game's own path — `DYNAMIC` buffers, `Map`, no
+blit — and simply never let DXMT rename one too soon. That is **mode 5**: a
+ring of 4096 identical dynamic buffers per game buffer (DXMT's page is 4096
+bytes, so two slots per member, 16 MB per ring), the ring advanced on every
+`Map(WRITE_DISCARD)` and re-bound through the six `*SetConstantBuffers`
+hooks. A member is re-mapped only after 4095 others, ~4–5 frames at the
+shrine's 1800 maps a frame.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.

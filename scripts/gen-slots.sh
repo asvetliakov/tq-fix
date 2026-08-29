@@ -52,7 +52,8 @@ emit() {  # header iface method...
   emit dxgi.h  IDXGISwapChain Present
   emit d3d11.h ID3D11DeviceContext DrawIndexed Draw DrawIndexedInstanced DrawInstanced \
        DrawAuto DrawIndexedInstancedIndirect DrawInstancedIndirect ExecuteCommandList \
-       Map Unmap
+       Map Unmap VSSetConstantBuffers PSSetConstantBuffers GSSetConstantBuffers \
+       HSSetConstantBuffers DSSetConstantBuffers CSSetConstantBuffers
   emit d3d11.h ID3D11Device CreateBuffer CreateVertexShader CreatePixelShader CreateSamplerState
 } > "$OUT/slots.h"
 echo "gen-slots: $OUT/slots.h"
