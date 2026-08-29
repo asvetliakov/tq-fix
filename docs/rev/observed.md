@@ -1582,6 +1582,30 @@ what the GPU already has (memcmp 2KB vs a blit) — most constants of a static
 scene do not change — then re-measure against an uncapped mode-0 baseline,
 which has never been taken.
 
+## O46 — The price of mode 4, measured uncapped: 3.6× on busy frames
+
+*2026-08-29 07:46–07:55, three uncapped runs, same shrine scene, busy frames =
+draws > 300. Logs: `cache/logs/{mode4-uncapped-run1,mode4-skip-run1,mode0-uncapped-baseline}-*`.*
+
+| Run | Mean busy frame | ≈ fps | Worst |
+|---|---|---|---|
+| mode 0 (raw DXMT, flickering) | 8.7 ms | **115.5** | 276 ms |
+| mode 4 | 35.4 ms | 28.2 | 314 ms |
+| mode 4 + identical-push skip | 31.4 ms | **31.9** | 495 ms |
+
+The skip removed only ~10% of pushes (156,682 of 1,530,226) — the game
+changes its constants on most draws, so there is no free fat. The cost is not
+the copy; it is the **render-encoder split** DXMT performs for every
+`UpdateSubresource` blit, ~700–1900 times a frame, and on this path that
+count is irreducible: each draw needs its own constants uploaded before it.
+
+**The standing trade, user-selectable per launch in `tqflicker.ini`:**
+`reroute=4` — no flicker, ~32 fps at the shrine; `reroute=0` — ~115 fps with
+the flicker. `reroute=13` exists but its uncapped cost is unmeasured (spin
+waits that were cheap at 10fps will not be cheap at 115). The real fix — an
+upload path that neither splits encoders nor mis-reads CPU-mapped memory — is
+DXMT's to make, which is what Stage 6's report asks for.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.

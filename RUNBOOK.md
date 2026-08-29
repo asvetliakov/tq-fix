@@ -19,6 +19,11 @@
 > but real CPU cost — not a solution, a lever). The game is UNHARMED in all
 > modes; mode 15's garbage was our own shallow-ring bug, withdrawn.
 >
+> **The measured trade (O46):** raw DXMT 115.5 fps with flicker; mode 4
+> 31.9 fps without. Mode 4's cost is DXMT's per-update encoder split,
+> irreducible from the shim. `tqflicker.ini` beside TQ.exe picks the mode
+> per launch. At full speed mode 4 keeps the fountain pillar (O45).
+>
 > **Next:** the reporter's decision on the default mode + whether to install
 > Xcode. A `.gputrace` of a bad frame (Stage 1) is now surgical: capture at a
 > flagged frame, inspect the victim draw's constant/vertex buffer bytes in GPU
