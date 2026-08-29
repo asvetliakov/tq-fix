@@ -40,3 +40,20 @@ From O37/H-F. All data-side; the device and context vtables are already held.
 
 Extend to `DYNAMIC` vertex/index buffers only if constants alone do not move
 the number. **Gate is unchanged:** a number, not an impression.
+
+
+## Outcome — 2026-08-29
+
+**Seventeen modes tried in one session** (`TQFLICKER_REROUTE`, O38–O46). The
+candidate above (reroute to DEFAULT + UpdateSubresource) evolved into
+**mode 4** (`DEFAULT|STREAM_OUTPUT`, no rename, GPU-blit updates), which
+removes the flicker entirely and, at full speed, keeps every FX (O45). Cost:
+3.6× on busy frames (O46) — DXMT splits the render encoder per update.
+Shipped as `tqflicker.ini` (`reroute=`) beside TQ.exe, precedence
+env > ini > compiled default. **The stage's formal gate (a 10fps-capped
+60-second recording measured the O12 way, no dropouts) was NOT run** — the
+reporter's eyes at full speed say no flicker; the measured proof is one
+capped recording away if ever needed.
+
+Rings, padding, barriers, latency, flush and alignment modes are all kept in
+`frames.cpp` as documented dead ends — they are the bug report's evidence.

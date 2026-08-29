@@ -2,42 +2,31 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/observed.md` O35–O43.
-> **2026-08-29 was the breakthrough session: seventeen experiments (modes
-> 1–17, `TQFLICKER_REROUTE_DEFAULT` in `frames.cpp`), and the fault is
-> localized to DXMT's upload path for CPU-mapped dynamic memory, i386.**
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/observed.md` O35–O46 —
+> **2026-08-29 was the breakthrough: seventeen shim experiments localized the
+> fault to DXMT's upload path for CPU-mapped dynamic memory (i386), and a
+> user-selectable mitigation now ships in the game directory.**
 >
-> The law (O42, O43): GPU-blit uploads into a stable allocation (modes 3/4/16)
-> or GPU-idle sync (8, 13) remove the flicker entirely; every CPU-mapped
-> arrangement — renaming or not, rings, padding, barriers, latency, chunk
-> boundaries, argument re-encode, 16KB alignment — flickers, and more
-> allocations/chunks make it worse. Dose-response on sync frequency.
+> **State of play:** `tqflicker.ini` beside TQ.exe picks the mode per launch —
+> `reroute=4` (current): no flicker, fountain pillar intact at full speed
+> (O45), ~32 fps at the shrine; `reroute=0`: raw DXMT, ~115 fps, flickering
+> (O46). Mode 4's cost is DXMT's per-update encoder split — irreducible from
+> the shim. The 10fps measuring cap is commented out in `dxmt.conf`.
 >
-> **Working mitigations:** mode 4 (complete fix; per-update blits split render
-> passes and cost offscreen FX — the rebirth-fountain pillar, O40) and mode 13
-> with `kSyncEvery=4` (no flicker seen in one test, full 10fps-capped rate,
-> but real CPU cost — not a solution, a lever). The game is UNHARMED in all
-> modes; mode 15's garbage was our own shallow-ring bug, withdrawn.
+> **The next stage is Stage 6** — `docs/plans/stage-6-ship.md`, updated with
+> the report outline. The report is the real fix path: component, upload
+> path, dose-response, seventeen eliminated mechanisms (O41–O43), the perf
+> trade (O46), DXVK's `TQ.exe` profile, O2's border-colour warning, and O44
+> (DXVK renders black geometry in this Preview, so DXMT is the only backend).
+> Two optional measurements before filing: mode 13 uncapped fps (one boot),
+> and — if Xcode ever appears — Stage 1's `.gputrace` of a flagged bad frame,
+> which would show the stale bytes directly.
 >
-> **The measured trade (O46):** raw DXMT 115.5 fps with flicker; mode 4
-> 31.9 fps without. Mode 4's cost is DXMT's per-update encoder split,
-> irreducible from the shim. `tqflicker.ini` beside TQ.exe picks the mode
-> per launch. At full speed mode 4 keeps the fountain pillar (O45).
->
-> **Next:** the reporter's decision on the default mode + whether to install
-> Xcode. A `.gputrace` of a bad frame (Stage 1) is now surgical: capture at a
-> flagged frame, inspect the victim draw's constant/vertex buffer bytes in GPU
-> memory — stale bytes = the last question answered. Stage 6's report is
-> report-grade already: component, path, dose-response, sixteen eliminated
-> mechanisms, DXVK's profile, O2's warning.
->
-> Housekeeping: 10fps cap now COMMENTED OUT in `dxmt.conf` (normal play);
-> the mode lives in `tqflicker.ini` beside TQ.exe (written by install-dll,
-> currently `reroute=4`), precedence env > ini > compiled default. Logs all
-> kept under `cache/logs/`. Bottle is "Titan Quest" (GOG build, 4GB-patched);
-> launch via `scripts/launch.sh` or the CrossOver UI (env vars do NOT reach a
-> UI launch — that is what the ini is for). O44: DXVK renders black geometry
-> in this Preview, reporter-tested; no escape route there.
+> Housekeeping: bottle is **"Titan Quest"** (GOG build, 4GB-patched, no
+> Steam). The reporter launches from the CrossOver UI — env vars do NOT
+> reach those launches; that is what the ini is for. **Never launch the game
+> for them; hand them a checklist.** All run logs under `cache/logs/`,
+> named `<mode>-<what>-<time>-*`.
 
 ---
 
@@ -257,10 +246,10 @@ this is the next stage and it can be written today.
 | 3 | DXMT hands out different vtables per interface version | **CLOSED** | **O20** for the device, **O28** for the context: `ID3D11Device1` and `ID3D11DeviceContext1` are each the *same object with the same vtable* as the base interface. One vtable each; Stage 4 patches once. `frames.cpp` still asks at install and would say `!!` if that ever changed |
 | 4 | Patching a vtable a thread is already inside | **OPEN — mitigated** | Done as designed: `frames::install` runs inside the `D3D11CreateDeviceAndSwapChain` hook, on the game's thread, before the game is handed the device. Stays open until a play session confirms it (Stage 4 gate) |
 | 5 | H-A is wrong and the border colour is a red herring | **CLOSED — the risk happened** | **O10a refuted H-A.** The flicker does not move when shadow-map resolution moves the frustum boundary. The shadows-off evidence was correlational and was labelled as such; it was correlational. O2's warning survives as bug-report evidence only |
-| 6 | The defect is unfixable from outside the game | **OPEN** | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
+| 6 | The defect is unfixable from outside the game | **PARTLY CLOSED** — mode 4 removes it at 3.6× frame cost (O46); the cheap fix is DXMT's | Unchanged in substance, widened in scope now that there is one defect. If Stage 1 or 4 shows a shader-internal or engine-internal cause, the honest outcome is a bug report, not a hack |
 | 7 | A fix that crashes is worse than the flicker | **OPEN** | O22's scare was the launch route (O24), not the hook. Stage 4 adds fourteen vtable patches, and the rule applied was: **prove every one of them through the real DXMT off-game first** — the self-test now does (O28). `TQFLICKER_HOOK=0` remains the one-launch control if the play session misbehaves |
 | 16 | The per-frame table is truncated by the next launch | **OPEN — newly found** | `tqflicker-frames.log` is rewritten at every device creation, so the run that just measured is one launch from gone. `npm run keep-log -- label` first, always. Same family as Risk 12 |
-| 17 | The project ends in a bug report rather than a fix | **OPEN — now likely** | **O30.** The fault is in DXMT, which we do not ship and cannot patch from a shim in the game's process. Risk 6 said "if the cause is engine- or shader-internal the honest outcome is a bug report"; O30 makes it *translation*-internal, which is the same conclusion by a different route. Stage 6's evidence is already complete. Not a failure — the project set out to find out what was wrong, and it did |
+| 17 | The project ends in a bug report rather than a fix | **OPEN — report AND a shim mitigation** | **O30.** The fault is in DXMT, which we do not ship and cannot patch from a shim in the game's process. Risk 6 said "if the cause is engine- or shader-internal the honest outcome is a bug report"; O30 makes it *translation*-internal, which is the same conclusion by a different route. Stage 6's evidence is already complete. Not a failure — the project set out to find out what was wrong, and it did |
 | 18 | Concluding from a mis-aligned recording | **CLOSED** | The alignment is the load-bearing step of O30 and it was nearly done wrongly. Two rules came out of it: **align by wall clock** (verified `birth + duration == mtime`), never by matching anomalies to dips — that assumes the answer; and **make the verdict two counts over one span**, so a second of clock error cannot change it. A timing-fingerprint alignment was tried and does not work at a 10fps cap (1.70ms best against 2.60ms worst) |
 | 13 | The renderer does not inherit our environment | **OPEN — newly found** | **O18.** The `TQ.exe` we launch is a Steam handoff stub; the renderer is Steam's child. `cxstart` env injection (O15) reaches the stub and **not** the process that renders. Every `DXMT_*`, `FEX_*` or `TQFLICKER_*` variable an experiment depends on must go where Steam can see it, or the experiment silently measures the baseline |
 | 14 | Steam wedges and stops launching the game | **OPEN — newly found** | Happened at the end of Stage 3: after one abrupt game exit, Steam wrote nothing further to `console_log.txt` and ignored three launch requests. **Check `content_log.txt` for an `App Running` line before believing a launch happened at all.** Recovering from it is Risk 15, and the recovery was worse than the wedge |
