@@ -62,6 +62,10 @@ npm run selftest
 npm run install-dll
 ```
 
+`npm run release` performs a fresh build and creates
+`dist/tq-dx11-fix-v<version>.zip` with `winmm.dll` at the archive root, ready
+for distribution. The version is read from `package.json`.
+
 `npm run uninstall-dll` removes the proxy and the TQ-specific Wine override.
 
 The tested environment is Titan Quest Anniversary Edition (32-bit GOG build),
