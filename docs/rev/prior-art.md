@@ -28,6 +28,13 @@ variables, a `dxmt.conf` file mechanism, and a Metal frame capture hook. All of
 it enumerated in `substrate.md` by reading strings out of the shipped DLLs,
 because there is no documentation in the bundle.
 
+**It is open source, and the shipped build is a fork of it.** `3Shain/dxmt` on
+GitHub; the bundle's `d3d11.dll` reports `v0.80-131-g2befd18`, a CodeWeavers
+commit 131 past the public `v0.80` tag that does not exist upstream. Upstream's
+d3d11 side has barely changed since v0.80, so its source is a usable map of
+the shipped binary — see O37 for what it says about the 32-bit dynamic-buffer
+path, and for why a newer upstream DLL cannot simply be dropped in.
+
 The one thing it tells us loudly is O2 — it cannot honour a custom sampler
 border colour, and says so.
 

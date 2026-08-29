@@ -1226,6 +1226,123 @@ both device and context, off-game and in-game.
 
 ---
 
+## O35 — `/dx9` renders **without** the flicker — Risk 1 closed as "works, and not acceptable"
+
+*Reported by the reporter, 2026-08-29, from playing on the D3D9 renderer.*
+
+The DX9 renderer, which does not go through DXMT at all, shows no flicker. The
+requirement stands: the reporter wants DX11 (D1). What the fact buys is
+**corroboration of O30 by an independent route** — the same engine, the same
+assets, the same FEX, the same bottle, a different translation layer, no defect.
+Whatever is wrong is in the D3D11→Metal path and not in FEX, the engine, or the
+game data.
+
+## O36 — The **main-menu character** flickers, and there are no shadows in that scene
+
+*Reported by the reporter, 2026-08-29.*
+
+Consistent with O10b/O14 — one defect, many victims — and useful for two
+reasons. The menu is a **small, static, fully reproducible scene** with a
+skinned character and no shadow pass, so a per-frame draw table taken there is
+a fraction of the shrine's ~1800 draws/frame, and the victim is one known
+object. It is the cheapest test bench the project has found, for every
+experiment below.
+
+## O37 — What DXMT's source says about the path our draws take — **the 32-bit build is special**
+
+*Established 2026-08-29 by reading upstream `3Shain/dxmt` (HEAD `e67727f`,
+2026-08-25). No launch spent.*
+
+- The shipped `d3d11.dll` identifies itself as **`v0.80-131-g2befd18`**. The
+  commit does not exist upstream: CrossOver ships a **CodeWeavers fork** 131
+  commits past the public `v0.80` tag (2026-04-23), which is still upstream's
+  latest release. Upstream's d3d11/dxmt files have barely moved since v0.80
+  (the 180 commits since are almost all `feat(d3d12)`), so the reading below is
+  **inferred from upstream, not from the shipped binary**.
+- **Nothing upstream mentions this.** No issue or discussion contains
+  "Titan Quest", "flicker", "disappear" or "missing geometry"; no commit after
+  v0.80 touches discard, no_overwrite, staging, races, fences or WoW64.
+- **`staging map ready` is not a stall.** It is printed in `Map()` for
+  `USAGE_STAGING` resources only, when the map succeeds *without* waiting; the
+  waiting path prints `staging map block`. O16's "1.4 per frame" is the game
+  mapping a staging resource, never blocked, and is unrelated to the dynamic
+  buffers our draws read. O16's "suggestive" note is withdrawn.
+- **Dynamic buffers under `Map(WRITE_DISCARD)`** never wait either — which is
+  why O31 saw zero `WAS_STILL_DRAWING`. Each dynamic buffer is backed by a
+  **page** (`DXMT_PAGE_SIZE`) cut into N suballocations of the buffer's size;
+  a discard bumps the suballocation cursor, and when the page is used up a
+  page is popped from a FIFO if the GPU has finished with it
+  (`will_free_at <= CoherentSeqId()`, the last command chunk the GPU completed)
+  or freshly allocated. The cursor bump reaches the encoder thread as a
+  *state* emit (`EmitST`) and the draw as an *op* emit (`EmitOP`); correctness
+  depends on those being replayed in order, and on `CoherentSeqId` being true.
+- **And on i386 only** (`d3d11_buffer.cpp`, `#ifdef __i386__`): dynamic and
+  staging pages are **`CpuPlaced`** — `aligned_malloc` in the 32-bit heap,
+  wrapped by `newBufferWithBytesNoCopy:` on the unix side (commits `62b358f`,
+  `d1da4c3`, 2025-10, to save 32-bit address space). **No 64-bit game ever
+  runs this path.** Under FEX the game's x86 writes into that page are
+  emulated; the GPU reads the same physical memory.
+- **The game's per-draw data goes exactly there.** Our Stage 4 log: the two
+  2048-byte constant buffers (bone/world matrices, by size and by being
+  created at frame 0) are **`DYNAMIC`, CPU-write**, discarded per draw; the
+  sixteen 32-byte ones are `DEFAULT`. A 2048-byte buffer gets
+  `DXMT_PAGE_SIZE / 2048` slots per page, so at ~1800 draws a frame the page
+  FIFO turns over hundreds of times per frame — the more frames in flight, the
+  more reuse decisions, which is the shape of O10c's dose-response.
+
+**What is not known, and matters:** whether the fork changed any of this, and
+whether any of it actually goes wrong. This is source reading, not
+observation. It produces **H-F** below and the experiments in "Ideas after
+Stage 4", not a finding.
+
+## Ideas after Stage 4 — ranked by cost, 2026-08-29
+
+Every one of these is runnable without Xcode.
+
+1. **Metal's own validation layers, no Xcode needed** (one launch each). The
+   Metal framework honours `MTL_DEBUG_LAYER=1` (API validation) and
+   `MTL_SHADER_VALIDATION=1` (GPU-side validation) from the environment of any
+   process; only the *viewer* for `.gputrace` needs Xcode. Set them on the
+   Steam launch (O24's route) with `MTL_DEBUG_LAYER_ERROR_MODE=nslog`,
+   `MTL_DEBUG_LAYER_WARNING_MODE=nslog`,
+   `MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1`, and read `cxstart`'s stderr
+   plus `log stream`. Two things can come out: a **named error** ("buffer
+   released while in use", missing residency, an out-of-bounds read in a named
+   pipeline), or **nothing**, which is a negative result worth having. **Bonus:**
+   shader validation's default `FAIL_MODE=zerofill` makes out-of-bounds buffer
+   reads return zero — that is DXVK's `constantBufferRangeCheck`, for free. If
+   the flicker *stops* under validation, H-B1 is back from the dead. Cost:
+   large slowdown, maybe unplayable under FEX; the menu scene (O36) is the
+   place to try it.
+2. **Map-pointer diagnostics in the shim** (one launch, small change). `hookMap`
+   already sees `pData`; log per-frame the number of distinct pages seen and
+   the **shortest reuse distance in frames** for any pointer, and add both to
+   the frame table. If the bad frames in the recording are the frames where a
+   page came back unusually early, H-F is measured from the D3D11 side.
+3. **Route around the path** (a weekend; this is also the Stage 5 fix if it
+   works). In `hookCreateBuffer`, turn the game's `DYNAMIC` constant buffers
+   into `DEFAULT` ones (drop `CPU_ACCESS_WRITE`), and service their `Map`/
+   `Unmap` from a shadow copy in our own memory, pushing it with
+   `UpdateSubresource` at `Unmap`. Data-side only — the vtable is already
+   held. If the flicker disappears, we have both the diagnosis (the 32-bit
+   dynamic-buffer page path) and a shippable fix, and the bug report writes
+   itself. Extend to dynamic vertex buffers second if constants alone are not
+   enough. Risk: `UpdateSubresource` to a `DEFAULT` buffer on i386 takes
+   DXMT's `updateContents` unixcall path — a different, slower, but
+   64-bit-exercised path.
+4. **Use the menu as the bench** for all of the above (O36).
+5. **The bug report gets a sharper sentence** either way: "32-bit only,
+   `CpuPlaced` dynamic pages, per-draw discarded 2048-byte constant buffers,
+   rate scales with frames in flight" is a report CodeWeavers can act on.
+6. **Not viable, recorded so nobody tries it:** dropping a newer upstream
+   `d3d11.dll` beside `TQ.exe`. Upstream's windows-side thunks moved since
+   v0.80 and must be paired with their own `winemetal.so`, which is a Wine
+   unixlib for **arm64** that upstream's CI does not build and that would have
+   to be compiled against CrossOver's private Wine.
+7. **Xcode on any Mac.** A `.gputrace` captured here (Stage 1) opens on any
+   machine with Xcode; replay needs the same GPU family, but the command
+   stream and bound resources are readable regardless.
+
 ## Hypotheses — not yet proven
 
 **Status at the end of Stage 4 (2026-08-26).** **O30 cut the space in half:
@@ -1247,6 +1364,29 @@ refuted H-A, H-E, H-C; dissolved H-B2.*
 
 Refuted hypotheses are kept in full, not deleted. Knowing what was already ruled
 out — and by which experiment — is the point of this file.
+
+### H-F — The 32-bit dynamic-buffer page path hands a draw a slot the GPU is still reading, or the wrong one — **UNTESTED**
+
+*Raised 2026-08-29 from O37. Source reading, not observation.*
+
+On i386 DXMT backs every dynamic buffer with a `CpuPlaced`, `bytesNoCopy`
+page cut into suballocations, rotated per `Map(WRITE_DISCARD)` and reused
+once `CoherentSeqId()` says the GPU is done. The game discards its two
+2048-byte constant buffers per draw. If a page is reused one chunk too early,
+or the suballocation cursor and the draw are replayed out of step, **one draw
+reads another draw's constants** — a bone or world matrix from somewhere else,
+which puts the object off-screen or degenerate for **exactly that frame**, for
+**that object only**, at a rate that grows with frames in flight.
+
+*Fits:* everything O9–O14 and O30 measured — per-object, one frame, no period,
+draw issued, nothing on screen; O10c's dose-response with frame rate; O35's
+"not on DX9"; O36's "no shadows needed".
+*Against:* nothing observed yet, which is the problem. It is the most specific
+Metal-side hypothesis the project has, and it was reached by reading, not by
+looking.
+*Test:* ideas 2 and 3 in "Ideas after Stage 4" — the pointer-reuse diagnostic
+sees it from the D3D11 side; the reroute makes it go away if it is real.
+Validation (idea 1) may name it outright.
 
 ### ~~H-E — `Map` with `DO_NOT_WAIT` fails, and the engine skips the draw~~ — **REFUTED by O13**
 

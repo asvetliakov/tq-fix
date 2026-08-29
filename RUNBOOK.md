@@ -2,43 +2,35 @@
 
 ## Next session: paste this
 
-> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is done, and
-> it answered the one question the project existed to ask.**
+> Read `CLAUDE.md`, then `RUNBOOK.md`, then `docs/rev/`. **Stage 4 is done:
+> the game issues the draw, DXMT renders nothing for it (O30).** Stage 1's
+> `.gputrace` still needs Xcode — but **2026-08-29 found three things to do
+> without it**, all in `observed.md` under "Ideas after Stage 4":
 >
-> **The game ISSUES the draw. The fault is on the DXMT/Metal side** (O30). Over
-> the 387 frames a screen recording covers, **56 frames show an object vanish
-> and 4 show the draw count fall** — against a draw count that is identical
-> between consecutive frames 93.3% of the time, so a missing draw would have
-> read as a clean −1. The four dips are −3/−4: wrong size, wrong number. Zero
-> empty draws, zero `Map` returning `WAS_STILL_DRAWING`, and zero instanced,
-> indirect or deferred draws anywhere in the session, so nothing was submitted
-> where we could not see it.
+> 1. **Metal validation without Xcode** — `MTL_DEBUG_LAYER=1` /
+>    `MTL_SHADER_VALIDATION=1` on the Steam launch (O24 route). One launch,
+>    may name the fault; and its zero-fill of out-of-bounds reads is DXVK's
+>    `constantBufferRangeCheck` for free, so "flicker gone under validation"
+>    would revive H-B1.
+> 2. **Map-pointer reuse diagnostic** in `hookMap` — shortest reuse distance
+>    per frame into the frame table, correlated with the recording.
+> 3. **Reroute the game's DYNAMIC constant buffers to DEFAULT +
+>    `UpdateSubresource`** from the shim (`docs/plans/stage-5-fix.md`) — if the
+>    flicker stops, that is the diagnosis and the fix in one.
 >
-> **This closes the D3D11 side.** Every "the engine skipped it" hypothesis is
-> dead; H-B1 is demoted (O32 found no instance, by a test that admits it could
-> only catch the blatant form, and it is a D3D11-side explanation anyway).
+> Why these: **O37** — the shipped DXMT is a CodeWeavers fork of `3Shain/dxmt`
+> (`v0.80-131-g2befd18`), and on **i386 only** dynamic buffers are `CpuPlaced`
+> pages rotated per `Map(DISCARD)`; the game discards its two 2048-byte
+> constant buffers per draw. That is **H-F**, untested. Two new facts from the
+> reporter: **`/dx9` has no flicker** (O35, Risk 1 closed) and **the main-menu
+> character flickers with no shadows** (O36) — use the menu as the bench.
 >
-> **The project is now at a decision, not at a stage.** The only instrument that
-> can see a Metal-side fault is **Stage 1's `.gputrace`**, and it needs **Xcode**
-> — a ~15 GB install; Command Line Tools are not enough. So:
->
-> - **If Xcode gets installed** → `docs/plans/stage-1-frame-capture.md`, whose
->   header now says what to do first. One thing is better than when it was
->   written: we can **name the bad frame** from Stage 4's table, so the capture
->   no longer needs luck.
-> - **If it does not** → `docs/plans/stage-6-ship.md`. The bug report is the
->   honest outcome and **the evidence is already complete**: O30's measurement,
->   O33's full description of the one border sampler DXMT warns about, and
->   DXVK's per-app profile naming `TQ.exe`.
->
-> **Ask the reporter which.** Nothing else in the repo moves without that answer.
->
-> Housekeeping: the 10fps cap is **commented back out** (normal play). Both logs
-> from the run are in `cache/logs/stage4-run1-002554-*`. Re-derive the result any
-> time with `cache/venv/bin/python tools/recording.py cache/captures/*12.24.39*.mov
-> cache/logs/stage4-run1-002554-tqflicker-frames.log` — glob the name, it has a
-> U+202F before `AM`. `npm run doctor` is green and reports whether Xcode has
-> appeared.
+> Housekeeping: the 10fps cap is **commented out** (normal play). Logs from the
+> last run are in `cache/logs/stage4-run1-002554-*`; re-derive with
+> `cache/venv/bin/python tools/recording.py cache/captures/*12.24.39*.mov
+> cache/logs/stage4-run1-002554-tqflicker-frames.log`. `npm run doctor` reports
+> whether Xcode has appeared. Upstream DXMT source is cloned to the scratchpad
+> of session `b8b5af5a…`; re-clone `3Shain/dxmt` if it is gone.
 
 ---
 
@@ -81,7 +73,11 @@ are simply the most numerous dynamic draws on screen — removing them removes
 DXMT's border-colour warning (O2) is still real and still unexplained. It is no
 longer a suspect; it is **evidence for the Stage 6 bug report**.
 
-### What is alive — **one thing, after Stage 4**
+### What is alive — **one thing after Stage 4, plus one from reading DXMT's source**
+
+- **H-F — the i386-only dynamic-buffer page path** (O37). Untested; the
+  most specific Metal-side hypothesis the project has, and testable from the
+  shim. See "Ideas after Stage 4" in `observed.md`.
 
 - **H-D, second branch only.** *The game submits the draw and DXMT renders
   nothing for it.* O30 measured the first branch dead: 56 objects vanished
@@ -249,7 +245,7 @@ this is the next stage and it can be written today.
 
 | # | Risk | State | Note |
 |---|------|-------|------|
-| 1 | The whole project is unnecessary because `/dx9` works | **OPEN — descoped** | **Never tested.** The reporter requires the DX11 renderer to work, so `/dx9` is not an acceptable outcome (D1). Still the cheapest experiment in the repo if the DX11 route ever proves impossible |
+| 1 | The whole project is unnecessary because `/dx9` works | **CLOSED — it works, and it is not acceptable** | **O35:** the reporter confirms `/dx9` has no flicker. The requirement is DX11 (D1), so this is corroboration of O30 (a different translation layer, no defect), not an exit |
 | 2 | 32-bit stdcall decoration breaks the winmm proxy | **CLOSED** | Not a problem, and not for the expected reason: Windows' 32-bit winmm exports **186 plain names**, none decorated, so no `--kill-at` and no `@N` handling was needed. What *did* differ was the stub form — i386 has no `jmp *slot(%rip)` — and the DLL's location: on this ARM64 bottle the i386 winmm is in **syswow64**, `system32`'s being Aarch64. The generator now refuses a decorated name or a non-i386 input |
 | 3 | DXMT hands out different vtables per interface version | **CLOSED** | **O20** for the device, **O28** for the context: `ID3D11Device1` and `ID3D11DeviceContext1` are each the *same object with the same vtable* as the base interface. One vtable each; Stage 4 patches once. `frames.cpp` still asks at install and would say `!!` if that ever changed |
 | 4 | Patching a vtable a thread is already inside | **OPEN — mitigated** | Done as designed: `frames::install` runs inside the `D3D11CreateDeviceAndSwapChain` hook, on the game's thread, before the game is handed the device. Stays open until a play session confirms it (Stage 4 gate) |
