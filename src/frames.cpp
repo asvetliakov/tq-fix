@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 11
+#define TQFLICKER_REROUTE_DEFAULT 13
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -217,10 +217,57 @@ struct Ring {
 Ring g_rings[kRings];
 int  g_ringCount;
 signed char g_bound[kStages][kCbSlots];   // ring index bound at (stage, slot), or -1
+void* g_boundPtr[kStages][kCbSlots];      // the game's buffer pointer at (stage, slot)
 signed char g_vbBound[kVbSlots];          // ring index bound at IA slot, or -1
 UINT g_vbStride[kVbSlots], g_vbOffset[kVbSlots];
 signed char g_ibBound = -1; DXGI_FORMAT g_ibFormat; UINT g_ibOffset;
 LONG g_ringMaps, g_ringRebinds, g_dynSeen, g_barriers;
+
+// Mode 12: cut the number of frames - and so the number of DXMT command
+// chunks - in flight to one. O41 says the artefact grows with chunks in
+// flight (mode 10) and vanishes with none (mode 8), which is what a
+// per-chunk transient recycled too early looks like. This is a data-side
+// DXGI call, no reroute, no wait.
+void setFrameLatency(ID3D11Device* dev, UINT want) {
+    IDXGIDevice1* d1 = nullptr;
+    if (FAILED(dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&d1)) || !d1) {
+        tqlog("!! latency: no IDXGIDevice1 - cannot set the frame latency");
+        return;
+    }
+    UINT was = 0;
+    d1->GetMaximumFrameLatency(&was);
+    HRESULT hr = d1->SetMaximumFrameLatency(want);
+    UINT now = 0;
+    d1->GetMaximumFrameLatency(&now);
+    tqlog("latency:  maximum frame latency was %u, asked for %u, now %u (hr 0x%08lx)", was, want, now,
+          (unsigned long)hr);
+    d1->Release();
+}
+
+// Mode 13: mode 8's wait, but only every kSyncEvery-th discard - a cheaper
+// mitigation if the full wait turns out to be the only thing that works.
+const LONG kSyncEvery = 16;
+
+// Mode 14: DXMT suballocates any buffer whose size is <= DXMT_PAGE_SIZE (4096)
+// into one shared page, and rotates a cursor through it on every discard
+// (O37). A buffer LARGER than the page skips that entirely and gets a whole
+// allocation of its own. So: pad every small DYNAMIC buffer past 4096 bytes.
+// The game still maps it, still writes the same bytes at the same offsets, and
+// nothing becomes a blit - so unlike modes 3/4 this cannot cost an FX.
+const UINT kPadTo = 8192;
+LONG g_padded;
+
+// Mode 16 = mode 4 (one never-renamed allocation, blit updates - the fix that
+// works) PLUS a forced re-dirty of every binding of the buffer after each
+// update. DXMT dedups a redundant SetConstantBuffers (bind() with the same
+// pointer dirties nothing), so the re-dirty is scratch-then-real, two calls.
+// Modes 3/4 are the only fixes so far and they are also the only modes where
+// the per-draw argument re-encode never runs; if THIS mode flickers, that
+// re-encode is the faulty machinery. If it stays clean, it is not.
+ID3D11Buffer* g_scratchCb;
+LONG g_redirties;
+void forceRedirty(ID3D11DeviceContext* c, void* res);
+
 
 // Mode 7: no rerouting at all; at every Present, an event query + Flush + spin
 // until the GPU reports it done. Kills pipelining on purpose: if the flicker
@@ -251,12 +298,13 @@ Ring* ringOf(void* res) {
 }
 
 bool wantReroute(const D3D11_BUFFER_DESC* d) {
-    if (!g_reroute || g_reroute >= 7 || !d) return false;
+    if (!g_reroute || !d) return false;
+    if (g_reroute >= 7 && g_reroute != 15 && g_reroute != 16) return false;   // sync/flush/pad modes never reroute
     if (d->Usage != D3D11_USAGE_DYNAMIC) return false;
     if (!(d->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE) || (d->CPUAccessFlags & D3D11_CPU_ACCESS_READ)) return false;
     if (d->MiscFlags) return false;
     UINT ok = D3D11_BIND_CONSTANT_BUFFER;
-    if (g_reroute == 2 || g_reroute == 6) ok |= D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER;
+    if (g_reroute == 2 || g_reroute == 6 || g_reroute == 15) ok |= D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER;
     return (d->BindFlags & ~ok) == 0 && (d->BindFlags & ok) != 0;
 }
 
@@ -388,6 +436,8 @@ const char* kStageName[kStages] = {"VS", "PS", "GS", "HS", "DS", "CS"};
 
 void ringSetCB(ID3D11DeviceContext* c, int stage, UINT start, UINT n, ID3D11Buffer* const* bufs) {
     if (!g_realSetCB[stage]) return;
+    if (bufs && n && start + n <= (UINT)kCbSlots)
+        for (UINT i = 0; i < n; i++) g_boundPtr[stage][start + i] = (void*)bufs[i];
     if (!g_ringCount || !bufs || n == 0 || start + n > (UINT)kCbSlots) {
         if (bufs && n && start + n <= (UINT)kCbSlots)
             for (UINT i = 0; i < n; i++) g_bound[stage][start + i] = -1;
@@ -537,9 +587,13 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
     add(&g_now.maps, 1);
     if (type == D3D11_MAP_WRITE_DISCARD) add(&g_now.discardMaps, 1);
     if (g_reroute == 8 && type == D3D11_MAP_WRITE_DISCARD) gpuSync(c);   // GPU provably idle at every discard
+    if (g_reroute == 13 && type == D3D11_MAP_WRITE_DISCARD) {
+        static LONG k;
+        if ((++k % kSyncEvery) == 0) gpuSync(c);
+    }
     if (g_reroute == 10 && type == D3D11_MAP_WRITE_DISCARD) { c->Flush(); g_rtFlushes++; }   // chunk boundary, no wait
 
-    if ((g_reroute == 5 || g_reroute == 6) && sub == 0 && out) {
+    if ((g_reroute == 5 || g_reroute == 6 || g_reroute == 15) && sub == 0 && out) {
         if (Ring* rg = ringOf((void*)res)) {
             if (type == D3D11_MAP_WRITE_DISCARD) {
                 rg->cur = (rg->cur + 1) % rg->k;
@@ -547,14 +601,21 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
             } else if (type != D3D11_MAP_WRITE_NO_OVERWRITE) {
                 return g_realMap(c, res, sub, type, flags, out);
             }
-            HRESULT hr = g_realMap(c, rg->members[rg->cur], sub, type, flags, out);
+            // Mode 15: NO_OVERWRITE is served from the member's existing
+            // allocation - DXMT does not rename, does not suballocate, does
+            // not allocate. The ring is what makes that safe: a member is
+            // rewritten only after every other member has been used, which is
+            // thousands of draws and several frames later. No blit, so unlike
+            // modes 3/4 this cannot cost an FX (O40).
+            D3D11_MAP mt = (g_reroute == 15 && type == D3D11_MAP_WRITE_DISCARD) ? D3D11_MAP_WRITE_NO_OVERWRITE : type;
+            HRESULT hr = g_realMap(c, rg->members[rg->cur], sub, mt, flags, out);
             if (hr == DXGI_ERROR_WAS_STILL_DRAWING) add(&g_now.mapsBusy, 1);
             if (SUCCEEDED(hr)) { add(&g_now.rerouted, 1); g_ringMaps++; }
             return hr;
         }
     }
 
-    if (g_reroute && g_reroute < 5 && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute && (g_reroute < 5 || g_reroute == 16) && sub == 0 && out && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -579,7 +640,19 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
 
     HRESULT hr = g_realMap(c, res, sub, type, flags, out);
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) add(&g_now.mapsBusy, 1);
-    if (SUCCEEDED(hr) && out && type == D3D11_MAP_WRITE_DISCARD) notePtr(out->pData, g_frame);
+    if (SUCCEEDED(hr) && out && type == D3D11_MAP_WRITE_DISCARD) {
+        notePtr(out->pData, g_frame);
+        // The shipped DXMT is a fork whose page size we cannot read from
+        // source. The pointers it hands back say it empirically: their
+        // alignment gives the page size, their low bits the suballocation
+        // stride, and (ptr & 0x3FFF) whether the pages are 16KB-host-page
+        // aligned, which newBufferWithBytesNoCopy on Apple Silicon nominally
+        // requires (O37/O41).
+        static LONG ptrLines;
+        if (++ptrLines <= 24)
+            tqlog("mapptr:   #%ld res %p -> %p (low bits 0x%03x, mod16k 0x%04x)", ptrLines, (void*)res,
+                  out->pData, (unsigned)((UINT_PTR)out->pData & 0xFFF), (unsigned)((UINT_PTR)out->pData & 0x3FFF));
+    }
     return hr;
 }
 
@@ -591,10 +664,10 @@ void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
     // worse" (mode 10) both point at - a barrier here is the whole fix, and it
     // costs one instruction. FEX has to honour an x86 fence.
     if (g_reroute == 11) { __sync_synchronize(); g_barriers++; }
-    if ((g_reroute == 5 || g_reroute == 6) && sub == 0) {
+    if ((g_reroute == 5 || g_reroute == 6 || g_reroute == 15) && sub == 0) {
         if (Ring* rg = ringOf((void*)res)) { g_realUnmap(c, rg->members[rg->cur], sub); return; }
     }
-    if (g_reroute && g_reroute < 5 && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
+    if (g_reroute && (g_reroute < 5 || g_reroute == 16) && sub == 0 && g_rrBypassThread != GetCurrentThreadId()) {
         EnterCriticalSection(&g_devLock);
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
@@ -607,6 +680,7 @@ void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
             LONG k = ++n;
             if (k <= kRrTraceEvents) tqlog("reroute:  Unmap #%ld %p -> UpdateSubresource...", k, (void*)res);
             c->UpdateSubresource(res, 0, nullptr, shadow, 0, 0);
+            if (g_reroute == 16) forceRedirty(c, (void*)res);
             g_rrBypassThread = 0;
             if (k <= kRrTraceEvents) tqlog("reroute:  Unmap #%ld %p <- returned", k, (void*)res);
             return;
@@ -633,6 +707,28 @@ CreateBufferFn  g_realCreateBuffer;
 CreateVSFn      g_realCreateVS;
 CreatePSFn      g_realCreatePS;
 CreateSamplerFn g_realCreateSampler;
+
+void forceRedirty(ID3D11DeviceContext* c, void* res) {
+    if (!g_dev) return;
+    if (!g_scratchCb) {
+        D3D11_BUFFER_DESC d = {};
+        d.ByteWidth = 2048; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (!g_realCreateBuffer || FAILED(g_realCreateBuffer(g_dev, &d, nullptr, &g_scratchCb)) || !g_scratchCb) {
+            tqlog("!! redirty: no scratch buffer"); g_dev = nullptr; return;
+        }
+    }
+    for (int st = 0; st < kStages; st++) {
+        if (!g_realSetCB[st]) continue;
+        for (int sl = 0; sl < kCbSlots; sl++) {
+            if (g_boundPtr[st][sl] == res) {
+                ID3D11Buffer* b = (ID3D11Buffer*)res;
+                g_realSetCB[st](c, (UINT)sl, 1, &g_scratchCb);
+                g_realSetCB[st](c, (UINT)sl, 1, &b);
+                g_redirties++;
+            }
+        }
+    }
+}
 
 // Constant buffers: every width the game has ever asked for, with a count.
 // Widths are 16-byte multiples and a game has a handful of them, so a small
@@ -672,13 +768,47 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
                                 const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
     if (!g_realCreateBuffer) return E_FAIL;
     bool reroute = wantReroute(desc);
+    if (g_reroute == 14 && desc && desc->Usage == D3D11_USAGE_DYNAMIC && desc->ByteWidth <= 4096 &&
+        !desc->MiscFlags) {
+        D3D11_BUFFER_DESC pad = *desc;
+        pad.ByteWidth = kPadTo;
+        HRESULT hr = g_realCreateBuffer(dev, &pad, nullptr, out);
+        if (SUCCEEDED(hr)) {
+            // Initial data, if any, goes in afterwards: the padded buffer is
+            // bigger than the game's, so CreateBuffer would have rejected it.
+            if (init && init->pSysMem && out && *out) {
+                D3D11_MAPPED_SUBRESOURCE m;
+                ID3D11DeviceContext* ctx = nullptr;
+                dev->GetImmediateContext(&ctx);
+                if (ctx) {
+                    if (SUCCEEDED(g_realMap ? g_realMap(ctx, *out, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)
+                                            : ctx->Map(*out, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+                        memcpy(m.pData, init->pSysMem, desc->ByteWidth);
+                        if (g_realUnmap) g_realUnmap(ctx, *out, 0); else ctx->Unmap(*out, 0);
+                    }
+                    ctx->Release();
+                }
+            }
+            if (++g_padded <= 16)
+                tqlog("pad:      #%ld %p  %u -> %u bytes, bind 0x%x, frame %ld", g_padded, out ? (void*)*out : nullptr,
+                      (unsigned)desc->ByteWidth, kPadTo, (unsigned)desc->BindFlags, (long)g_frame);
+            add(&g_now.newBuffers, 1);
+            EnterCriticalSection(&g_devLock);
+            g_buffersTotal++;
+            if (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER) { g_cbTotal++; noteCbWidth(desc->ByteWidth); }
+            LeaveCriticalSection(&g_devLock);
+            return hr;
+        }
+        tqlog("!! pad: CreateBuffer refused %u bytes (hr 0x%08lx) - leaving this one as the game asked",
+              (unsigned)kPadTo, (unsigned long)hr);
+    }
     static LONG dynLines;
     if (desc && desc->Usage == D3D11_USAGE_DYNAMIC) g_dynSeen++;
     if (desc && desc->Usage == D3D11_USAGE_DYNAMIC && ++dynLines <= 80)
         tqlog("dynamic:  #%ld %u bytes, bind 0x%x, cpu 0x%x, misc 0x%x, frame %ld%s", dynLines, (unsigned)desc->ByteWidth,
               (unsigned)desc->BindFlags, (unsigned)desc->CPUAccessFlags, (unsigned)desc->MiscFlags, (long)g_frame,
               reroute ? "  -> ring" : "");
-    if (reroute && (g_reroute == 5 || g_reroute == 6)) {
+    if (reroute && (g_reroute == 5 || g_reroute == 6 || g_reroute == 15)) {
         HRESULT hr = g_realCreateBuffer(dev, desc, init, out);
         if (SUCCEEDED(hr) && out && *out) {
             // Big buffers get a smaller budget: 64 rings x 16 MB would not fit a 32-bit heap.
@@ -736,7 +866,7 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc
         // DynamicBuffer at all, so UpdateSubresource becomes a GPU blit into
         // one allocation that is never renamed (O37/O38).
         if (g_reroute == 3) alt.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
-        if (g_reroute == 4) alt.BindFlags |= D3D11_BIND_STREAM_OUTPUT;   // same no-rename effect, no UAV semantics
+        if (g_reroute == 4 || g_reroute == 16) alt.BindFlags |= D3D11_BIND_STREAM_OUTPUT;   // same no-rename effect, no UAV semantics
     }
     HRESULT hr = g_realCreateBuffer(dev, reroute ? &alt : desc, init, out);
     if (reroute && FAILED(hr)) {
@@ -1060,10 +1190,17 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
               : g_reroute == 8 ? "NO rerouting; full GPU sync before EVERY Map(WRITE_DISCARD) - a slideshow, on purpose"
               : g_reroute == 9 ? "NO rerouting; Flush at every OMSetRenderTargets (pins pass order across DXMT's encoder reordering)"
               : g_reroute == 10 ? "NO rerouting; Flush (no wait) before EVERY Map(WRITE_DISCARD)"
-                               : "NO rerouting; a full memory BARRIER at every Unmap (store visibility, one instruction)");
+              : g_reroute == 11 ? "NO rerouting; a full memory BARRIER at every Unmap (store visibility, one instruction)"
+              : g_reroute == 12 ? "NO rerouting; SetMaximumFrameLatency(1) - one frame, and so few chunks, in flight"
+              : g_reroute == 13 ? "NO rerouting; a full GPU sync every 16th discard (cheap-mitigation probe)"
+              : g_reroute == 14 ? "small DYNAMIC buffers PADDED past DXMT's 4096-byte page: no suballocation, no blit"
+              : g_reroute == 15 ? "RINGS of dynamic buffers mapped NO_OVERWRITE: DXMT never renames or allocates, and no blit"
+                                : "mode 4 PLUS a forced per-draw re-dirty of the binding (does the argument re-encode flicker?)");
     }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
+
+    if (g_reroute == 12) setFrameLatency(dev, 1);   // after the mode is known, not before (cost one launch)
 
     void** vtSc  = vtableOf(sc);
     void** vtCtx = vtableOf(ctx);
@@ -1134,6 +1271,12 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
+    if (g_reroute == 16)
+        tqlog("redirty (%s): %ld forced re-dirt(ies) after updates", when, g_redirties);
+    if (g_reroute == 14)
+        tqlog("pad (%s): %ld dynamic buffer(s) padded to %u bytes", when, g_padded, (unsigned)kPadTo);
+    if (g_reroute == 13)
+        tqlog("sync16 (%s): %ld GPU wait(s), longest %ld spin(s)", when, g_syncWaits, g_syncSpinsMax);
     if (g_reroute == 11)
         tqlog("barrier (%s): %ld barrier(s) at Unmap", when, g_barriers);
     if (g_reroute == 9 || g_reroute == 10)
@@ -1141,7 +1284,7 @@ void report(const char* when) {
               g_frame ? (double)g_rtFlushes / g_frame : 0.0);
     if (g_reroute == 7 || g_reroute == 8)
         tqlog("sync (%s): %ld GPU wait(s) at Present, longest %ld spin(s)", when, g_syncWaits, g_syncSpinsMax);
-    if (g_reroute == 5 || g_reroute == 6)
+    if (g_reroute == 5 || g_reroute == 6 || g_reroute == 15)
         tqlog("ring (%s): %d ring(s) of %d, %ld map(s) through the rings, %ld rebind(s); %ld dynamic buffer(s) seen",
               when, g_ringCount, kRings, g_ringMaps, g_ringRebinds, g_dynSeen);
     else if (g_reroute)
