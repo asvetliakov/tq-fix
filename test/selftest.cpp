@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "dxbc_patch.h"
+#include "frustum_fix.h"
 
 namespace {
 
@@ -41,6 +42,69 @@ int main(int argc, char** argv) {
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
     g_report = fopen(report, "w");
     if (!g_report) return 99;
+
+    const uintptr_t viewportSlot = 0x12345678u;
+    const uintptr_t frustumSlot = 0x23456789u;
+    BYTE updateSignature[] = {
+        0x68, 0x00, 0x03, 0x00, 0x00,
+        0x68, 0x00, 0x04, 0x00, 0x00,
+        0x6a, 0x00, 0x6a, 0x00,
+        0x8d, 0x4c, 0x24, 0x18, 0xff, 0x15,
+        0, 0, 0, 0,
+        0x8d, 0x44, 0x24, 0x08, 0x50,
+        0x8d, 0x84, 0x24, 0x5c, 0x06, 0x00, 0x00, 0x50,
+        0x8d, 0x4c, 0x24, 0x20, 0xff, 0x15,
+        0, 0, 0, 0,
+        0xb9, 0x02, 0x01, 0x00, 0x00, 0x8b, 0xf0, 0xf3, 0xa5
+    };
+    memcpy(updateSignature + 20, &viewportSlot, sizeof(uint32_t));
+    memcpy(updateSignature + 43, &frustumSlot, sizeof(uint32_t));
+    BYTE signatureBuffer[160] = {};
+    memcpy(signatureBuffer + 16, updateSignature, sizeof(updateSignature));
+    unsigned matches = 0;
+    const BYTE* callSite = tq::frustum::findUpdateViewportCall(
+        signatureBuffer, sizeof(signatureBuffer), viewportSlot, frustumSlot, &matches);
+    check(matches == 1 && callSite == signatureBuffer + 16 + 24,
+          "find the unique fixed 4:3 entity-update frustum");
+    signatureBuffer[16 + 55] ^= 1;
+    callSite = tq::frustum::findUpdateViewportCall(
+        signatureBuffer, sizeof(signatureBuffer), viewportSlot, frustumSlot, &matches);
+    check(!callSite && matches == 0, "reject a near-match update-frustum signature");
+    signatureBuffer[16 + 55] ^= 1;
+    memcpy(signatureBuffer + 88, updateSignature, sizeof(updateSignature));
+    callSite = tq::frustum::findUpdateViewportCall(
+        signatureBuffer, sizeof(signatureBuffer), viewportSlot, frustumSlot, &matches);
+    check(!callSite && matches == 2, "reject ambiguous update-frustum signatures");
+
+    int selectedWidth = 0, selectedHeight = 0;
+    bool expanded169 = tq::frustum::selectViewportSize(
+        true, true, 1024, 768, 1920, 1080, &selectedWidth, &selectedHeight);
+    check(expanded169 && selectedWidth == 1920 && selectedHeight == 1080,
+          "expand entity updates to a 16:9 viewport");
+    bool expanded219 = tq::frustum::selectViewportSize(
+        true, true, 1024, 768, 3440, 1440, &selectedWidth, &selectedHeight);
+    check(expanded219 && selectedWidth == 3440 && selectedHeight == 1440,
+          "expand entity updates to a 21:9 viewport");
+    bool expanded329 = tq::frustum::selectViewportSize(
+        true, true, 1024, 768, 5120, 1440, &selectedWidth, &selectedHeight);
+    check(expanded329 && selectedWidth == 5120 && selectedHeight == 1440,
+          "replace the centered 4:3 update aspect with the full 32:9 aspect");
+    bool expanded43 = tq::frustum::selectViewportSize(
+        true, true, 1024, 768, 1600, 1200, &selectedWidth, &selectedHeight);
+    check(!expanded43 && selectedWidth == 1024 && selectedHeight == 768,
+          "retain the original update frustum at 4:3");
+    bool wrongCaller = tq::frustum::selectViewportSize(
+        true, false, 1024, 768, 3440, 1440, &selectedWidth, &selectedHeight);
+    check(!wrongCaller && selectedWidth == 1024 && selectedHeight == 768,
+          "leave identical viewport construction from other callers untouched");
+    bool disabled = tq::frustum::selectViewportSize(
+        false, true, 1024, 768, 3440, 1440, &selectedWidth, &selectedHeight);
+    check(!disabled && selectedWidth == 1024 && selectedHeight == 768,
+          "restore the original frustum when edge updates are disabled");
+    bool invalid = tq::frustum::selectViewportSize(
+        true, true, 1024, 768, 20000, 1440, &selectedWidth, &selectedHeight);
+    check(!invalid && selectedWidth == 1024 && selectedHeight == 768,
+          "reject invalid live display dimensions");
 
     HMODULE proxy = LoadLibraryA(dll);
     check(proxy != nullptr, "load the winmm proxy");

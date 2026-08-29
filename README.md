@@ -17,6 +17,12 @@ it:
 - changes TQ's four cardinal bilinear shadow taps into the corners of an
   optimized 3x3 PCF footprint.
 
+For widescreen play, it also replaces the game's fixed 4:3 CPU-side
+entity-update frustum construction (expressed internally as 1024x768) with the
+live display aspect ratio. Characters and other entities visible near
+ultrawide screen edges therefore continue receiving animation, activation, and
+AI updates.
+
 Every enhancement fails open to the game's original draw or resource. The DLL
 contains the `winmm.dll` proxy, one D3D11 device-creation hook, the narrowly
 matched device/context hooks needed by the visual path, and the two DXBC
@@ -32,11 +38,15 @@ original game paths, create `tqflicker.ini` beside `TQ.exe`:
 [graphics]
 aa=smaa
 shadows=enhanced
+edge_updates=expanded
 ```
 
 Accepted rollback values are `aa=fxaa` and `shadows=original`. The in-game AA
 toggle remains authoritative: SMAA replaces the FXAA draw only while the game
 has AA enabled. Shadow Quality should remain High for the intended result.
+Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
+frustum. The expanded mode changes update coverage only; it does not alter the
+camera FOV, far plane, or rendering culling.
 
 The shadow enhancement deliberately does not quantize per-object matrices. No
 safely isolated global light-projection upload has been established, so the

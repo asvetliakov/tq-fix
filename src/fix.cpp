@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "dxbc_patch.h"
+#include "frustum_fix.h"
 #include "visual.h"
 
 extern "C" void* tq_winmm_targets[];
@@ -224,10 +225,22 @@ bool installDeviceHook(HMODULE renderer) {
 DWORD WINAPI installerThread(void*) {
     const DWORD stepMs = 10;
     const DWORD timeoutMs = 180000;
+    bool rendererInstalled = false;
+    bool frustumAttempted = false;
     for (DWORD waited = 0; waited < timeoutMs; waited += stepMs) {
         if (WaitForSingleObject(g_stop, stepMs) != WAIT_TIMEOUT) break;
-        HMODULE renderer = GetModuleHandleW(L"Direct3D11.dll");
-        if (renderer && installDeviceHook(renderer)) break;
+        if (!frustumAttempted) {
+            HMODULE game = GetModuleHandleW(L"Game.dll");
+            if (game) {
+                tq::frustum::install(game);
+                frustumAttempted = true;
+            }
+        }
+        if (!rendererInstalled) {
+            HMODULE renderer = GetModuleHandleW(L"Direct3D11.dll");
+            rendererInstalled = renderer && installDeviceHook(renderer);
+        }
+        if (rendererInstalled && frustumAttempted) break;
     }
     SetEvent(g_done);
     return 0;
@@ -252,6 +265,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH && !reserved) {
         if (g_stop) SetEvent(g_stop);
         if (g_done) WaitForSingleObject(g_done, 2000);
+        tq::frustum::shutdown();
         tq::visual::shutdown();
         restorePatches();
         if (g_thread) CloseHandle(g_thread);
