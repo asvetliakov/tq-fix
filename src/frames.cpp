@@ -8,7 +8,7 @@
 #include "log.h"
 #include "patch.h"
 #ifndef TQFLICKER_REROUTE_DEFAULT
-#define TQFLICKER_REROUTE_DEFAULT 9
+#define TQFLICKER_REROUTE_DEFAULT 11
 #endif
 #include "slots.h"   // generated: scripts/gen-slots.sh, no slot index is typed by hand
 
@@ -220,7 +220,7 @@ signed char g_bound[kStages][kCbSlots];   // ring index bound at (stage, slot), 
 signed char g_vbBound[kVbSlots];          // ring index bound at IA slot, or -1
 UINT g_vbStride[kVbSlots], g_vbOffset[kVbSlots];
 signed char g_ibBound = -1; DXGI_FORMAT g_ibFormat; UINT g_ibOffset;
-LONG g_ringMaps, g_ringRebinds, g_dynSeen;
+LONG g_ringMaps, g_ringRebinds, g_dynSeen, g_barriers;
 
 // Mode 7: no rerouting at all; at every Present, an event query + Flush + spin
 // until the GPU reports it done. Kills pipelining on purpose: if the flicker
@@ -537,6 +537,7 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
     add(&g_now.maps, 1);
     if (type == D3D11_MAP_WRITE_DISCARD) add(&g_now.discardMaps, 1);
     if (g_reroute == 8 && type == D3D11_MAP_WRITE_DISCARD) gpuSync(c);   // GPU provably idle at every discard
+    if (g_reroute == 10 && type == D3D11_MAP_WRITE_DISCARD) { c->Flush(); g_rtFlushes++; }   // chunk boundary, no wait
 
     if ((g_reroute == 5 || g_reroute == 6) && sub == 0 && out) {
         if (Ring* rg = ringOf((void*)res)) {
@@ -584,6 +585,12 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub, D3
 
 void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
     if (!g_realUnmap) return;
+    // Mode 11: the game has just finished writing into DXMT's mapped page. If
+    // those stores are still in flight when the GPU reads the page - which is
+    // what "only a full GPU wait fixes it" (mode 8) and "more flushes make it
+    // worse" (mode 10) both point at - a barrier here is the whole fix, and it
+    // costs one instruction. FEX has to honour an x86 fence.
+    if (g_reroute == 11) { __sync_synchronize(); g_barriers++; }
     if ((g_reroute == 5 || g_reroute == 6) && sub == 0) {
         if (Ring* rg = ringOf((void*)res)) { g_realUnmap(c, rg->members[rg->cur], sub); return; }
     }
@@ -1033,7 +1040,14 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
         // Compiled-in default (the env var did not reach the game on 2026-08-29,
         // reason unknown); the variable can still override it either way.
         g_reroute = TQFLICKER_REROUTE_DEFAULT;
-        if (n && n < 8) g_reroute = (v[0] >= L'0' && v[0] <= L'9') ? (int)(v[0] - L'0') : 0;
+        if (n && n < 8) {
+            int m = 0; bool ok = v[0] != 0;
+            for (DWORD i = 0; i < n && v[i]; i++) {
+                if (v[i] < L'0' || v[i] > L'9') { ok = false; break; }
+                m = m * 10 + (int)(v[i] - L'0');
+            }
+            if (ok) g_reroute = m;
+        }
         tqlog("frames:   TQFLICKER_REROUTE=%d - %s", g_reroute,
               g_reroute == 0 ? "observing only (dynamic buffers untouched)"
               : g_reroute == 1 ? "dynamic CONSTANT buffers -> DEFAULT + shadow + UpdateSubresource (H-F)"
@@ -1044,7 +1058,9 @@ bool install(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
               : g_reroute == 6 ? "dynamic constant, VERTEX and INDEX buffers -> RINGS of dynamic buffers, rebound on every discard"
               : g_reroute == 7 ? "NO rerouting; full GPU sync (event query + Flush + wait) at every Present"
               : g_reroute == 8 ? "NO rerouting; full GPU sync before EVERY Map(WRITE_DISCARD) - a slideshow, on purpose"
-                               : "NO rerouting; Flush at every OMSetRenderTargets (pins pass order across DXMT's encoder reordering)");
+              : g_reroute == 9 ? "NO rerouting; Flush at every OMSetRenderTargets (pins pass order across DXMT's encoder reordering)"
+              : g_reroute == 10 ? "NO rerouting; Flush (no wait) before EVERY Map(WRITE_DISCARD)"
+                               : "NO rerouting; a full memory BARRIER at every Unmap (store visibility, one instruction)");
     }
     QueryPerformanceFrequency(&g_qpcFreq);
     tableOpen();
@@ -1118,8 +1134,10 @@ void report(const char* when) {
           when, g_shaders, (unsigned)g_declaredLargest, (unsigned)g_cbLargest, g_declaredOver,
           g_declaredLargest > g_cbLargest ? "  <-- STILL larger at exit: H-B1 has an instance" : "");
     tqlog("sampler (%s): %ld sampler(s), %ld with ADDRESS_BORDER", when, g_samplers, g_samplersBorder);
-    if (g_reroute == 9)
-        tqlog("rtflush (%s): %ld Flush(es) at OMSetRenderTargets, %.1f per frame", when, g_rtFlushes,
+    if (g_reroute == 11)
+        tqlog("barrier (%s): %ld barrier(s) at Unmap", when, g_barriers);
+    if (g_reroute == 9 || g_reroute == 10)
+        tqlog("flush (%s): %ld Flush(es), %.1f per frame", when, g_rtFlushes,
               g_frame ? (double)g_rtFlushes / g_frame : 0.0);
     if (g_reroute == 7 || g_reroute == 8)
         tqlog("sync (%s): %ld GPU wait(s) at Present, longest %ld spin(s)", when, g_syncWaits, g_syncSpinsMax);

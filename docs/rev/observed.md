@@ -1426,6 +1426,62 @@ bytes, so two slots per member, 16 MB per ring), the ring advanced on every
 hooks. A member is re-mapped only after 4095 others, ~4–5 frames at the
 shrine's 1800 maps a frame.
 
+## O41 — Six experiments that narrow the mechanism: **only "GPU idle" fixes it**, and more flushing makes it worse
+
+*2026-08-29 06:43–07:05, GOG build, 10fps cap, the reporter's eyes, one launch
+each, always the same start-area scene with the rebirth fountain in it. All
+logs in `cache/logs/{ring5,ring6,sync7,sync8,rtflush9}-*`.*
+
+Every mode below is `TQFLICKER_REROUTE=N`, compiled in as
+`TQFLICKER_REROUTE_DEFAULT` (the env var does not reach a CrossOver-UI launch).
+
+| Mode | What it does | Flicker | Fountain pillar |
+|---|---|---|---|
+| 0 | baseline, observe only | **yes** | yes |
+| 1 | dynamic CBs → `DEFAULT` + shadow + `UpdateSubresource` | menu **no**, game **worse** (O38) | yes |
+| 3 | + `UNORDERED_ACCESS`: DXMT never renames it, GPU blit | **NO** (O39) | **missing** (O40) |
+| 4 | `STREAM_OUTPUT` instead — same no-rename, no UAV semantics | **NO** | **missing** |
+| 5 | ring of 4096 dynamic CBs, rebound on every discard | menu no, game **yes** | yes |
+| 6 | rings for dynamic constant **and** vertex/index buffers, 64 rings | **yes** | yes |
+| 7 | no reroute; full GPU sync at every `Present` | **yes** | yes |
+| 8 | no reroute; full GPU sync before **every** `Map(WRITE_DISCARD)` | **NO** | yes |
+| 9 | no reroute; `Flush` at every `OMSetRenderTargets` (18/frame) | **yes** | yes |
+| 10 | no reroute; `Flush` (no wait) before every discard | **yes, MORE often** | yes |
+
+**What each row kills.**
+
+- **9 kills encoder/pass reordering.** DXMT reorders and coalesces encoders
+  within a chunk; a `Flush` per render-target change pins that order. No
+  effect. The fault is not passes being resequenced.
+- **7 kills "one frame of pipelining".** A full GPU wait once per frame is not
+  enough — so the race is finer-grained than a frame.
+- **8 is the one that works,** and it is 7's instrument applied ~1000× more
+  often: before every discard, 461,068 waits in 460 frames. **The GPU being
+  idle at the moment the game writes is what removes the artefact.**
+- **10 is 8 without the waiting** — same `Flush`, same chunk boundaries, no
+  idle GPU. It made the flicker **more frequent**. So it is not the chunk
+  boundary, not the commit, not the sequence numbering: **it is the waiting.**
+- **5 and 6 weaken "the page was recycled too early".** With a 4096-deep ring
+  a member is re-mapped only after 4095 others (~2 frames at the shrine), and
+  DXMT's own FIFO for it is stone cold — the artefact survived. *Caveat,
+  stated because it matters:* in mode 6 only 64 of the **1264** dynamic
+  buffers the game creates got a ring, leaving ~41 unringed discard maps per
+  frame at the shrine, so this is strong evidence and not a proof.
+
+**Where that leaves the mechanism.** Waiting for the GPU fixes it; flushing
+without waiting worsens it; giving the write a fresh allocation does not fix
+it. That is not the shape of "the allocator handed back memory too early". It
+is the shape of **the CPU's writes not being visible to the GPU when the GPU
+reads them** — the game memcpy's into a `CpuPlaced`/`CpuWriteCombined` page
+(O37: i386-only, `newBufferWithBytesNoCopy:` over a 32-bit-heap allocation)
+and the GPU reads it before those stores have landed. Waiting hides it because
+the stores have long since drained; flushing sooner exposes it because the GPU
+reads sooner. It also explains why **DX9 is clean** (O35, a different memory
+path) and why the rate **scales with frame rate** (O10c).
+
+**H-G, and it is one instruction to test:** a full memory barrier in `Unmap`,
+after the game's writes and before DXMT sees them (mode 11). Tested next.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.
