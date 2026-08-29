@@ -13,10 +13,17 @@ command -v "$CXX" >/dev/null || { echo "missing $CXX - run: npm run doctor" >&2;
 rm -rf build/gen
 bash scripts/gen-winmm-proxy.sh build/gen "$REAL"
 
+# Embed the exact SMAA revision and its canonical lookup tables. Keeping the
+# large byte tables compressed in the source tree makes reviews and clones
+# considerably smaller; build/gen is disposable.
+base64 -D -i third_party/smaa/AreaTex.h.gz.b64 | gzip -dc > build/gen/AreaTex.h
+base64 -D -i third_party/smaa/SearchTex.h.gz.b64 | gzip -dc > build/gen/SearchTex.h
+xxd -i third_party/smaa/SMAA.hlsl > build/gen/smaa_source.h
+
 mkdir -p build
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
-  src/fix.cpp src/dxbc_patch.cpp \
+  src/fix.cpp src/dxbc_patch.cpp src/visual.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
   -O2 -Wall -Wextra \

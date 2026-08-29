@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "dxbc_patch.h"
+#include "visual.h"
 
 extern "C" void* tq_winmm_targets[];
 
@@ -170,6 +171,11 @@ void patchDevice(ID3D11Device* device) {
     }
 }
 
+void installHooks(ID3D11Device* device, ID3D11DeviceContext* context) {
+    patchDevice(device);
+    if (device) tq::visual::install(device, context);
+}
+
 HRESULT WINAPI hookCreateDevice(
     IDXGIAdapter* adapter, D3D_DRIVER_TYPE driverType, HMODULE software, UINT flags,
     const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdkVersion,
@@ -177,7 +183,7 @@ HRESULT WINAPI hookCreateDevice(
     ID3D11DeviceContext** context) {
     HRESULT result = g_createDevice(adapter, driverType, software, flags, levels,
                                     levelCount, sdkVersion, device, selectedLevel, context);
-    if (SUCCEEDED(result) && device) patchDevice(*device);
+    if (SUCCEEDED(result) && device) installHooks(*device, context ? *context : nullptr);
     return result;
 }
 
@@ -190,7 +196,7 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
     HRESULT result = g_createDeviceAndSwapChain(
         adapter, driverType, software, flags, levels, levelCount, sdkVersion,
         description, swapChain, device, selectedLevel, context);
-    if (SUCCEEDED(result) && device) patchDevice(*device);
+    if (SUCCEEDED(result) && device) installHooks(*device, context ? *context : nullptr);
     return result;
 }
 
@@ -246,6 +252,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH && !reserved) {
         if (g_stop) SetEvent(g_stop);
         if (g_done) WaitForSingleObject(g_done, 2000);
+        tq::visual::shutdown();
         restorePatches();
         if (g_thread) CloseHandle(g_thread);
         if (g_done) CloseHandle(g_done);

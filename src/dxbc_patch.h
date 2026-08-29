@@ -14,6 +14,11 @@ struct PatchResult {
 // the clamped value. Returns false for every shader that is not the exact
 // dynamic-indexed TQ skinning shape; callers then pass the original blob on.
 bool clampBoneIndices(const void* bytecode, SIZE_T bytecodeSize, PatchResult* out);
+
+// Moves TQ's four bilinear shadow taps from a cross to the four corners of a
+// 3x3 PCF footprint. The comparison-linear sampler supplies the interpolated
+// sub-taps, so this widens coverage without adding five texture instructions.
+bool enhanceShadowPcf(const void* bytecode, SIZE_T bytecodeSize, PatchResult* out);
 void release(PatchResult* result);
 
 }  // namespace dxbc

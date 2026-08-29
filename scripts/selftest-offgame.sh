@@ -20,6 +20,9 @@ i686-w64-mingw32-g++ -shared -o build/Direct3D11.dll \
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cp build/winmm.dll build/selftest.exe build/Direct3D11.dll "$WORK/"
+base64 -D -i test/fixtures/tq-dxbc-PS-fxaa.b64 -o "$WORK/tq-dxbc-PS-fxaa.dxbc"
+base64 -D -i test/fixtures/tq-dxbc-VS-fxaa.b64 -o "$WORK/tq-dxbc-VS-fxaa.dxbc"
+base64 -D -i test/fixtures/tq-dxbc-PS-shadow.b64 -o "$WORK/tq-dxbc-PS-shadow.dxbc"
 
 SHADER_ARGS=()
 for shader in test/fixtures/*.dxbc; do
@@ -30,6 +33,8 @@ for shader in test/fixtures/*.dxbc; do
 done
 
 "$CX/bin/cxstart" --bottle "$(basename "$BOTTLE")" --no-convert \
+  --no-gui \
+  --no-wait \
   --workdir 'C:\tqflicker-selftest' \
   -- 'C:\tqflicker-selftest\selftest.exe' \
      'C:\tqflicker-selftest\winmm.dll' "$REPORT_WIN" "${SHADER_ARGS[@]}" \

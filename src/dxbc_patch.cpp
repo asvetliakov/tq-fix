@@ -18,6 +18,7 @@ const uint32_t kLengthMask = 0x7f000000u;
 const unsigned kLengthShift = 24;
 const uint32_t kOpcodeCustomData = 53u;
 const uint32_t kOpcodeImul = 38u;
+const uint32_t kOpcodeMad = 50u;
 const uint32_t kOpcodeUmin = 84u;
 const uint32_t kOpcodeDclConstantBuffer = 89u;
 
@@ -164,6 +165,70 @@ bool clampBoneIndices(const void* bytecode, SIZE_T bytecodeSize, PatchResult* ou
 
     out->data = dst;
     out->size = newSize;
+    return true;
+}
+
+bool enhanceShadowPcf(const void* bytecode, SIZE_T bytecodeSize, PatchResult* out) {
+    if (out) memset(out, 0, sizeof(*out));
+    if (!bytecode || !out || bytecodeSize < 36 || read32((const BYTE*)bytecode) != kDxbc)
+        return false;
+    const BYTE* src = (const BYTE*)bytecode;
+    if (read32(src + 24) != bytecodeSize) return false;
+    uint32_t chunks = read32(src + 28);
+    if (!chunks || chunks > 64 || !range(32, chunks * 4u, bytecodeSize)) return false;
+    SIZE_T shaderChunk = 0;
+    uint32_t shaderBytes = 0;
+    for (unsigned i = 0; i < chunks; ++i) {
+        SIZE_T at = read32(src + 32 + i * 4u);
+        if (!range(at, 8, bytecodeSize)) return false;
+        uint32_t bytes = read32(src + at + 4);
+        if (!range(at + 8, bytes, bytecodeSize)) return false;
+        uint32_t fourcc = read32(src + at);
+        if (fourcc == kShex || fourcc == kShdr) {
+            if (shaderChunk) return false;
+            shaderChunk = at; shaderBytes = bytes;
+        }
+    }
+    if (!shaderChunk || shaderBytes < 8 || (shaderBytes & 3u)) return false;
+    // These names make the match specific to TQ's shadow-receiving material
+    // shaders before the instruction signature is considered.
+    const char names[][24] = {"ShadowSamplerTex", "shadowBluriness", "worldToShadowMatrix"};
+    for (unsigned n = 0; n < 3; ++n) {
+        bool found = false;
+        SIZE_T len = strlen(names[n]);
+        for (SIZE_T i = 0; i + len <= bytecodeSize; ++i)
+            if (!memcmp(src + i, names[n], len)) { found = true; break; }
+        if (!found) return false;
+    }
+    const uint32_t* code = (const uint32_t*)(src + shaderChunk + 8);
+    unsigned words = shaderBytes / 4u;
+    if (code[1] != words || (code[0] >> 16) != 0) return false;  // pixel shader only
+    unsigned horizontal = 0, vertical = 0;
+    for (unsigned at = 2; at < words;) {
+        unsigned count = instructionLength(code + at, words - at);
+        if (!count) return false;
+        const uint32_t* p = code + at;
+        if ((p[0] & kOpcodeMask) == kOpcodeMad && count == 13 && p[6] == kImmediate32Vector) {
+            if (p[7] == 0xbf000000u && p[8] == 0 && p[9] == 0x3f000000u && p[10] == 0)
+                horizontal = at;
+            else if (p[7] == 0 && p[8] == 0xbf000000u && p[9] == 0 && p[10] == 0x3f000000u)
+                vertical = at;
+        }
+        at += count;
+    }
+    if (!horizontal || !vertical || vertical <= horizontal || vertical - horizontal > 80)
+        return false;
+    BYTE* dst = (BYTE*)malloc(bytecodeSize);
+    if (!dst) return false;
+    memcpy(dst, src, bytecodeSize);
+    uint32_t* patched = (uint32_t*)(dst + shaderChunk + 8);
+    patched[horizontal + 8] = 0xbf000000u;
+    patched[horizontal + 10] = 0xbf000000u;
+    patched[vertical + 7] = 0xbf000000u;
+    patched[vertical + 8] = 0x3f000000u;
+    patched[vertical + 9] = 0x3f000000u;
+    memset(dst + 4, 0, 16);
+    out->data = dst; out->size = bytecodeSize;
     return true;
 }
 
