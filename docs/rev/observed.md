@@ -1237,6 +1237,21 @@ assets, the same FEX, the same bottle, a different translation layer, no defect.
 Whatever is wrong is in the D3D11→Metal path and not in FEX, the engine, or the
 game data.
 
+**Does D3D9 go through DXMT? No — checked on disk, 2026-08-29.** DXMT is a
+D3D10/11 implementation: `lib/dxmt/i386-windows/` holds `d3d10core`, `d3d11`,
+`dxgi` and `winemetal` only, and upstream has no D3D9 code. CrossOver's
+selector (`cxcompatdb.so`, strings: `lib/dxmt`, `lib/dxvk`,
+`lib/apple_gptk*/wine`, "using %s as the graphics backend") prepends one
+backend directory, so under `dxmt` the game's `d3d9.dll` resolves to Wine's
+builtin (`lib/wine/i386-windows/d3d9.dll` — wined3d, by its own strings) or,
+if CrossOver also adds `lib/dxvk` for D3D9, to DXVK's. Not settled which;
+one `/dx9` launch with `WINEDEBUG=+loaddll` would say. Either way it is a
+different translation layer that shares only FEX and Metal with DXMT.
+
+*Also noticed:* the bottles on disk are now `Steam` and `Titan Quest`; there
+is no `New Bottle`, which `substrate.md` and every script name. To be
+resolved with the reporter before the next launch.
+
 ## O36 — The **main-menu character** flickers, and there are no shadows in that scene
 
 *Reported by the reporter, 2026-08-29.*
