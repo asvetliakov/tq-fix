@@ -1362,6 +1362,46 @@ that is never renamed**, hazard-tracked. If the artefact vanishes in both
 scenes, renaming is the fault, full stop. Slow by construction (a blit
 encoder switch per update) — a diagnostic, not yet a fix.
 
+## O39 — **FIXED: no flicker with the constant buffers taken off DXMT's rename path** (mode 3)
+
+*Established 2026-08-29 06:25–06:27, GOG build, 10fps cap, the reporter's
+eyes, one launch: 1258 frames, 1.39 M draws, both 2048-byte constant buffers
+rerouted, **1,724,144 maps served from the shadow, 0 unservable, no error
+line**, clean exit. Logs: `cache/logs/reroute3-run1-*`.*
+
+`TQFLICKER_REROUTE=3`: the game's two `DYNAMIC` 2048-byte constant buffers
+are created `DEFAULT | BIND_UNORDERED_ACCESS`, `Map` returns our shadow,
+`Unmap` calls `UpdateSubresource`. Because of the output bind flag DXMT gives
+the buffer **no `DynamicBuffer`**: no page, no suballocation, no rename FIFO.
+Each update is a staging-ring write plus a GPU blit into **one allocation
+that is never renamed**, hazard-tracked by the encoder.
+
+> **Reporter: "no more flicker" — main menu and in game, shadows and FX
+> included.** The first time in the project's life the artefact is absent
+> with shadows on.
+
+**What this proves.** With O38 as the other half: the same draws, the same
+constants, the same game — the artefact appears (baseline), gets worse (O38,
+different rename allocation), and disappears (O39, no rename). **The fault
+is DXMT's dynamic-buffer renaming** — the `DynamicBuffer` FIFO /
+suballocation path that every `Map(WRITE_DISCARD)` takes, exercised here on
+i386 with `CpuPlaced` pages. H-F is confirmed at the level a shim can reach;
+*which line* of the allocator is wrong is still for a `.gputrace` or for
+CodeWeavers/upstream with this report in hand.
+
+**Open, at the time of writing:**
+
+- **One FX possibly lost:** the reporter reports the rebirth fountain's
+  yellow pillar not showing. Whether it should (activated fountain) is
+  being checked on DX9 with the same character. If real, one draw depends on
+  something mode 3 changed — a UAV-flagged constant buffer is not a legal
+  D3D11 combination and DXMT may bind it differently for some stage.
+- **Cost:** mode 3 splits the render encoder for a blit on every constant
+  update (~1800 per frame). Not measured yet; the cap was on. Stage 5 proper
+  must measure it uncapped and, if it hurts, find a cheaper way off the
+  rename path (batching updates, or one big ring of DEFAULT buffers).
+- Vertex/index dynamic buffers were **not** rerouted and did not need to be.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.
