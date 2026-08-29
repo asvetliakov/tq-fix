@@ -26,11 +26,13 @@
 > report-grade already: component, path, dose-response, sixteen eliminated
 > mechanisms, DXVK's profile, O2's warning.
 >
-> Housekeeping: 10fps cap still ACTIVE in `dxmt.conf` beside TQ.exe; proxy
-> installed with mode 17 default — **change the default before anyone plays
-> normally**. Logs all kept under `cache/logs/`. Bottle is "Titan Quest"
-> (GOG build, 4GB-patched); launch via `scripts/launch.sh` or CrossOver UI
-> (env vars do NOT reach a UI launch - compile defaults in).
+> Housekeeping: 10fps cap now COMMENTED OUT in `dxmt.conf` (normal play);
+> the mode lives in `tqflicker.ini` beside TQ.exe (written by install-dll,
+> currently `reroute=4`), precedence env > ini > compiled default. Logs all
+> kept under `cache/logs/`. Bottle is "Titan Quest" (GOG build, 4GB-patched);
+> launch via `scripts/launch.sh` or the CrossOver UI (env vars do NOT reach a
+> UI launch — that is what the ini is for). O44: DXVK renders black geometry
+> in this Preview, reporter-tested; no escape route there.
 
 ---
 
