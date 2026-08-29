@@ -135,10 +135,10 @@ void notePtr(void* p, LONG frame) {
 // vertex and index buffers. This takes those buffers off DXMT's i386-only
 // CpuPlaced page path entirely (docs/rev/observed.md O37). Off by default.
 int g_reroute;
-struct Rr { void* res; void* shadow; UINT size; bool alias; };
+struct Rr { void* res; void* shadow; void* pushed; UINT size; bool alias; };
 const unsigned kRrSlots = 4096;
 Rr g_rr[kRrSlots];             // open addressing by resource pointer, under g_devLock
-LONG g_rrCount, g_rrMaps, g_rrBadMaps;
+LONG g_rrCount, g_rrMaps, g_rrBadMaps, g_rrSkipped;
 const LONG kRrTraceEvents = 12;
 // DXMT's UpdateSubresource on any non-output buffer calls Map/Unmap through
 // the vtable - i.e. through these hooks (a recursion that hung the render
@@ -161,8 +161,8 @@ Rr* rrFind(void* res) {
 void rrForget(void* res) {   // the address is being reused by a new buffer
     Rr* r = rrFind(res);
     if (!r) return;
-    if (!r->alias) { free(r->shadow); g_rrCount--; }
-    r->shadow = nullptr; r->size = 0;
+    if (!r->alias) { free(r->shadow); free(r->pushed); g_rrCount--; }
+    r->shadow = nullptr; r->pushed = nullptr; r->size = 0;
     r->res = (void*)1;       // tombstone: keeps probe chains intact
 }
 
@@ -177,6 +177,7 @@ bool rrAdd(void* res, UINT size, void* shadow = nullptr) {
             void* sh = shadow ? shadow : calloc(1, size ? size : 16);
             if (!sh) return false;
             r.res = res; r.shadow = sh; r.size = size; r.alias = shadow != nullptr;
+            r.pushed = r.alias ? nullptr : calloc(1, size ? size : 16);   // what the GPU last got
             if (!shadow) g_rrCount++;
             return true;
         }
@@ -710,7 +711,14 @@ void WINAPI hookUnmap(ID3D11DeviceContext* c, ID3D11Resource* res, UINT sub) {
         Rr* r = rrFind(res);
         void* shadow = r ? r->shadow : nullptr;
         LeaveCriticalSection(&g_devLock);
+        void* pushed = r ? r->pushed : nullptr;
+        UINT  psize  = r ? r->size : 0;
         if (shadow) {
+            // Most frames re-upload identical constants for static objects. A
+            // 2KB memcmp is free next to a blit that splits the render pass;
+            // skipping the no-op updates is most of mode 4's perf cost back.
+            if (pushed && psize && memcmp(pushed, shadow, psize) == 0) { g_rrSkipped++; return; }
+            if (pushed && psize) memcpy(pushed, shadow, psize);
             g_rrBypassThread = GetCurrentThreadId();
             // Not hooked, so this is DXMT's own UpdateSubresource: a DEFAULT-buffer
             // write, which on i386 takes the updateContents path, not the page path.
@@ -1346,8 +1354,8 @@ void report(const char* when) {
         tqlog("ring (%s): %d ring(s) of %d, %ld map(s) through the rings, %ld rebind(s); %ld dynamic buffer(s) seen",
               when, g_ringCount, kRings, g_ringMaps, g_ringRebinds, g_dynSeen);
     else if (g_reroute)
-        tqlog("reroute (%s): mode %d, %ld buffer(s) rerouted, %ld map(s) served from shadow, %ld unservable",
-              when, g_reroute, g_rrCount, g_rrMaps, g_rrBadMaps);
+        tqlog("reroute (%s): mode %d, %ld buffer(s) rerouted, %ld map(s) served from shadow, %ld unservable,"
+              " %ld identical push(es) skipped", when, g_reroute, g_rrCount, g_rrMaps, g_rrBadMaps, g_rrSkipped);
 }
 
 }  // namespace frames

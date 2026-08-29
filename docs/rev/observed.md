@@ -1562,6 +1562,26 @@ Preview. DXMT remains the only workable DX11 backend here, which makes the
 Stage 6 report to CodeWeavers the real fix path and the shim's mode 4 / mode
 13 the interim mitigations.
 
+## O45 — Mode 4 at full speed: **no flicker AND the pillar is back** — O40's FX loss was timing-dependent
+
+*2026-08-29 07:46, uncapped (cap commented out), `reroute=4` read from
+`tqflicker.ini` ("from tqflicker.ini" in the log), 2759 frames, 2,276,309
+maps served, 0 unservable. Log: `cache/logs/mode4-uncapped-run1-*`.*
+
+At full frame rate mode 4 shows **no flicker and no missing pillar**. O40's
+"blit modes cost offscreen FX" was measured only under the 10fps cap; the
+loss evidently depends on where the pass splits land, not on the splits
+existing. **Amend O40 accordingly: the FX cost is timing-dependent, observed
+only under the measuring cap.** Watch for it regardless — one clean session
+is not proof it can never happen.
+
+**The cost that is real: performance.** Busy frames (draws > 300) averaged
+35.4 ms (~28 fps), worst 314 ms — the per-update blit splitting the render
+encoder ~700–1900× a frame. Next: skip pushes whose bytes are identical to
+what the GPU already has (memcmp 2KB vs a blit) — most constants of a static
+scene do not change — then re-measure against an uncapped mode-0 baseline,
+which has never been taken.
+
 ## Ideas after Stage 4 — ranked by cost, 2026-08-29
 
 Every one of these is runnable without Xcode.
