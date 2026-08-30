@@ -769,12 +769,29 @@ void recordScreenTarget(const D3D11_TEXTURE2D_DESC* desc,
 
 bool fp16SceneTarget(const D3D11_TEXTURE2D_DESC* desc,
                      const D3D11_SUBRESOURCE_DATA* initial, const void* caller) {
-    // Exact Engine-build/runtime match for the two confirmed gameplay color
-    // surfaces: target 11 feeds FXAA/SMAA and target 12 feeds the gamma pass.
-    // Both must remain FP16 or target 12's UNORM store clips extended scene
-    // values immediately before HDR-safe gamma and presentation.
+    // Exact Engine-build/runtime match for confirmed gameplay color surfaces.
+    // The ordinal is creation order at Direct3D11.dll+0x67341. Captured pass
+    // bindings plus decoded DXBC give this full-resolution target map:
+    //   1: G-buffer base/ambient-lit diffuse color (R8; unchanged).
+    //   2: G-buffer packed world normal plus material coverage (R8; unchanged).
+    //   3: G-buffer diffuse/material reflectance color (R8; unchanged).
+    //   4: G-buffer specular color plus packed gloss power (R8; unchanged).
+    //   5: composed scene color, including transparent/effect draws (FP16).
+    //   6: auxiliary visibility/mask surface; only clear/no read was observed
+    //      on the captured route, so it remains R8 rather than being guessed HDR.
+    //   7: scene/background copy sampled by refraction effects (FP16).
+    //   8: linear scene-depth surface (R32_FLOAT; unchanged).
+    //   9: primary deferred-light accumulation/post-color surface (FP16).
+    //  10: screen-space occlusion/visibility result from the depth-neighborhood
+    //      filter (R8; scalar data rather than display color).
+    //  11: alternate deferred-light accumulation/post-color surface (FP16).
+    //  12: late post-process color consumed by FXAA/SMAA and gamma (FP16).
+    //  13: lazily-created copy of the completed frame used as gamma input by
+    //      the alternate sector/portal route (FP16). Leaving this one R8 clips
+    //      every extended highlight at once before tone mapping.
     const unsigned nextId = g_screenTargetCount + 1;
-    return tq::hdr::runtime().fp16Active && (nextId == 11 || nextId == 12) && !initial
+    const bool colorSurface = isFp16SceneTargetOrdinal(nextId);
+    return tq::hdr::runtime().fp16Active && colorSurface && !initial
         && gameScreenTarget(desc, caller)
         && desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM
         && desc->MipLevels == 1 && desc->ArraySize == 1
@@ -802,7 +819,9 @@ HRESULT createOriginalTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* 
                      (unsigned long)hr);
         hr = g_createTexture2D(device, desc, initial, texture);
     }
-    if (SUCCEEDED(hr) && texture) recordScreenTarget(requested, *texture, caller);
+    if (SUCCEEDED(hr) && texture && *texture) {
+        recordScreenTarget(requested, *texture, caller);
+    }
     return hr;
 }
 

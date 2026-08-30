@@ -85,10 +85,11 @@ Temporary HDR diagnostics can be enabled for testing:
 hdr_debug=1
 ```
 
-This creates `tqflicker-hdr.log` beside `TQ.exe` and replaces pixels above
-reference white with a yellow/orange/red/magenta highlight heatmap. There is no
-on-screen legend. Diagnostics are disabled by default and require a game
-restart when changed.
+This creates a concise `tqflicker-hdr.log` beside `TQ.exe` and replaces pixels
+above reference white with a yellow/orange/red/magenta highlight heatmap. Log
+writes are buffered and handled by a worker rather than the render thread.
+There is no on-screen legend. Diagnostics are disabled by default and require a
+game restart when changed.
 
 Streaming keeps the game's original level/entity preload distances. Large
 eligible BC1/BC2/BC3 terrain textures are created with their low mips ready

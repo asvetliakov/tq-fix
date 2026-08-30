@@ -8,6 +8,7 @@
 #include "frustum_fix.h"
 #include "hdr.h"
 #include "streaming.h"
+#include "visual.h"
 
 namespace {
 
@@ -198,6 +199,18 @@ int main(int argc, char** argv) {
         true, true, 1024, 768, 20000, 1440, &selectedWidth, &selectedHeight);
     check(!invalid && selectedWidth == 1024 && selectedHeight == 768,
           "reject invalid live display dimensions");
+
+    check(tq::visual::isFp16SceneTargetOrdinal(5)
+          && tq::visual::isFp16SceneTargetOrdinal(7)
+          && tq::visual::isFp16SceneTargetOrdinal(9)
+          && tq::visual::isFp16SceneTargetOrdinal(11)
+          && tq::visual::isFp16SceneTargetOrdinal(12)
+          && tq::visual::isFp16SceneTargetOrdinal(13)
+          && !tq::visual::isFp16SceneTargetOrdinal(4)
+          && !tq::visual::isFp16SceneTargetOrdinal(6)
+          && !tq::visual::isFp16SceneTargetOrdinal(10)
+          && !tq::visual::isFp16SceneTargetOrdinal(14),
+          "keep every confirmed scene/post target, including the alternate gamma snapshot, in FP16");
 
     HMODULE proxy = LoadLibraryA(dll);
     check(proxy != nullptr, "load the winmm proxy");

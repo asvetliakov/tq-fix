@@ -12,7 +12,7 @@ namespace tq {
 namespace hdr {
 namespace {
 
-Runtime g_runtime = {{true, ToneAgx, 203.0f, 0.0f, false},
+Runtime g_runtime = {{true, ToneFrostbite, 203.0f, 0.0f, false},
                      false, false, false, 1000.0f};
 bool g_settingsRead;
 char g_log[64 * 1024];
