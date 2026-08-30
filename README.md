@@ -120,6 +120,13 @@ npm run install-dll
 `dist/tq-dx11-fix-v<version>.zip` with `winmm.dll` at the archive root, ready
 for distribution. The version is read from `package.json`.
 
+On native Windows, extract `winmm.dll` beside `TQ.exe`. The proxy exposes the
+union of the named 32-bit WinMM exports found on native Windows and
+CrossOver/Wine, then resolves whichever implementations the host provides. All
+WinMM functions imported by Titan Quest and its bundled runtime DLLs are
+required on both platforms; platform-specific compatibility exports do not
+abort game startup when they are unavailable.
+
 `npm run uninstall-dll` removes the proxy and the TQ-specific Wine override.
 
 The tested environment is Titan Quest Anniversary Edition (32-bit GOG build),
@@ -127,7 +134,10 @@ CrossOver Preview with DXMT, and Apple Silicon. The regression test runs all 37
 captured skinning variants, a captured shadow receiver, and a complete captured
 FXAA replacement draw through the real 32-bit DXMT device. It also verifies
 shadow resource selection, reflection-pass isolation, and pipeline-state
-restoration.
+restoration. The build also validates the proxy's named export surface against
+native Windows x86 and CrossOver WinMM reference DLLs when those references are
+available locally. Native Windows runtime testing is still required before
+calling that environment fully validated.
 
 ## Third-party code
 

@@ -13,8 +13,13 @@ extern "C" void* tq_winmm_targets[];
 
 namespace {
 
-const char* const kWinmmNames[] = {
-#define TQ_WINMM_NAME(name) name,
+struct WinmmExport {
+    const char* name;
+    bool required;
+};
+
+const WinmmExport kWinmmExports[] = {
+#define TQ_WINMM_NAME(name, required) {name, required},
 #include "winmm_names.inc"
 #undef TQ_WINMM_NAME
 };
@@ -134,10 +139,14 @@ bool resolveWinmm(HINSTANCE self) {
     HMODULE real = LoadLibraryW(path);
     if (!real || real == (HMODULE)self) return false;
 
-    const int count = (int)(sizeof(kWinmmNames) / sizeof(kWinmmNames[0]));
+    const int count = (int)(sizeof(kWinmmExports) / sizeof(kWinmmExports[0]));
     for (int i = 0; i < count; ++i) {
-        FARPROC target = GetProcAddress(real, kWinmmNames[i]);
-        if (!target || belongsTo((HMODULE)self, (const void*)target)) return false;
+        const WinmmExport& entry = kWinmmExports[i];
+        FARPROC target = GetProcAddress(real, entry.name);
+        if (!target || belongsTo((HMODULE)self, (const void*)target)) {
+            if (entry.required) return false;
+            continue;
+        }
         tq_winmm_targets[i] = (void*)target;
     }
     return true;
@@ -273,7 +282,10 @@ DWORD WINAPI installerThread(void*) {
 
 }  // namespace
 
-extern "C" unsigned long tq_winmm_unresolved(void) { return 0; }
+extern "C" __attribute__((noreturn)) void tq_winmm_unresolved(void) {
+    TerminateProcess(GetCurrentProcess(), ERROR_PROC_NOT_FOUND);
+    for (;;) {}
+}
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {

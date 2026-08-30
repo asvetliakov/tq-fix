@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
     check(proxy != nullptr, "load the winmm proxy");
     if (proxy) {
         static const char* const names[] = {
-#define TQ_WINMM_NAME(name) name,
+#define TQ_WINMM_NAME(name, required) name,
 #include "winmm_names.inc"
 #undef TQ_WINMM_NAME
         };
