@@ -12,7 +12,7 @@ namespace tq {
 namespace hdr {
 namespace {
 
-Runtime g_runtime = {{true, ToneFrostbite, 203.0f, 0.0f, false, false},
+Runtime g_runtime = {{false, ToneOriginal, 203.0f, 0.0f, false, false},
                      false, false, false, 1000.0f};
 bool g_settingsRead;
 char g_log[64 * 1024];
@@ -177,9 +177,9 @@ Settings readSettings() {
     wchar_t path[MAX_PATH];
     iniPath(path);
     wchar_t value[32];
-    GetPrivateProfileStringW(L"graphics", L"hdr", L"auto", value, 32, path);
+    GetPrivateProfileStringW(L"graphics", L"hdr", L"off", value, 32, path);
     g_runtime.settings.requestHdr = _wcsicmp(value, L"off") != 0;
-    GetPrivateProfileStringW(L"graphics", L"tonemap", L"frostbite", value, 32, path);
+    GetPrivateProfileStringW(L"graphics", L"tonemap", L"original", value, 32, path);
     g_runtime.settings.toneMap = !_wcsicmp(value, L"original") ? ToneOriginal
                                        : !_wcsicmp(value, L"agx") ? ToneAgx
                                        : ToneFrostbite;

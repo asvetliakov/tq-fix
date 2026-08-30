@@ -20,9 +20,9 @@ it:
   optimized 3x3 PCF footprint.
 - progressively uploads large streamed terrain textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
-- keeps the final scene/post-process chain in FP16 and applies either a
+- can keep the final scene/post-process chain in FP16 and apply either a
   look-preserving Frostbite-style display mapper or a modern AgX-derived output
-  transform for SDR and HDR displays.
+  transform for SDR and HDR displays when explicitly enabled.
 
 For widescreen play, it also replaces the game's fixed 4:3 CPU-side
 entity-update frustum construction (expressed internally as 1024x768) with the
@@ -48,8 +48,8 @@ aa=smaa
 anisotropy=16
 shadows=enhanced
 edge_updates=expanded
-hdr=auto
-tonemap=frostbite
+hdr=off
+tonemap=original
 paper_white_nits=203
 peak_nits=auto
 
@@ -66,13 +66,16 @@ Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
 
-`hdr=auto` enables true HDR when the operating system and active display report
-HDR support. The enhanced FP16 path remains active on an SDR desktop and maps its
-extended scene highlights back into SDR. Frostbite is the default neutral
-display mapper: it preserves the game's graded midtones and color ratios while
-rolling off only the upper part of the display range. Use `tonemap=agx` for a
-more modern contrast and highlight response, or `tonemap=original` for the
-complete original 8-bit color-output path. Use `hdr=off` to force SDR output.
+HDR and custom tone mapping are disabled by default, retaining the complete
+original 8-bit color-output path. To opt in, set `hdr=auto` and select
+`tonemap=frostbite` or `tonemap=agx`. `hdr=auto` enables true HDR when the
+operating system and active display report HDR support; the enhanced FP16 path
+also remains active on an SDR desktop and maps its extended scene highlights
+back into SDR. Frostbite is the neutral display mapper: it preserves the game's
+graded midtones and color ratios while rolling off only the upper part of the
+display range. AgX provides a more modern contrast and highlight response.
+Use `tonemap=original` for the complete original path and `hdr=off` to prevent
+HDR output.
 `paper_white_nits` defaults to 203;
 `peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
 HDR is available but the report is unusable. A numeric `peak_nits` overrides
