@@ -53,23 +53,23 @@ int main(int argc, char** argv) {
           "streaming=original restores synchronous uploads");
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
-    check(defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneAgx
+    check(defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneFrostbite
           && defaultHdr.paperWhiteNits == 203.0f
           && defaultHdr.peakNitsOverride == 0.0f && !defaultHdr.debug,
-          "HDR defaults to auto/AgX/203 nits with diagnostics disabled");
+          "HDR defaults to auto/Frostbite/203 nits with diagnostics disabled");
 
-    const tq::hdr::ToneMap filmicModes[] = {
-        tq::hdr::ToneAgx, tq::hdr::ToneAces, tq::hdr::ToneReinhard
+    const tq::hdr::ToneMap outputModes[] = {
+        tq::hdr::ToneAgx, tq::hdr::ToneFrostbite
     };
     bool sdrCurvesValid = true;
     bool hdrCurvesValid = true;
-    for (unsigned mode = 0; mode < sizeof(filmicModes) / sizeof(filmicModes[0]); ++mode) {
+    for (unsigned mode = 0; mode < sizeof(outputModes) / sizeof(outputModes[0]); ++mode) {
         float previousSdr = -1.0f;
         float previousHdr = -1.0f;
         for (unsigned i = 0; i <= 1024; ++i) {
             float input = i * (32.0f / 1024.0f);
-            float sdr = tq::hdr::toneMapLuminance(filmicModes[mode], input, 1.0f);
-            float hdr = tq::hdr::toneMapLuminance(filmicModes[mode], input, 4.926108f);
+            float sdr = tq::hdr::toneMapLuminance(outputModes[mode], input, 1.0f);
+            float hdr = tq::hdr::toneMapLuminance(outputModes[mode], input, 4.926108f);
             sdrCurvesValid &= sdr == sdr && sdr >= 0.0f && sdr <= 1.00001f
                            && sdr + 0.00001f >= previousSdr;
             hdrCurvesValid &= hdr == hdr && hdr >= 0.0f && hdr <= 4.92612f
@@ -79,32 +79,30 @@ int main(int argc, char** argv) {
         }
     }
     float agxWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 1.0f, 1.0f);
-    float acesWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 1.0f, 1.0f);
     float agxHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 1.0f);
-    float acesHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 1.0f);
-    float reinhardWhite = tq::hdr::toneMapLuminance(
-        tq::hdr::ToneReinhard, 1.0f, 1.0f);
-    float reinhardHighlight = tq::hdr::toneMapLuminance(
-        tq::hdr::ToneReinhard, 4.0f, 1.0f);
+    float frostbiteMid = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 0.5f, 1.0f);
+    float frostbiteWhite = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 1.0f, 1.0f);
+    float frostbiteHighlight = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 4.0f, 1.0f);
     check(sdrCurvesValid && agxWhite > 0.4f && agxWhite < 0.9f
-          && acesWhite > 0.4f && acesWhite < 0.9f
-          && reinhardWhite > 0.59f && reinhardWhite < 0.61f
+          && frostbiteMid == 0.5f
+          && frostbiteWhite > 0.90f && frostbiteWhite < 0.92f
           && agxHighlight > agxWhite && agxHighlight < 1.0f
-          && acesHighlight > acesWhite && acesHighlight < 1.0f
-          && reinhardHighlight > reinhardWhite && reinhardHighlight < 1.0f,
-          "all filmic curves monotonically roll extended highlights into SDR");
+          && frostbiteHighlight > frostbiteWhite && frostbiteHighlight < 1.0f,
+          "all output curves monotonically roll extended highlights into SDR");
     float agxHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 4.926108f);
-    float acesHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 4.926108f);
-    float reinhardHdr = tq::hdr::toneMapLuminance(
-        tq::hdr::ToneReinhard, 4.0f, 4.926108f);
+    float frostbiteHdrWhite = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 1.0f, 4.926108f);
+    float frostbiteHdr = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 4.0f, 4.926108f);
     check(hdrCurvesValid && agxHdr > 1.0f && agxHdr < 4.926108f
-          && acesHdr > 1.0f && acesHdr < 4.926108f
-          && reinhardHdr > 1.0f && reinhardHdr < 4.926108f,
-          "all filmic curves preserve extended luminance for HDR output");
-    check(agxWhite != acesWhite && agxWhite != reinhardWhite
-          && acesWhite != reinhardWhite && agxHighlight != acesHighlight
-          && agxHighlight != reinhardHighlight,
-          "AgX, ACES, and Reinhard select measurably different curves");
+          && frostbiteHdrWhite == 1.0f
+          && frostbiteHdr > 3.9f && frostbiteHdr < 4.0f,
+          "all output curves preserve extended luminance for HDR output");
+    check(frostbiteWhite != agxWhite && frostbiteHighlight != agxHighlight,
+          "AgX and Frostbite select different curves");
 
     unsigned char colorGrade[1288] = {};
     const unsigned char colorChecksum[16] = {
@@ -516,7 +514,7 @@ int main(int argc, char** argv) {
             ID3D11PixelShader* reboundGamma = nullptr;
             context->PSGetShader(&reboundGamma, nullptr, nullptr);
             check(reboundGamma && reboundGamma != gammaShader,
-                  "the selected filmic transform replaces the exact gamma pass");
+                  "the selected output transform replaces the exact gamma pass");
             if (reboundGamma) reboundGamma->Release();
         } else {
             check(false, "replace the exact color-grading pass");

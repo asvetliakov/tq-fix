@@ -9,8 +9,7 @@ namespace hdr {
 enum ToneMap {
     ToneOriginal,
     ToneAgx,
-    ToneAces,
-    ToneReinhard
+    ToneFrostbite
 };
 
 struct Settings {
@@ -32,7 +31,7 @@ struct Runtime {
 Settings readSettings();
 const Runtime& runtime();
 
-// Returns true when filmic output is selected and candidate contains a complete
+// Returns true when enhanced output is selected and candidate contains a complete
 // FP16 flip-model description. The same linear scRGB path is used for SDR and
 // HDR; only the final display mapping differs.
 bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,

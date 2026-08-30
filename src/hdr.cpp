@@ -172,11 +172,10 @@ Settings readSettings() {
     wchar_t value[32];
     GetPrivateProfileStringW(L"graphics", L"hdr", L"auto", value, 32, path);
     g_runtime.settings.requestHdr = _wcsicmp(value, L"off") != 0;
-    GetPrivateProfileStringW(L"graphics", L"tonemap", L"agx", value, 32, path);
+    GetPrivateProfileStringW(L"graphics", L"tonemap", L"frostbite", value, 32, path);
     g_runtime.settings.toneMap = !_wcsicmp(value, L"original") ? ToneOriginal
-                                       : !_wcsicmp(value, L"aces") ? ToneAces
-                                       : !_wcsicmp(value, L"reinhard") ? ToneReinhard
-                                       : ToneAgx;
+                                       : !_wcsicmp(value, L"agx") ? ToneAgx
+                                       : ToneFrostbite;
     float paper = readFloat(path, L"paper_white_nits", 203.0f);
     g_runtime.settings.paperWhiteNits = paper >= 80.0f && paper <= 500.0f
                                       ? paper : 203.0f;
@@ -308,19 +307,17 @@ float agxLuminance(float x) {
     return powf(agxContrast(encoded), 2.2f * 1.08f);
 }
 
-float acesLuminance(float x) {
-    // The common 0.6 pre-exposure crushes this game's midtones. 0.75 keeps
-    // the ACES shoulder while placing diffuse detail closer to AgX.
-    x = x > 0.0f ? x * 0.75f : 0.0f;
-    return clampFloat((x * (2.51f * x + 0.03f))
-                    / (x * (2.43f * x + 0.59f) + 0.14f), 0.0f, 1.0f);
-}
-
-float reinhardLuminance(float x) {
-    // A modest exposure keeps diffuse white at 0.6 while retaining the
-    // characteristic soft, low-contrast Reinhard response.
-    x = x > 0.0f ? x * 1.5f : 0.0f;
-    return x / (1.0f + x);
+float frostbiteLuminance(float x, float peakRelative) {
+    // Frostbite treats tone mapping as a neutral display-range transform, not
+    // an artistic contrast curve. Keep the lower 75% of the target range
+    // linear, then use a C1-continuous exponential shoulder toward the peak.
+    // On HDR displays this leaves diffuse white and ordinary highlights
+    // untouched; on SDR it creates headroom without changing the midtones.
+    x = x > 0.0f ? x : 0.0f;
+    float knee = peakRelative * 0.75f;
+    if (x <= knee) return x;
+    float range = peakRelative - knee;
+    return knee + range * (1.0f - expf(-(x - knee) / range));
 }
 
 }  // namespace
@@ -329,9 +326,10 @@ float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative) {
     if (!(luminance > 0.0f) || !(peakRelative >= 1.0f)) return 0.0f;
     if (toneMap == ToneOriginal)
         return clampFloat(luminance, 0.0f, peakRelative);
-    float (*curve)(float) = toneMap == ToneAces ? acesLuminance
-                          : toneMap == ToneReinhard ? reinhardLuminance
-                          : agxLuminance;
+    if (toneMap == ToneFrostbite)
+        return clampFloat(frostbiteLuminance(luminance, peakRelative),
+                          0.0f, peakRelative);
+    float (*curve)(float) = agxLuminance;
     float white = curve(1.0f);
     if (luminance <= 1.0f) return clampFloat(curve(luminance), 0.0f, peakRelative);
     float range = peakRelative - white;

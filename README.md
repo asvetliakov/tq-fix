@@ -20,8 +20,9 @@ it:
   optimized 3x3 PCF footprint.
 - progressively uploads large streamed terrain textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
-- keeps the final scene/post-process chain in FP16 and applies an AgX-derived
-  or ACES-style filmic output transform for SDR and HDR displays.
+- keeps the final scene/post-process chain in FP16 and applies either a
+  look-preserving Frostbite-style display mapper or a modern AgX-derived output
+  transform for SDR and HDR displays.
 
 For widescreen play, it also replaces the game's fixed 4:3 CPU-side
 entity-update frustum construction (expressed internally as 1024x768) with the
@@ -48,7 +49,7 @@ anisotropy=16
 shadows=enhanced
 edge_updates=expanded
 hdr=auto
-tonemap=agx
+tonemap=frostbite
 paper_white_nits=203
 peak_nits=auto
 
@@ -66,11 +67,13 @@ frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
 
 `hdr=auto` enables true HDR when the operating system and active display report
-HDR support. The filmic FP16 path remains active on an SDR desktop and maps its
-extended scene highlights back into SDR. Use `hdr=off` to force SDR output,
-`tonemap=aces` for the punchier alternative, `tonemap=reinhard` for a softer,
-lower-contrast response, or `tonemap=original` for the complete original 8-bit
-color-output path. `paper_white_nits` defaults to 203;
+HDR support. The enhanced FP16 path remains active on an SDR desktop and maps its
+extended scene highlights back into SDR. Frostbite is the default neutral
+display mapper: it preserves the game's graded midtones and color ratios while
+rolling off only the upper part of the display range. Use `tonemap=agx` for a
+more modern contrast and highlight response, or `tonemap=original` for the
+complete original 8-bit color-output path. Use `hdr=off` to force SDR output.
+`paper_white_nits` defaults to 203;
 `peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
 HDR is available but the report is unusable. A numeric `peak_nits` overrides
 automatic detection.

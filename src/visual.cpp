@@ -840,10 +840,10 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
     if (enhanced && FAILED(hr)) hr = g_createPixelShader(device, bytecode, size, linkage, shader);
     tq::dxbc::release(&patch);
     if (SUCCEEDED(hr) && shader && *shader) {
-        bool filmic = tq::hdr::runtime().settings.toneMap != tq::hdr::ToneOriginal;
+        bool outputTransform = tq::hdr::runtime().settings.toneMap != tq::hdr::ToneOriginal;
         bool fxaa = g_options.smaa && isFxaa(bytecode, size);
-        bool color = filmic && tq::hdr::isColorGradingShader(bytecode, size);
-        bool gamma = filmic && tq::hdr::isGammaShader(bytecode, size);
+        bool color = outputTransform && tq::hdr::isColorGradingShader(bytecode, size);
+        bool gamma = outputTransform && tq::hdr::isGammaShader(bytecode, size);
         if (fxaa && g_fxaaCount < sizeof(g_fxaa) / sizeof(g_fxaa[0]))
             g_fxaa[g_fxaaCount++] = *shader;
         if (color && g_colorGradingCount < sizeof(g_colorGrading) / sizeof(g_colorGrading[0]))
@@ -1011,15 +1011,19 @@ const char* kToneSource =
 "15.5*x4*x2-40.14*x4*x+31.96*x4-6.868*x2*x+.4298*x2+.1191*x-.00232);}"
 "float agxCurve(float x){float v=saturate((log2(max(x,1e-10))+12.47393)/16.5);"
 "return pow(agxContrast(v),2.376);}"
-"float acesCurve(float x){x=max(x,0)*.75;"
-"return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
-"float reinhardCurve(float x){x=max(x,0)*1.5;return x/(1+x);}"
-"float displayCurve(float x){return TQ_REINHARD?reinhardCurve(x):"
-"TQ_ACES?acesCurve(x):agxCurve(x);}"
-"float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
+"float frostbiteCurve(float x){x=max(x,0);float knee=TQ_PEAK*.75;"
+"if(x<=knee)return x;float range=max(TQ_PEAK-knee,1e-4);"
+"return min(knee+range*(1-exp(-(x-knee)/range)),TQ_PEAK);}"
+"float displayCurve(float x){return agxCurve(x);}"
+"float mapLuma(float l){if(TQ_FROSTBITE)return frostbiteCurve(l);"
+"float white=displayCurve(1);float low=displayCurve(min(l,1));"
 "float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
 "return l<=1?low:min(high,TQ_PEAK);}"
-"float3 mapColor(float3 c){float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
+"float3 mapColor(float3 c){if(TQ_FROSTBITE){float p=max(max(c.r,c.g),c.b);"
+"p=max(p,1e-6);float m=mapLuma(p);float3 scaled=c*(m/p);"
+"float shoulder=saturate((p-TQ_PEAK*.75)/p);"
+"return max(lerp(scaled,float3(m,m,m),shoulder*shoulder),0);}"
+"float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
 "return max(c*(mapLuma(l)/l),0);}"
 "float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
 "float3 encoded=max(gammaGrade(screenSampler.SampleLevel(screenState,u,0).rgb),0);"
@@ -1051,15 +1055,19 @@ const char* kPresentPixelSource =
 "15.5*x4*x2-40.14*x4*x+31.96*x4-6.868*x2*x+.4298*x2+.1191*x-.00232);}"
 "float agxCurve(float x){float v=saturate((log2(max(x,1e-10))+12.47393)/16.5);"
 "return pow(agxContrast(v),2.376);}"
-"float acesCurve(float x){x=max(x,0)*.75;"
-"return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
-"float reinhardCurve(float x){x=max(x,0)*1.5;return x/(1+x);}"
-"float displayCurve(float x){return TQ_REINHARD?reinhardCurve(x):"
-"TQ_ACES?acesCurve(x):agxCurve(x);}"
-"float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
+"float frostbiteCurve(float x){x=max(x,0);float knee=TQ_PEAK*.75;"
+"if(x<=knee)return x;float range=max(TQ_PEAK-knee,1e-4);"
+"return min(knee+range*(1-exp(-(x-knee)/range)),TQ_PEAK);}"
+"float displayCurve(float x){return agxCurve(x);}"
+"float mapLuma(float l){if(TQ_FROSTBITE)return frostbiteCurve(l);"
+"float white=displayCurve(1);float low=displayCurve(min(l,1));"
 "float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
 "return l<=1?low:min(high,TQ_PEAK);}"
-"float3 mapColor(float3 c){float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
+"float3 mapColor(float3 c){if(TQ_FROSTBITE){float p=max(max(c.r,c.g),c.b);"
+"p=max(p,1e-6);float m=mapLuma(p);float3 scaled=c*(m/p);"
+"float shoulder=saturate((p-TQ_PEAK*.75)/p);"
+"return max(lerp(scaled,float3(m,m,m),shoulder*shoulder),0);}"
+"float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
 "return max(c*(mapLuma(l)/l),0);}"
 "float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
 "float3 c=linearizeExtended(max(frameTex.SampleLevel(frameSampler,u,0).rgb,0));"
@@ -1234,15 +1242,11 @@ bool createHdrProgramResources(ID3D11Device* device) {
     float paperScale = runtime.displayHdr
         ? runtime.settings.paperWhiteNits / 80.0f : 1.0f;
     float scrgbPeak = runtime.active ? runtime.peakNits / 80.0f : paperScale;
-    std::string tone = std::string("#define TQ_ACES ")
-        + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
-        + std::string("#define TQ_REINHARD ")
-        + (runtime.settings.toneMap == tq::hdr::ToneReinhard ? "1\n" : "0\n")
+    std::string tone = std::string("#define TQ_FROSTBITE ")
+        + (runtime.settings.toneMap == tq::hdr::ToneFrostbite ? "1\n" : "0\n")
         + defineNumber("TQ_PEAK", peakRelative) + kToneSource;
-    std::string present = std::string("#define TQ_ACES ")
-        + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
-        + std::string("#define TQ_REINHARD ")
-        + (runtime.settings.toneMap == tq::hdr::ToneReinhard ? "1\n" : "0\n")
+    std::string present = std::string("#define TQ_FROSTBITE ")
+        + (runtime.settings.toneMap == tq::hdr::ToneFrostbite ? "1\n" : "0\n")
         + std::string("#define TQ_HIGHLIGHT_DEBUG ")
         + (runtime.settings.debug ? "1\n" : "0\n")
         + defineNumber("TQ_PEAK", peakRelative)
