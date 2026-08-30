@@ -85,6 +85,9 @@ unsigned g_diagBackBufferCopies;
 unsigned g_diagBackBufferUpdates;
 unsigned g_diagBackBufferResolves;
 unsigned g_diagRestoreAtPresent;
+LONG g_diagUploadsCreated;
+LONG g_diagUploadsCompleted;
+LONG g_diagUploadSteps;
 #endif
 
 ID3D11Device* g_device;
@@ -102,9 +105,7 @@ bool g_fxaaBound;
 bool g_colorGradingBound;
 bool g_gammaBound;
 bool g_backBufferNeedsRestore;
-ID3D11RenderTargetView* g_flipOutputRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-ID3D11DepthStencilView* g_flipOutputDsv;
-bool g_flipOutputValid;
+UINT g_flipBackBufferSlots;
 LONG g_firstFlipOutputRestoreLogged;
 
 struct ScreenTargetInfo {
@@ -604,6 +605,15 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
     job->chunkBytes = job->maxChunkBytes;
     ++lease->jobs;
     InterlockedExchange(&job->state, 2);
+#ifdef TQ_DIAGNOSTIC
+    LONG created = InterlockedIncrement(&g_diagUploadsCreated);
+    if (created <= 24 || !(created % 50))
+        tq::hdr::log("Progressive upload queued: total=%ld size=%ux%u format=%u "
+                     "mips=%u deferred=%u topBytes=%llu leaseJobs=%ld\r\n",
+                     created, desc->Width, desc->Height, (unsigned)desc->Format,
+                     desc->MipLevels, lowMip, (unsigned long long)topBytes,
+                     lease->jobs);
+#endif
     LeaveCriticalSection(&g_uploadLock);
 
     *handled = true;
@@ -624,6 +634,18 @@ HRESULT WINAPI hookCreateShaderResourceView(
         used = &translated;
     }
     HRESULT hr = g_createShaderResourceView(device, resource, used, view);
+#ifdef TQ_DIAGNOSTIC
+    ScreenTargetInfo* screen = screenTarget(identity);
+    if (screen) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC actual = {};
+        if (SUCCEEDED(hr) && view && *view) (*view)->GetDesc(&actual);
+        tq::hdr::log("Screen SRV: id=%u requested=%u used=%u actual=%u hr=0x%08lx\r\n",
+                     screen->id,
+                     description ? (unsigned)description->Format : 0u,
+                     used ? (unsigned)used->Format : 0u,
+                     (unsigned)actual.Format, (unsigned long)hr);
+    }
+#endif
     if (FAILED(hr) || !view || !*view || !g_uploadLockReady) return hr;
 
     EnterCriticalSection(&g_uploadLock);
@@ -723,6 +745,9 @@ void advanceTextureUploadsInternal() {
         DWORD stepStartedMs = GetTickCount();
         g_updateSubresource(g_context, job.texture, job.mip, &box,
                             source, pitch, 0);
+#ifdef TQ_DIAGNOSTIC
+        InterlockedIncrement(&g_diagUploadSteps);
+#endif
         DWORD stepMs = GetTickCount() - stepStartedMs;
         if (stepMs >= 6 && job.chunkBytes > 512 * 1024)
             job.chunkBytes /= 2;
@@ -745,6 +770,9 @@ void advanceTextureUploadsInternal() {
         memset((BYTE*)&job + sizeof(job.state), 0,
                sizeof(job) - sizeof(job.state));
         InterlockedExchange(&job.state, 0);
+#ifdef TQ_DIAGNOSTIC
+        InterlockedIncrement(&g_diagUploadsCompleted);
+#endif
         if (lease && lease->jobs > 0) --lease->jobs;
         if (lease && lease->sealed && !lease->jobs) {
             unmap = lease->mappedBase;
@@ -757,6 +785,51 @@ void advanceTextureUploadsInternal() {
     if (releaseTexture) releaseTexture->Release();
     if (unmap) UnmapViewOfFile(unmap);
 }
+
+#ifdef TQ_DIAGNOSTIC
+void logProgressiveUploadState(unsigned frame) {
+    if (!g_uploadLockReady) {
+        tq::hdr::log("Progressive state: frame=%u disabled\r\n", frame);
+        return;
+    }
+    unsigned active = 0, reserved = 0, usedLeases = 0, sealedLeases = 0;
+    LONG leaseJobs = 0;
+    UINT headMip = 0, headLowMip = 0, headBlockRow = 0, headChunk = 0;
+    UINT headWidth = 0, headHeight = 0;
+    EnterCriticalSection(&g_uploadLock);
+    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
+        const UploadJob& job = g_uploadJobs[i];
+        if (job.state == 1) ++reserved;
+        if (job.state != 2) continue;
+        if (!active) {
+            headMip = job.mip;
+            headLowMip = job.lowMip;
+            headBlockRow = job.blockRow;
+            headChunk = job.chunkBytes;
+            headWidth = job.desc.Width;
+            headHeight = job.desc.Height;
+        }
+        ++active;
+    }
+    for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
+        const MappingLease& lease = g_mappingLeases[i];
+        if (!lease.used) continue;
+        ++usedLeases;
+        if (lease.sealed) ++sealedLeases;
+        leaseJobs += lease.jobs;
+    }
+    LeaveCriticalSection(&g_uploadLock);
+    tq::hdr::log("Progressive state: frame=%u created=%ld completed=%ld steps=%ld "
+                 "active=%u reserved=%u leases=%u sealed=%u leaseJobs=%ld "
+                 "head=%ux%u mip=%u/%u row=%u chunk=%u\r\n",
+                 frame, InterlockedCompareExchange(&g_diagUploadsCreated, 0, 0),
+                 InterlockedCompareExchange(&g_diagUploadsCompleted, 0, 0),
+                 InterlockedCompareExchange(&g_diagUploadSteps, 0, 0),
+                 active, reserved, usedLeases, sealedLeases, leaseJobs,
+                 headWidth, headHeight, headMip, headLowMip,
+                 headBlockRow, headChunk);
+}
+#endif
 
 bool createProgramResources(ID3D11Device* device);
 
@@ -929,11 +1002,28 @@ HRESULT WINAPI hookCreateRenderTargetView(
     bool translate = description && description->Format == DXGI_FORMAT_R8G8B8A8_UNORM
         && ((runtime.fp16Active && identity == g_backBufferIdentity)
             || upgradedIdentity(identity));
+    D3D11_RENDER_TARGET_VIEW_DESC translated = {};
+    const D3D11_RENDER_TARGET_VIEW_DESC* used = nullptr;
     if (!translate)
-        return g_createRenderTargetView(device, resource, description, view);
-    D3D11_RENDER_TARGET_VIEW_DESC translated = *description;
-    translated.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    HRESULT hr = g_createRenderTargetView(device, resource, &translated, view);
+        used = description;
+    else {
+        translated = *description;
+        translated.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        used = &translated;
+    }
+    HRESULT hr = g_createRenderTargetView(device, resource, used, view);
+#ifdef TQ_DIAGNOSTIC
+    ScreenTargetInfo* screen = screenTarget(identity);
+    if (screen) {
+        D3D11_RENDER_TARGET_VIEW_DESC actual = {};
+        if (SUCCEEDED(hr) && view && *view) (*view)->GetDesc(&actual);
+        tq::hdr::log("Screen RTV: id=%u requested=%u used=%u actual=%u hr=0x%08lx\r\n",
+                     screen->id,
+                     description ? (unsigned)description->Format : 0u,
+                     used ? (unsigned)used->Format : 0u,
+                     (unsigned)actual.Format, (unsigned long)hr);
+    }
+#endif
     return hr;
 }
 
@@ -1445,10 +1535,7 @@ void restoreState(ID3D11DeviceContext* c, SavedState& s) {
 }
 
 void releaseFlipOutputTargets() {
-    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-        release(g_flipOutputRtvs[i]);
-    release(g_flipOutputDsv);
-    g_flipOutputValid = false;
+    g_flipBackBufferSlots = 0;
 }
 
 bool viewTargetsTexture(ID3D11RenderTargetView* view, ID3D11Texture2D* texture) {
@@ -1462,29 +1549,31 @@ bool viewTargetsTexture(ID3D11RenderTargetView* view, ID3D11Texture2D* texture) 
 
 void rememberFlipOutputTargets(const SavedState& state,
                                ID3D11Texture2D* backBuffer) {
-    bool containsBackBuffer = false;
+    UINT slots = 0;
     for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-        containsBackBuffer |= viewTargetsTexture(state.rtvs[i], backBuffer);
-    if (!containsBackBuffer) {
-        releaseFlipOutputTargets();
-        return;
-    }
-    releaseFlipOutputTargets();
-    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
-        g_flipOutputRtvs[i] = state.rtvs[i];
-        if (g_flipOutputRtvs[i]) g_flipOutputRtvs[i]->AddRef();
-    }
-    g_flipOutputDsv = state.dsv;
-    if (g_flipOutputDsv) g_flipOutputDsv->AddRef();
-    g_flipOutputValid = true;
+        if (viewTargetsTexture(state.rtvs[i], backBuffer)) slots |= 1u << i;
+    g_flipBackBufferSlots = slots;
 }
 
 bool restoreFlipOutputTargets() {
-    if (!g_flipOutputValid || !g_context || !g_omSetRenderTargets) return false;
+    if (!g_flipBackBufferSlots || !g_context || !g_omSetRenderTargets
+        || !g_hdr.backBufferRTV) return false;
+    ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                                  rtvs, &dsv);
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+        if (!(g_flipBackBufferSlots & (1u << i)) || rtvs[i]) continue;
+        rtvs[i] = g_hdr.backBufferRTV;
+        rtvs[i]->AddRef();
+    }
     g_inside = true;
     g_omSetRenderTargets(g_context, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
-                         g_flipOutputRtvs, g_flipOutputDsv);
+                         rtvs, dsv);
     g_inside = false;
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+        release(rtvs[i]);
+    release(dsv);
     if (!InterlockedCompareExchange(&g_firstFlipOutputRestoreLogged, 1, 0))
         tq::hdr::log("Flip-model output binding restored after Present\r\n");
     return true;
@@ -1697,6 +1786,7 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     const unsigned probeFrame = ++g_fp16ProbeFrame;
     const bool probe = fp16ProbeFrame(probeFrame);
     if (probe) {
+        logProgressiveUploadState(probeFrame);
         tq::hdr::log("FP16 activity: frame=%u draws=%u clears=%u copies=%u updates=%u resolves=%u "
                      "screenTargets=%u restoreAtPresent=%u\r\n",
                      probeFrame, g_diagBackBufferDraws, g_diagBackBufferClears,
@@ -2083,6 +2173,9 @@ void onBeforeResize(IDXGISwapChain* swapChain) {
     g_diagBackBufferCopies = g_diagBackBufferUpdates = 0;
     g_diagBackBufferResolves = 0;
     g_diagRestoreAtPresent = 0;
+    InterlockedExchange(&g_diagUploadsCreated, 0);
+    InterlockedExchange(&g_diagUploadsCompleted, 0);
+    InterlockedExchange(&g_diagUploadSteps, 0);
 #endif
     memset(g_screenTargets, 0, sizeof(g_screenTargets));
     g_screenTargetCount = 0;
