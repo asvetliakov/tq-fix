@@ -91,6 +91,20 @@ writes are buffered and handled by a worker rather than the render thread.
 There is no on-screen legend. Diagnostics are disabled by default and require a
 game restart when changed.
 
+For startup or crash diagnosis without changing the rendered image, enable the
+lightweight trace instead:
+
+```ini
+[debug]
+trace=1
+```
+
+This creates `tqflicker-debug.log` beside `TQ.exe` and records proxy loading,
+renderer discovery, device and swap-chain creation, hook installation, and the
+first presented frame. `npm run debug-release` builds a trace-enabled archive
+that forces this log on without requiring an INI change; its symbols and linker
+map remain under `build/debug` for resolving a reported crash offset.
+
 Streaming keeps the game's original level/entity preload distances. Large
 eligible BC1/BC2/BC3 terrain textures are created with their low mips ready
 immediately, then their high mips are uploaded progressively using an adaptive
@@ -126,6 +140,12 @@ CrossOver/Wine, then resolves whichever implementations the host provides. All
 WinMM functions imported by Titan Quest and its bundled runtime DLLs are
 required on both platforms; platform-specific compatibility exports do not
 abort game startup when they are unavailable.
+
+Frame callbacks are installed in Titan Quest's signature-verified renderer
+wrapper rather than in the shared `IDXGISwapChain::Present` vtable. Steam,
+THQN, and driver overlays therefore retain their normal DXGI hook ownership and
+ordering. An unknown renderer build is left untouched and presentation-dependent
+enhancements fail back to the game's original path.
 
 `npm run uninstall-dll` removes the proxy and the TQ-specific Wine override.
 

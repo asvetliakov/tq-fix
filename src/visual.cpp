@@ -23,6 +23,7 @@ struct Patch { void** slot; void* original; void* replacement; };
 Patch g_patches[24];
 int g_patchCount;
 LONG g_installed;
+LONG g_firstPresentLogged;
 
 typedef HRESULT(WINAPI* CreateTexture2DFn)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*,
                                            const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
@@ -194,6 +195,11 @@ struct HdrResources {
     UINT width, height;
 } g_hdr;
 
+#ifdef TQ_DIAGNOSTIC
+ID3D11Texture2D* g_fp16Probe;
+unsigned g_fp16ProbeFrame;
+#endif
+
 template <typename T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
 bool readable(const void* address) {
@@ -244,6 +250,10 @@ void readOptions() {
     GetPrivateProfileStringW(L"performance", L"streaming", L"optimized",
                              value, 32, path);
     g_options.streaming = tq::streaming::optimizationEnabled(value);
+    if (g_options.streaming && !tq::streaming::presentHookInstalled()) {
+        g_options.streaming = false;
+        tq::hdr::log("Progressive streaming disabled: renderer Present hook unavailable\r\n");
+    }
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
@@ -765,6 +775,14 @@ void recordScreenTarget(const D3D11_TEXTURE2D_DESC* desc,
     texture->GetDesc(&target.desc);
     target.upgraded = desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM
                    && target.desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+#ifdef TQ_DIAGNOSTIC
+    tq::hdr::log("Screen target: id=%u requested=%u actual=%u upgraded=%u "
+                 "size=%ux%u bind=0x%x usage=%u misc=0x%x\r\n",
+                 target.id, (unsigned)desc->Format,
+                 (unsigned)target.desc.Format, target.upgraded ? 1u : 0u,
+                 target.desc.Width, target.desc.Height, target.desc.BindFlags,
+                 (unsigned)target.desc.Usage, target.desc.MiscFlags);
+#endif
 }
 
 bool fp16SceneTarget(const D3D11_TEXTURE2D_DESC* desc,
@@ -1174,6 +1192,10 @@ void releaseSmaa() {
 void releaseHdrSizeResources() {
     release(g_hdr.presentCopySRV); release(g_hdr.presentCopy);
     release(g_hdr.backBufferRTV);
+#ifdef TQ_DIAGNOSTIC
+    release(g_fp16Probe);
+    g_fp16ProbeFrame = 0;
+#endif
     g_hdr.width = g_hdr.height = 0;
 }
 
@@ -1489,6 +1511,100 @@ bool prepareHdrPresentation(IDXGISwapChain* swapChain) {
     return ok;
 }
 
+#ifdef TQ_DIAGNOSTIC
+bool fp16ProbeFrame(unsigned frame) {
+    return frame == 1 || frame == 2 || frame == 30 || frame == 120;
+}
+
+void* renderTargetIdentity(ID3D11RenderTargetView* view) {
+    if (!view) return nullptr;
+    ID3D11Resource* resource = nullptr;
+    view->GetResource(&resource);
+    void* identity = identityOf(resource);
+    release(resource);
+    return identity;
+}
+
+void logFp16Probe(const char* stage, unsigned frame, ID3D11Texture2D* source) {
+    if (!stage || !source || !g_context || !g_device) return;
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    source->GetDesc(&sourceDesc);
+    if (sourceDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT
+        || !sourceDesc.Width || !sourceDesc.Height) {
+        tq::hdr::log("FP16 probe: frame=%u stage=%s unsupported format=%u size=%ux%u\r\n",
+                     frame, stage, (unsigned)sourceDesc.Format,
+                     sourceDesc.Width, sourceDesc.Height);
+        return;
+    }
+    if (!g_fp16Probe) {
+        D3D11_TEXTURE2D_DESC probe = {};
+        probe.Width = probe.Height = 4;
+        probe.MipLevels = probe.ArraySize = 1;
+        probe.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        probe.SampleDesc.Count = 1;
+        probe.Usage = D3D11_USAGE_STAGING;
+        probe.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        HRESULT createHr = g_createTexture2D(g_device, &probe, nullptr, &g_fp16Probe);
+        if (FAILED(createHr) || !g_fp16Probe) {
+            tq::hdr::log("FP16 probe creation failed: hr=0x%08x\r\n",
+                         (unsigned)createHr);
+            return;
+        }
+    }
+    for (UINT y = 0; y < 4; ++y) {
+        for (UINT x = 0; x < 4; ++x) {
+            UINT sourceX = ((2 * x + 1) * sourceDesc.Width) / 8;
+            UINT sourceY = ((2 * y + 1) * sourceDesc.Height) / 8;
+            if (sourceX >= sourceDesc.Width) sourceX = sourceDesc.Width - 1;
+            if (sourceY >= sourceDesc.Height) sourceY = sourceDesc.Height - 1;
+            D3D11_BOX box = {sourceX, sourceY, 0, sourceX + 1, sourceY + 1, 1};
+            g_context->CopySubresourceRegion(g_fp16Probe, 0, x, y, 0,
+                                             source, 0, &box);
+        }
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT mapHr = g_context->Map(g_fp16Probe, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(mapHr)) {
+        tq::hdr::log("FP16 probe map failed: frame=%u stage=%s hr=0x%08x\r\n",
+                     frame, stage, (unsigned)mapHr);
+        return;
+    }
+    struct HalfPixel { uint16_t r, g, b, a; };
+    HalfPixel samples[4] = {};
+    unsigned rgbNonZero = 0;
+    unsigned rgbSpecial = 0;
+    uint16_t maxAbsHalf = 0;
+    for (UINT y = 0; y < 4; ++y) {
+        const HalfPixel* row = (const HalfPixel*)((const BYTE*)mapped.pData
+                                                  + y * mapped.RowPitch);
+        for (UINT x = 0; x < 4; ++x) {
+            const HalfPixel& pixel = row[x];
+            const uint16_t rgb[3] = {pixel.r, pixel.g, pixel.b};
+            bool nonZero = false;
+            for (UINT channel = 0; channel < 3; ++channel) {
+                uint16_t magnitude = rgb[channel] & 0x7fff;
+                if (magnitude) nonZero = true;
+                if (magnitude > maxAbsHalf) maxAbsHalf = magnitude;
+                if ((magnitude & 0x7c00) == 0x7c00) ++rgbSpecial;
+            }
+            if (nonZero) ++rgbNonZero;
+            if (x == y) samples[x] = pixel;
+        }
+    }
+    g_context->Unmap(g_fp16Probe, 0);
+    tq::hdr::log(
+        "FP16 probe: frame=%u stage=%s rgbNonZero=%u/16 special=%u "
+        "maxAbs=0x%04x diag="
+        "%04x/%04x/%04x/%04x,%04x/%04x/%04x/%04x,"
+        "%04x/%04x/%04x/%04x,%04x/%04x/%04x/%04x\r\n",
+        frame, stage, rgbNonZero, rgbSpecial, maxAbsHalf,
+        samples[0].r, samples[0].g, samples[0].b, samples[0].a,
+        samples[1].r, samples[1].g, samples[1].b, samples[1].a,
+        samples[2].r, samples[2].g, samples[2].b, samples[2].a,
+        samples[3].r, samples[3].g, samples[3].b, samples[3].a);
+}
+#endif
+
 bool presentHdrFrame(IDXGISwapChain* swapChain) {
     if (InterlockedCompareExchange(&g_programState, 2, 2) != 2
         || !prepareHdrPresentation(swapChain)) return false;
@@ -1505,6 +1621,17 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
                                   noTargets, nullptr);
     g_inside = true;
     g_context->CopyResource(g_hdr.presentCopy, backBuffer);
+#ifdef TQ_DIAGNOSTIC
+    const unsigned probeFrame = ++g_fp16ProbeFrame;
+    const bool probe = fp16ProbeFrame(probeFrame);
+    if (probe) {
+        tq::hdr::log("FP16 identities: frame=%u current=%p cachedRTV=%p gameRTV=%p\r\n",
+                     probeFrame, identityOf(backBuffer),
+                     renderTargetIdentity(g_hdr.backBufferRTV),
+                     renderTargetIdentity(old.rtvs[0]));
+        logFp16Probe("game-copy", probeFrame, g_hdr.presentCopy);
+    }
+#endif
     g_context->OMSetRenderTargets(1, &g_hdr.backBufferRTV, nullptr);
     g_context->OMSetBlendState(g_hdr.blend, nullptr, 0xffffffff);
     g_context->OMSetDepthStencilState(g_hdr.depth, 0);
@@ -1520,6 +1647,13 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     g_draw(g_context, 3, 0);
     g_inside = false;
     g_context->PSSetShaderResources(0, 3, noSrvs);
+#ifdef TQ_DIAGNOSTIC
+    if (probe) {
+        g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                                      noTargets, nullptr);
+        logFp16Probe("composed", probeFrame, backBuffer);
+    }
+#endif
     restoreState(g_context, old);
     backBuffer->Release();
     return true;
@@ -1618,10 +1752,24 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
 
 void install(ID3D11Device* device, ID3D11DeviceContext* context,
              IDXGISwapChain* swapChain) {
-    if (!device || InterlockedCompareExchange(&g_installed, 1, 0)) return;
+    if (!device) {
+        tq::hdr::log("Visual install skipped: no device\r\n");
+        return;
+    }
+    if (InterlockedCompareExchange(&g_installed, 1, 0)) {
+        tq::hdr::log("Visual install skipped: already installed\r\n");
+        return;
+    }
     readOptions();
+    tq::hdr::log("Visual options: smaa=%u shadows=%u streaming=%u anisotropy=%u\r\n",
+                 g_options.smaa ? 1u : 0u, g_options.shadows ? 1u : 0u,
+                 g_options.streaming ? 1u : 0u, g_options.anisotropy);
     if (!context) device->GetImmediateContext(&context); else context->AddRef();
-    if (!context) { InterlockedExchange(&g_installed, 0); return; }
+    if (!context) {
+        tq::hdr::log("Visual install failed: no immediate context\r\n");
+        InterlockedExchange(&g_installed, 0);
+        return;
+    }
     const tq::hdr::Runtime& hdrRuntime = tq::hdr::runtime();
     bool toneEnabled = hdrRuntime.settings.toneMap != tq::hdr::ToneOriginal;
     tq::hdr::log("Visual install: tone=%u hdrRequested=%u fp16=%u hdr=%u\r\n",
@@ -1705,7 +1853,12 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
-    if (ok && (g_options.smaa || toneEnabled)) startProgramBuild(device);
+    tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
+                 ok ? 1u : 0u, g_patchCount);
+    if (ok && (g_options.smaa || toneEnabled)) {
+        startProgramBuild(device);
+        tq::hdr::log("Shader program build requested\r\n");
+    }
     if (!ok) {
         restoreSlots();
         g_context->Release();
@@ -1719,10 +1872,17 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         tq::streaming::setPreResizeCallback(nullptr);
         tq::streaming::setResizeCallback(nullptr);
         InterlockedExchange(&g_installed, 0);
+        tq::hdr::log("Visual install rolled back after patch failure\r\n");
+    } else {
+        tq::hdr::log("Visual install completed\r\n");
     }
 }
 
 void onPresent(IDXGISwapChain* swapChain) {
+    if (!InterlockedCompareExchange(&g_firstPresentLogged, 1, 0))
+        tq::hdr::log("First Present reached: swapChain=%p fp16=%u hdr=%u\r\n",
+                     swapChain, tq::hdr::runtime().fp16Active ? 1u : 0u,
+                     tq::hdr::runtime().active ? 1u : 0u);
     advanceTextureUploadsInternal();
     if (tq::hdr::runtime().fp16Active) {
         // If the game submits another Present without touching the new flip

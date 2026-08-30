@@ -12,7 +12,7 @@ namespace tq {
 namespace hdr {
 namespace {
 
-Runtime g_runtime = {{true, ToneFrostbite, 203.0f, 0.0f, false},
+Runtime g_runtime = {{true, ToneFrostbite, 203.0f, 0.0f, false, false},
                      false, false, false, 1000.0f};
 bool g_settingsRead;
 char g_log[64 * 1024];
@@ -121,7 +121,14 @@ bool hdrColorSpace(DXGI_COLOR_SPACE_TYPE colorSpace) {
 void logPath(wchar_t path[MAX_PATH]) {
     iniPath(path);
     wchar_t* slash = wcsrchr(path, L'\\');
-    if (slash) lstrcpyW(slash + 1, L"tqflicker-hdr.log");
+    if (!slash) return;
+#ifdef TQ_DIAGNOSTIC
+    lstrcpyW(slash + 1, L"tqflicker-debug.log");
+#else
+    lstrcpyW(slash + 1, g_runtime.settings.debug
+                      ? L"tqflicker-hdr.log"
+                      : L"tqflicker-debug.log");
+#endif
 }
 
 void flushLog(HANDLE file) {
@@ -191,6 +198,14 @@ Settings readSettings() {
     g_runtime.settings.debug = !_wcsicmp(value, L"1")
                             || !_wcsicmp(value, L"on")
                             || !_wcsicmp(value, L"true");
+    GetPrivateProfileStringW(L"debug", L"trace", L"0", value, 32, path);
+    g_runtime.settings.trace = g_runtime.settings.debug
+                            || !_wcsicmp(value, L"1")
+                            || !_wcsicmp(value, L"on")
+                            || !_wcsicmp(value, L"true");
+#ifdef TQ_DIAGNOSTIC
+    g_runtime.settings.trace = true;
+#endif
     return g_runtime.settings;
 }
 
@@ -340,7 +355,7 @@ float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative) {
 }
 
 void log(const char* format, ...) {
-    if (!readSettings().debug) return;
+    if (!readSettings().trace) return;
     AcquireSRWLockExclusive(&g_logLock);
     LONG offset = g_logBytes;
     if (!format || offset < 0 || offset >= (LONG)sizeof(g_log) - 1) {

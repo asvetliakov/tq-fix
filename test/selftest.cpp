@@ -14,10 +14,93 @@ namespace {
 
 FILE* g_report;
 int   g_failures;
+int   g_presentOrder;
+bool  g_presentOrderValid;
+IDXGISwapChain* g_presentSwapChain;
 
 void check(bool passed, const char* description) {
     fprintf(g_report, "%s  %s\n", passed ? "ok  " : "FAIL", description);
     if (!passed) ++g_failures;
+}
+
+void onTestPrePresent(IDXGISwapChain* swapChain) {
+    g_presentOrderValid &= g_presentOrder == 0;
+    g_presentOrder = 1;
+    g_presentSwapChain = swapChain;
+}
+
+void onTestPostPresent(IDXGISwapChain* swapChain) {
+    g_presentOrderValid &= g_presentOrder == 2 && swapChain == g_presentSwapChain;
+    g_presentOrder = 3;
+}
+
+HRESULT WINAPI testOriginalPresent(IDXGISwapChain* swapChain, UINT interval,
+                                   UINT flags) {
+    g_presentOrderValid &= g_presentOrder == 1 && swapChain == g_presentSwapChain
+                        && interval == 0 && flags == 0;
+    g_presentOrder = 2;
+    return S_OK;
+}
+
+void testRendererPresentHook() {
+    const SIZE_T imageSize = 0x192000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                     MEM_RESERVE | MEM_COMMIT,
+                                     PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest renderer image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.TimeDateStamp = 0x62da9e96;
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    static const BYTE presentCode[] = {
+        0x8b, 0x51, 0x34, 0x33, 0xc0, 0x38, 0x81, 0xdb,
+        0x05, 0x00, 0x00, 0x56, 0x8b, 0x32, 0x0f, 0x95,
+        0xc0, 0x6a, 0x00, 0x50, 0x52, 0xff, 0x56, 0x20,
+        0x5e, 0xc2, 0x04, 0x00
+    };
+    memcpy(image + 0x61190, presentCode, sizeof(presentCode));
+    void** rendererPresentSlot = (void**)(image + 0x8625c);
+    *rendererPresentSlot = image + 0x61190;
+
+    void* swapVtable[14] = {};
+    swapVtable[8] = (void*)&testOriginalPresent;
+    struct FakeSwapChain { void** vtable; } swapChain = {swapVtable};
+    BYTE renderer[0x600] = {};
+    *(IDXGISwapChain**)(renderer + 0x34) = (IDXGISwapChain*)&swapChain;
+
+    tq::streaming::setPresentCallback(&onTestPrePresent);
+    tq::streaming::setPostPresentCallback(&onTestPostPresent);
+    bool installed = tq::streaming::installRenderer((HMODULE)image);
+    typedef HRESULT (__thiscall* RendererPresentFn)(void*, void*);
+    RendererPresentFn present = (RendererPresentFn)*rendererPresentSlot;
+    g_presentOrder = 0;
+    g_presentOrderValid = true;
+    g_presentSwapChain = (IDXGISwapChain*)&swapChain;
+    HRESULT result = installed ? present(renderer, nullptr) : E_FAIL;
+    check(installed && tq::streaming::presentHookInstalled(),
+          "install the signature-gated renderer-level Present hook");
+    check(SUCCEEDED(result) && g_presentOrderValid && g_presentOrder == 3,
+          "run pre-Present, Steam-safe original Present, and post-Present in order");
+    check(swapVtable[8] == (void*)&testOriginalPresent,
+          "leave the shared IDXGISwapChain Present slot untouched");
+
+    tq::streaming::shutdown();
+    check(*rendererPresentSlot == image + 0x61190
+          && !tq::streaming::presentHookInstalled(),
+          "restore the renderer hook cleanly during shutdown");
+    image[0x61190] ^= 1;
+    check(!tq::streaming::installRenderer((HMODULE)image)
+          && *rendererPresentSlot == image + 0x61190,
+          "reject a near-match renderer without changing its vtable");
+    tq::streaming::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
 }
 
 void* readFile(const char* path, long* size) {
@@ -52,11 +135,13 @@ int main(int argc, char** argv) {
           "streaming=optimized enables progressive uploads");
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
+    testRendererPresentHook();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
     check(defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneFrostbite
           && defaultHdr.paperWhiteNits == 203.0f
-          && defaultHdr.peakNitsOverride == 0.0f && !defaultHdr.debug,
+          && defaultHdr.peakNitsOverride == 0.0f
+          && !defaultHdr.debug && !defaultHdr.trace,
           "HDR defaults to auto/Frostbite/203 nits with diagnostics disabled");
 
     const tq::hdr::ToneMap outputModes[] = {
@@ -614,6 +699,8 @@ int main(int argc, char** argv) {
 
     check(GetFileAttributesA("tqflicker-hdr.log") == INVALID_FILE_ATTRIBUTES,
           "HDR logging creates no file when hdr_debug is absent");
+    check(GetFileAttributesA("tqflicker-debug.log") == INVALID_FILE_ATTRIBUTES,
+          "startup tracing creates no file when trace is absent");
     fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
     fclose(g_report);
     return g_failures ? 1 : 0;

@@ -18,6 +18,7 @@ struct Settings {
     float paperWhiteNits;
     float peakNitsOverride;
     bool debug;
+    bool trace;
 };
 
 struct Runtime {
@@ -48,8 +49,8 @@ bool isGammaShader(const void* bytecode, SIZE_T size);
 // CPU reference for the luminance curve embedded in the output shaders.
 float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative);
 
-// Debug-only diagnostics are buffered in memory and flushed by a worker. With
-// hdr_debug disabled, log calls return before locking or starting the worker.
+// Diagnostics are buffered in memory and flushed by a worker. With both trace
+// and hdr_debug disabled, log calls return before locking or starting it.
 void log(const char* format, ...);
 void shutdown();
 

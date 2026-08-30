@@ -8,7 +8,14 @@ REAL="${TQ_REAL_WINMM:-$BOTTLE/drive_c/windows/syswow64/winmm.dll}"
 NATIVE="${TQ_NATIVE_WINMM:-winmm-x32.dll}"
 MANIFEST=src/winmm_exports.txt
 CXX=i686-w64-mingw32-g++
-OUT=build/winmm.dll
+DIAGNOSTIC="${TQ_DIAGNOSTIC:-0}"
+if [ "$DIAGNOSTIC" = "1" ]; then
+  OUT="${TQ_BUILD_OUT:-build/debug/winmm.dll}"
+  MODE=diagnostic
+else
+  OUT="${TQ_BUILD_OUT:-build/winmm.dll}"
+  MODE=release
+fi
 
 command -v "$CXX" >/dev/null || { echo "missing $CXX - run: npm run doctor" >&2; exit 1; }
 
@@ -22,16 +29,23 @@ base64 -D -i third_party/smaa/AreaTex.h.gz.b64 | gzip -dc > build/gen/AreaTex.h
 base64 -D -i third_party/smaa/SearchTex.h.gz.b64 | gzip -dc > build/gen/SearchTex.h
 xxd -i third_party/smaa/SMAA.hlsl > build/gen/smaa_source.h
 
-mkdir -p build
+mkdir -p build "$(dirname "$OUT")"
+CXXFLAGS=(-O2 -DNDEBUG -Wall -Wextra -static -static-libgcc -static-libstdc++ -fno-exceptions)
+LDFLAGS=(-Wl,--exclude-all-symbols)
+if [ "$DIAGNOSTIC" = "1" ]; then
+  CXXFLAGS+=(-g -DTQ_DIAGNOSTIC)
+  LDFLAGS+=(-Wl,-Map,build/debug/winmm.map)
+else
+  LDFLAGS+=(-Wl,--strip-all)
+fi
+
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
   src/fix.cpp src/dxbc_patch.cpp src/frustum_fix.cpp src/hdr.cpp src/streaming.cpp src/visual.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
-  -O2 -DNDEBUG -Wall -Wextra \
-  -static -static-libgcc -static-libstdc++ \
-  -fno-exceptions \
-  -Wl,--strip-all,--exclude-all-symbols
+  "${CXXFLAGS[@]}" \
+  "${LDFLAGS[@]}"
 
 # ---------------------------------------------------------------- verify
 exports_of() {
@@ -83,7 +97,7 @@ if ! i686-w64-mingw32-objdump -f "$OUT" | grep -q 'pei-i386'; then
   exit 1
 fi
 
-if i686-w64-mingw32-objdump -h "$OUT" | grep -q '\.debug_'; then
+if [ "$DIAGNOSTIC" != "1" ] && i686-w64-mingw32-objdump -h "$OUT" | grep -q '\.debug_'; then
   echo "FAIL: $OUT contains debug sections" >&2
   exit 1
 fi
@@ -100,6 +114,7 @@ validate_reference "$NATIVE" "native Windows x86"
 n=$(exports_of "$OUT" | wc -l | tr -d ' ')
 size=$(stat -f %z "$OUT")
 echo "built $OUT  (${size} bytes)"
+echo "  mode:    $MODE"
 echo "  exports: $n named exports from the Windows/CrossOver union"
 echo "  refs:    ${validated_references:-not available (manifest-only validation)}"
 echo "  arch:    $(i686-w64-mingw32-objdump -f "$OUT" | awk '/file format/{print $NF}')"
