@@ -1013,7 +1013,9 @@ const char* kToneSource =
 "return pow(agxContrast(v),2.376);}"
 "float acesCurve(float x){x=max(x,0)*.75;"
 "return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
-"float displayCurve(float x){return TQ_ACES?acesCurve(x):agxCurve(x);}"
+"float reinhardCurve(float x){x=max(x,0)*1.5;return x/(1+x);}"
+"float displayCurve(float x){return TQ_REINHARD?reinhardCurve(x):"
+"TQ_ACES?acesCurve(x):agxCurve(x);}"
 "float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
 "float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
 "return l<=1?low:min(high,TQ_PEAK);}"
@@ -1051,7 +1053,9 @@ const char* kPresentPixelSource =
 "return pow(agxContrast(v),2.376);}"
 "float acesCurve(float x){x=max(x,0)*.75;"
 "return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
-"float displayCurve(float x){return TQ_ACES?acesCurve(x):agxCurve(x);}"
+"float reinhardCurve(float x){x=max(x,0)*1.5;return x/(1+x);}"
+"float displayCurve(float x){return TQ_REINHARD?reinhardCurve(x):"
+"TQ_ACES?acesCurve(x):agxCurve(x);}"
 "float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
 "float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
 "return l<=1?low:min(high,TQ_PEAK);}"
@@ -1232,9 +1236,13 @@ bool createHdrProgramResources(ID3D11Device* device) {
     float scrgbPeak = runtime.active ? runtime.peakNits / 80.0f : paperScale;
     std::string tone = std::string("#define TQ_ACES ")
         + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
+        + std::string("#define TQ_REINHARD ")
+        + (runtime.settings.toneMap == tq::hdr::ToneReinhard ? "1\n" : "0\n")
         + defineNumber("TQ_PEAK", peakRelative) + kToneSource;
     std::string present = std::string("#define TQ_ACES ")
         + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
+        + std::string("#define TQ_REINHARD ")
+        + (runtime.settings.toneMap == tq::hdr::ToneReinhard ? "1\n" : "0\n")
         + std::string("#define TQ_HIGHLIGHT_DEBUG ")
         + (runtime.settings.debug ? "1\n" : "0\n")
         + defineNumber("TQ_PEAK", peakRelative)

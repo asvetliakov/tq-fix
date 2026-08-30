@@ -175,6 +175,7 @@ Settings readSettings() {
     GetPrivateProfileStringW(L"graphics", L"tonemap", L"agx", value, 32, path);
     g_runtime.settings.toneMap = !_wcsicmp(value, L"original") ? ToneOriginal
                                        : !_wcsicmp(value, L"aces") ? ToneAces
+                                       : !_wcsicmp(value, L"reinhard") ? ToneReinhard
                                        : ToneAgx;
     float paper = readFloat(path, L"paper_white_nits", 203.0f);
     g_runtime.settings.paperWhiteNits = paper >= 80.0f && paper <= 500.0f
@@ -315,13 +316,22 @@ float acesLuminance(float x) {
                     / (x * (2.43f * x + 0.59f) + 0.14f), 0.0f, 1.0f);
 }
 
+float reinhardLuminance(float x) {
+    // A modest exposure keeps diffuse white at 0.6 while retaining the
+    // characteristic soft, low-contrast Reinhard response.
+    x = x > 0.0f ? x * 1.5f : 0.0f;
+    return x / (1.0f + x);
+}
+
 }  // namespace
 
 float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative) {
     if (!(luminance > 0.0f) || !(peakRelative >= 1.0f)) return 0.0f;
     if (toneMap == ToneOriginal)
         return clampFloat(luminance, 0.0f, peakRelative);
-    float (*curve)(float) = toneMap == ToneAces ? acesLuminance : agxLuminance;
+    float (*curve)(float) = toneMap == ToneAces ? acesLuminance
+                          : toneMap == ToneReinhard ? reinhardLuminance
+                          : agxLuminance;
     float white = curve(1.0f);
     if (luminance <= 1.0f) return clampFloat(curve(luminance), 0.0f, peakRelative);
     float range = peakRelative - white;

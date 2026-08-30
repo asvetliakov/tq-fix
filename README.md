@@ -68,8 +68,9 @@ camera FOV, far plane, or rendering culling.
 `hdr=auto` enables true HDR when the operating system and active display report
 HDR support. The filmic FP16 path remains active on an SDR desktop and maps its
 extended scene highlights back into SDR. Use `hdr=off` to force SDR output,
-`tonemap=aces` for the punchier alternative, or `tonemap=original` for the
-complete original 8-bit color-output path. `paper_white_nits` defaults to 203;
+`tonemap=aces` for the punchier alternative, `tonemap=reinhard` for a softer,
+lower-contrast response, or `tonemap=original` for the complete original 8-bit
+color-output path. `paper_white_nits` defaults to 203;
 `peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
 HDR is available but the report is unusable. A numeric `peak_nits` overrides
 automatic detection.

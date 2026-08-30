@@ -9,7 +9,8 @@ namespace hdr {
 enum ToneMap {
     ToneOriginal,
     ToneAgx,
-    ToneAces
+    ToneAces,
+    ToneReinhard
 };
 
 struct Settings {

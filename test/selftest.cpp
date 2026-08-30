@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
           "HDR defaults to auto/AgX/203 nits with diagnostics disabled");
 
     const tq::hdr::ToneMap filmicModes[] = {
-        tq::hdr::ToneAgx, tq::hdr::ToneAces
+        tq::hdr::ToneAgx, tq::hdr::ToneAces, tq::hdr::ToneReinhard
     };
     bool sdrCurvesValid = true;
     bool hdrCurvesValid = true;
@@ -82,18 +82,29 @@ int main(int argc, char** argv) {
     float acesWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 1.0f, 1.0f);
     float agxHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 1.0f);
     float acesHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 1.0f);
+    float reinhardWhite = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneReinhard, 1.0f, 1.0f);
+    float reinhardHighlight = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneReinhard, 4.0f, 1.0f);
     check(sdrCurvesValid && agxWhite > 0.4f && agxWhite < 0.9f
           && acesWhite > 0.4f && acesWhite < 0.9f
+          && reinhardWhite > 0.59f && reinhardWhite < 0.61f
           && agxHighlight > agxWhite && agxHighlight < 1.0f
-          && acesHighlight > acesWhite && acesHighlight < 1.0f,
-          "AgX and ACES monotonically roll extended highlights into SDR");
+          && acesHighlight > acesWhite && acesHighlight < 1.0f
+          && reinhardHighlight > reinhardWhite && reinhardHighlight < 1.0f,
+          "all filmic curves monotonically roll extended highlights into SDR");
     float agxHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 4.926108f);
     float acesHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 4.926108f);
+    float reinhardHdr = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneReinhard, 4.0f, 4.926108f);
     check(hdrCurvesValid && agxHdr > 1.0f && agxHdr < 4.926108f
-          && acesHdr > 1.0f && acesHdr < 4.926108f,
-          "AgX and ACES preserve extended luminance for HDR output");
-    check(agxWhite != acesWhite && agxHighlight != acesHighlight,
-          "AgX and ACES select measurably different display curves");
+          && acesHdr > 1.0f && acesHdr < 4.926108f
+          && reinhardHdr > 1.0f && reinhardHdr < 4.926108f,
+          "all filmic curves preserve extended luminance for HDR output");
+    check(agxWhite != acesWhite && agxWhite != reinhardWhite
+          && acesWhite != reinhardWhite && agxHighlight != acesHighlight
+          && agxHighlight != reinhardHighlight,
+          "AgX, ACES, and Reinhard select measurably different curves");
 
     unsigned char colorGrade[1288] = {};
     const unsigned char colorChecksum[16] = {
