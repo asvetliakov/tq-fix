@@ -52,6 +52,14 @@ typedef void(WINAPI* RSSetViewportsFn)(ID3D11DeviceContext*, UINT, const D3D11_V
 typedef void(WINAPI* RSSetScissorsFn)(ID3D11DeviceContext*, UINT, const D3D11_RECT*);
 typedef void(WINAPI* UpdateSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
                                           const D3D11_BOX*, const void*, UINT, UINT);
+#ifdef TQ_DIAGNOSTIC
+typedef void(WINAPI* CopySubresourceRegionFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                              UINT, UINT, UINT, ID3D11Resource*, UINT,
+                                              const D3D11_BOX*);
+typedef void(WINAPI* CopyResourceFn)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+typedef void(WINAPI* ResolveSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                                           ID3D11Resource*, UINT, DXGI_FORMAT);
+#endif
 
 CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
@@ -67,6 +75,17 @@ OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
 RSSetScissorsFn g_rsSetScissors;
 UpdateSubresourceFn g_updateSubresource;
+#ifdef TQ_DIAGNOSTIC
+CopySubresourceRegionFn g_copySubresourceRegion;
+CopyResourceFn g_copyResource;
+ResolveSubresourceFn g_resolveSubresource;
+unsigned g_diagBackBufferDraws;
+unsigned g_diagBackBufferClears;
+unsigned g_diagBackBufferCopies;
+unsigned g_diagBackBufferUpdates;
+unsigned g_diagBackBufferResolves;
+unsigned g_diagRestoreAtPresent;
+#endif
 
 ID3D11Device* g_device;
 ID3D11DeviceContext* g_context;
@@ -1563,7 +1582,9 @@ bool prepareHdrPresentation(IDXGISwapChain* swapChain) {
 
 #ifdef TQ_DIAGNOSTIC
 bool fp16ProbeFrame(unsigned frame) {
-    return frame == 1 || frame == 2 || frame == 30 || frame == 120;
+    return frame == 1 || frame == 2 || frame == 30 || frame == 120
+        || frame == 180 || frame == 240 || frame == 300
+        || frame == 600 || frame == 1200;
 }
 
 void* renderTargetIdentity(ID3D11RenderTargetView* view) {
@@ -1676,12 +1697,21 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     const unsigned probeFrame = ++g_fp16ProbeFrame;
     const bool probe = fp16ProbeFrame(probeFrame);
     if (probe) {
+        tq::hdr::log("FP16 activity: frame=%u draws=%u clears=%u copies=%u updates=%u resolves=%u "
+                     "screenTargets=%u restoreAtPresent=%u\r\n",
+                     probeFrame, g_diagBackBufferDraws, g_diagBackBufferClears,
+                     g_diagBackBufferCopies, g_diagBackBufferUpdates,
+                     g_diagBackBufferResolves, g_screenTargetCount,
+                     g_diagRestoreAtPresent);
         tq::hdr::log("FP16 identities: frame=%u current=%p cachedRTV=%p gameRTV=%p\r\n",
                      probeFrame, identityOf(backBuffer),
                      renderTargetIdentity(g_hdr.backBufferRTV),
                      renderTargetIdentity(old.rtvs[0]));
         logFp16Probe("game-copy", probeFrame, g_hdr.presentCopy);
     }
+    g_diagBackBufferDraws = g_diagBackBufferClears = 0;
+    g_diagBackBufferCopies = g_diagBackBufferUpdates = 0;
+    g_diagBackBufferResolves = 0;
 #endif
     g_context->OMSetRenderTargets(1, &g_hdr.backBufferRTV, nullptr);
     g_context->OMSetBlendState(g_hdr.blend, nullptr, 0xffffffff);
@@ -1773,14 +1803,77 @@ void WINAPI hookClearRenderTargetView(ID3D11DeviceContext* context,
                                       const FLOAT color[4]) {
     // A full clear replaces every pixel, so this frame does not depend on the
     // prior flip-buffer contents and needs no preservation copy.
-    if (!g_inside && g_backBufferNeedsRestore && context == g_context
-        && viewTargetsCurrentBackBuffer(view))
+    bool backBuffer = !g_inside && context == g_context
+                   && viewTargetsCurrentBackBuffer(view);
+#ifdef TQ_DIAGNOSTIC
+    if (backBuffer) ++g_diagBackBufferClears;
+#endif
+    if (backBuffer && g_backBufferNeedsRestore)
         g_backBufferNeedsRestore = false;
     g_clearRenderTargetView(context, view, color);
 }
 
+#ifdef TQ_DIAGNOSTIC
+bool resourceTargetsCurrentBackBuffer(ID3D11Resource* resource) {
+    return resource && identityOf(resource) == g_backBufferIdentity;
+}
+
+void WINAPI hookCopySubresourceRegion(
+    ID3D11DeviceContext* context, ID3D11Resource* destination,
+    UINT destinationSubresource, UINT destinationX, UINT destinationY,
+    UINT destinationZ, ID3D11Resource* source, UINT sourceSubresource,
+    const D3D11_BOX* sourceBox) {
+    if (!g_inside && context == g_context
+        && resourceTargetsCurrentBackBuffer(destination))
+        ++g_diagBackBufferCopies;
+    g_copySubresourceRegion(context, destination, destinationSubresource,
+                            destinationX, destinationY, destinationZ,
+                            source, sourceSubresource, sourceBox);
+}
+
+void WINAPI hookCopyResource(ID3D11DeviceContext* context,
+                             ID3D11Resource* destination,
+                             ID3D11Resource* source) {
+    if (!g_inside && context == g_context
+        && resourceTargetsCurrentBackBuffer(destination))
+        ++g_diagBackBufferCopies;
+    g_copyResource(context, destination, source);
+}
+
+void WINAPI hookUpdateSubresource(
+    ID3D11DeviceContext* context, ID3D11Resource* destination,
+    UINT destinationSubresource, const D3D11_BOX* destinationBox,
+    const void* source, UINT sourceRowPitch, UINT sourceDepthPitch) {
+    if (!g_inside && context == g_context
+        && resourceTargetsCurrentBackBuffer(destination))
+        ++g_diagBackBufferUpdates;
+    g_updateSubresource(context, destination, destinationSubresource,
+                        destinationBox, source, sourceRowPitch,
+                        sourceDepthPitch);
+}
+
+void WINAPI hookResolveSubresource(
+    ID3D11DeviceContext* context, ID3D11Resource* destination,
+    UINT destinationSubresource, ID3D11Resource* source,
+    UINT sourceSubresource, DXGI_FORMAT format) {
+    if (!g_inside && context == g_context
+        && resourceTargetsCurrentBackBuffer(destination))
+        ++g_diagBackBufferResolves;
+    g_resolveSubresource(context, destination, destinationSubresource,
+                         source, sourceSubresource, format);
+}
+#endif
+
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
     if (!g_inside) tracePostProcessBinding(context);
+#ifdef TQ_DIAGNOSTIC
+    if (!g_inside && context == g_context) {
+        ID3D11RenderTargetView* target = nullptr;
+        context->OMGetRenderTargets(1, &target, nullptr);
+        if (viewTargetsCurrentBackBuffer(target)) ++g_diagBackBufferDraws;
+        release(target);
+    }
+#endif
     if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, false, count, start, 0); g_inside = false;
@@ -1791,6 +1884,14 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
     if (!g_inside) tracePostProcessBinding(context);
+#ifdef TQ_DIAGNOSTIC
+    if (!g_inside && context == g_context) {
+        ID3D11RenderTargetView* target = nullptr;
+        context->OMGetRenderTargets(1, &target, nullptr);
+        if (viewTargetsCurrentBackBuffer(target)) ++g_diagBackBufferDraws;
+        release(target);
+    }
+#endif
     if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, true, count, start, base); g_inside = false;
@@ -1903,7 +2004,18 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&cv[44], (void*)&hookRSSetViewports, (void**)&g_rsSetViewports);
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
+#ifdef TQ_DIAGNOSTIC
+    ok &= patchSlot(&cv[46], (void*)&hookCopySubresourceRegion,
+                    (void**)&g_copySubresourceRegion);
+    ok &= patchSlot(&cv[47], (void*)&hookCopyResource,
+                    (void**)&g_copyResource);
+    ok &= patchSlot(&cv[48], (void*)&hookUpdateSubresource,
+                    (void**)&g_updateSubresource);
+    ok &= patchSlot(&cv[57], (void*)&hookResolveSubresource,
+                    (void**)&g_resolveSubresource);
+#else
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
+#endif
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && (g_options.smaa || toneEnabled)) {
@@ -1938,6 +2050,9 @@ void onPresent(IDXGISwapChain* swapChain) {
     if (tq::hdr::runtime().fp16Active) {
         // If the game submits another Present without touching the new flip
         // buffer, restore before capturing it as the next game-space frame.
+#ifdef TQ_DIAGNOSTIC
+        g_diagRestoreAtPresent = g_backBufferNeedsRestore ? 1u : 0u;
+#endif
         if (g_backBufferNeedsRestore) restoreGameSpaceBackBuffer();
         presentHdrFrame(swapChain);
     }
@@ -1963,6 +2078,12 @@ void onBeforeResize(IDXGISwapChain* swapChain) {
     g_backBufferIdentity = nullptr;
     g_backBufferWidth = g_backBufferHeight = 0;
     g_backBufferNeedsRestore = false;
+#ifdef TQ_DIAGNOSTIC
+    g_diagBackBufferDraws = g_diagBackBufferClears = 0;
+    g_diagBackBufferCopies = g_diagBackBufferUpdates = 0;
+    g_diagBackBufferResolves = 0;
+    g_diagRestoreAtPresent = 0;
+#endif
     memset(g_screenTargets, 0, sizeof(g_screenTargets));
     g_screenTargetCount = 0;
     memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
@@ -2039,6 +2160,11 @@ void shutdown() {
     g_clearRenderTargetView = nullptr;
     g_psSetShaderResources = nullptr;
     g_updateSubresource = nullptr;
+#ifdef TQ_DIAGNOSTIC
+    g_copySubresourceRegion = nullptr;
+    g_copyResource = nullptr;
+    g_resolveSubresource = nullptr;
+#endif
     g_archiveUnmap = nullptr;
     InterlockedExchange(&g_archiveVtablePatched, 0);
     InterlockedExchange(&g_programState, 0);
