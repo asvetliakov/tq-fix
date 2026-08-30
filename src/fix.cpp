@@ -5,6 +5,7 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "hdr.h"
 #include "streaming.h"
 #include "visual.h"
 
@@ -176,8 +177,15 @@ void patchDevice(ID3D11Device* device) {
 void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
                   IDXGISwapChain* swapChain = nullptr) {
     patchDevice(device);
-    if (device) tq::visual::install(device, context);
+    if (device) tq::visual::install(device, context, swapChain);
     if (swapChain) tq::streaming::installSwapChain(swapChain);
+}
+
+void releaseCreation(IDXGISwapChain** swapChain, ID3D11Device** device,
+                     ID3D11DeviceContext** context) {
+    if (context && *context) { (*context)->Release(); *context = nullptr; }
+    if (device && *device) { (*device)->Release(); *device = nullptr; }
+    if (swapChain && *swapChain) { (*swapChain)->Release(); *swapChain = nullptr; }
 }
 
 HRESULT WINAPI hookCreateDevice(
@@ -198,9 +206,20 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
     const DXGI_SWAP_CHAIN_DESC* description, IDXGISwapChain** swapChain,
     ID3D11Device** device, D3D_FEATURE_LEVEL* selectedLevel,
     ID3D11DeviceContext** context) {
+    DXGI_SWAP_CHAIN_DESC candidate = {};
+    bool tryFloatOutput = description
+                       && tq::hdr::makeSwapChainCandidate(*description, &candidate);
     HRESULT result = g_createDeviceAndSwapChain(
         adapter, driverType, software, flags, levels, levelCount, sdkVersion,
-        description, swapChain, device, selectedLevel, context);
+        tryFloatOutput ? &candidate : description, swapChain, device, selectedLevel, context);
+    if (tryFloatOutput && (FAILED(result) || !swapChain || !*swapChain
+                           || !tq::hdr::activateSwapChain(*swapChain))) {
+        tq::hdr::log("FP16 swap-chain attempt failed; retrying original description\r\n");
+        releaseCreation(swapChain, device, context);
+        result = g_createDeviceAndSwapChain(
+            adapter, driverType, software, flags, levels, levelCount, sdkVersion,
+            description, swapChain, device, selectedLevel, context);
+    }
     if (SUCCEEDED(result) && device)
         installHooks(*device, context ? *context : nullptr,
                      swapChain ? *swapChain : nullptr);
@@ -275,6 +294,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         tq::visual::shutdown();
         restorePatches();
         tq::streaming::shutdown();
+        tq::hdr::shutdown();
         if (g_thread) CloseHandle(g_thread);
         if (g_done) CloseHandle(g_done);
         if (g_stop) CloseHandle(g_stop);

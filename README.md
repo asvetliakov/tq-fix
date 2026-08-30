@@ -20,6 +20,8 @@ it:
   optimized 3x3 PCF footprint.
 - progressively uploads large streamed terrain textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
+- keeps the final scene/post-process chain in FP16 and applies an AgX-derived
+  or ACES-style filmic output transform for SDR and HDR displays.
 
 For widescreen play, it also replaces the game's fixed 4:3 CPU-side
 entity-update frustum construction (expressed internally as 1024x768) with the
@@ -45,6 +47,10 @@ aa=smaa
 anisotropy=16
 shadows=enhanced
 edge_updates=expanded
+hdr=auto
+tonemap=agx
+paper_white_nits=203
+peak_nits=auto
 
 [performance]
 streaming=optimized
@@ -58,6 +64,27 @@ High for the intended result.
 Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
+
+`hdr=auto` enables true HDR when the operating system and active display report
+HDR support. The filmic FP16 path remains active on an SDR desktop and maps its
+extended scene highlights back into SDR. Use `hdr=off` to force SDR output,
+`tonemap=aces` for the punchier alternative, or `tonemap=original` for the
+complete original 8-bit color-output path. `paper_white_nits` defaults to 203;
+`peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
+HDR is available but the report is unusable. A numeric `peak_nits` overrides
+automatic detection.
+
+Temporary HDR diagnostics can be enabled for testing:
+
+```ini
+[debug]
+hdr_debug=1
+```
+
+This creates `tqflicker-hdr.log` beside `TQ.exe` and replaces pixels above
+reference white with a yellow/orange/red/magenta highlight heatmap. There is no
+on-screen legend. Diagnostics are disabled by default and require a game
+restart when changed.
 
 Streaming keeps the game's original level/entity preload distances. Large
 eligible BC1/BC2/BC3 terrain textures are created with their low mips ready

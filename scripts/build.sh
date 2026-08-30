@@ -23,7 +23,7 @@ xxd -i third_party/smaa/SMAA.hlsl > build/gen/smaa_source.h
 mkdir -p build
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
-  src/fix.cpp src/dxbc_patch.cpp src/frustum_fix.cpp src/streaming.cpp src/visual.cpp \
+  src/fix.cpp src/dxbc_patch.cpp src/frustum_fix.cpp src/hdr.cpp src/streaming.cpp src/visual.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
   -O2 -DNDEBUG -Wall -Wextra \

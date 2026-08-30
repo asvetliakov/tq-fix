@@ -1,5 +1,6 @@
 #include "visual.h"
 #include "dxbc_patch.h"
+#include "hdr.h"
 #include "streaming.h"
 
 #include <d3dcompiler.h>
@@ -32,12 +33,18 @@ typedef HRESULT(WINAPI* CreateSamplerStateFn)(ID3D11Device*, const D3D11_SAMPLER
 typedef HRESULT(WINAPI* CreateShaderResourceViewFn)(ID3D11Device*, ID3D11Resource*,
                                                      const D3D11_SHADER_RESOURCE_VIEW_DESC*,
                                                      ID3D11ShaderResourceView**);
+typedef HRESULT(WINAPI* CreateRenderTargetViewFn)(ID3D11Device*, ID3D11Resource*,
+                                                   const D3D11_RENDER_TARGET_VIEW_DESC*,
+                                                   ID3D11RenderTargetView**);
 typedef void(WINAPI* PSSetShaderFn)(ID3D11DeviceContext*, ID3D11PixelShader*,
                                     ID3D11ClassInstance* const*, UINT);
 typedef void(WINAPI* PSSetShaderResourcesFn)(ID3D11DeviceContext*, UINT, UINT,
                                              ID3D11ShaderResourceView* const*);
 typedef void(WINAPI* DrawFn)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(WINAPI* DrawIndexedFn)(ID3D11DeviceContext*, UINT, UINT, INT);
+typedef void(WINAPI* ClearRenderTargetViewFn)(ID3D11DeviceContext*,
+                                              ID3D11RenderTargetView*,
+                                              const FLOAT[4]);
 typedef void(WINAPI* OMSetRenderTargetsFn)(ID3D11DeviceContext*, UINT,
                                            ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
 typedef void(WINAPI* RSSetViewportsFn)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*);
@@ -49,10 +56,12 @@ CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
 CreateSamplerStateFn g_createSamplerState;
 CreateShaderResourceViewFn g_createShaderResourceView;
+CreateRenderTargetViewFn g_createRenderTargetView;
 PSSetShaderFn g_psSetShader;
 PSSetShaderResourcesFn g_psSetShaderResources;
 DrawFn g_draw;
 DrawIndexedFn g_drawIndexed;
+ClearRenderTargetViewFn g_clearRenderTargetView;
 OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
 RSSetScissorsFn g_rsSetScissors;
@@ -60,9 +69,36 @@ UpdateSubresourceFn g_updateSubresource;
 
 ID3D11Device* g_device;
 ID3D11DeviceContext* g_context;
+IDXGISwapChain* g_swapChain;
+void* g_backBufferIdentity;
+UINT g_backBufferWidth, g_backBufferHeight;
 ID3D11PixelShader* g_fxaa[8];
 unsigned g_fxaaCount;
+ID3D11PixelShader* g_colorGrading[8];
+unsigned g_colorGradingCount;
+ID3D11PixelShader* g_gamma[8];
+unsigned g_gammaCount;
 bool g_fxaaBound;
+bool g_colorGradingBound;
+bool g_gammaBound;
+bool g_backBufferNeedsRestore;
+
+struct ScreenTargetInfo {
+    void* identity;
+    unsigned id;
+    D3D11_TEXTURE2D_DESC desc;
+    bool upgraded;
+};
+ScreenTargetInfo g_screenTargets[32];
+unsigned g_screenTargetCount;
+
+struct PostProcessBinding {
+    unsigned stage;
+    void* source;
+    void* destination;
+};
+PostProcessBinding g_postProcessBindings[24];
+unsigned g_postProcessBindingCount;
 bool g_inside;
 LONG g_programState;  // 0 idle, 1 building, 2 ready, 3 failed
 HANDLE g_programThread;
@@ -105,6 +141,8 @@ struct UploadJob {
 MappingLease g_mappingLeases[kMaxMappingLeases];
 UploadJob g_uploadJobs[kMaxUploadJobs];
 
+bool upgradedIdentity(void* identity);
+
 struct ShadowTexture {
     void* identity;
     UINT originalWidth, originalHeight;
@@ -139,6 +177,22 @@ struct SmaaResources {
     ID3D11DepthStencilState* depth;
     ID3D11RasterizerState* raster;
 } g_smaa;
+
+struct HdrResources {
+    ID3D11PixelShader* colorGradingPS;
+    ID3D11PixelShader* gammaPS;
+    ID3D11PixelShader* tonePS;
+    ID3D11PixelShader* presentPS;
+    ID3D11VertexShader* fullscreenVS;
+    ID3D11Texture2D* presentCopy;
+    ID3D11ShaderResourceView* presentCopySRV;
+    ID3D11RenderTargetView* backBufferRTV;
+    ID3D11SamplerState* sampler;
+    ID3D11BlendState* blend;
+    ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* raster;
+    UINT width, height;
+} g_hdr;
 
 template <typename T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -224,6 +278,60 @@ void* identityOf(IUnknown* object) {
     void* result = identity;
     identity->Release();
     return result;
+}
+
+ScreenTargetInfo* screenTarget(void* identity) {
+    if (!identity) return nullptr;
+    for (unsigned i = 0; i < g_screenTargetCount; ++i)
+        if (g_screenTargets[i].identity == identity) return &g_screenTargets[i];
+    return nullptr;
+}
+
+unsigned screenTargetId(void* identity) {
+    if (!identity) return 0;
+    if (identity == g_backBufferIdentity) return 1000;
+    ScreenTargetInfo* target = screenTarget(identity);
+    return target ? target->id : 0;
+}
+
+void tracePostProcessBinding(ID3D11DeviceContext* context) {
+    unsigned stage = g_colorGradingBound ? 1u : g_gammaBound ? 2u : g_fxaaBound ? 3u : 0u;
+    if (!tq::hdr::runtime().settings.debug || !stage || !context
+        || g_postProcessBindingCount >= 24) return;
+    ID3D11ShaderResourceView* sourceView = nullptr;
+    ID3D11RenderTargetView* destinationView = nullptr;
+    context->PSGetShaderResources(0, 1, &sourceView);
+    context->OMGetRenderTargets(1, &destinationView, nullptr);
+    ID3D11Resource *sourceResource = nullptr, *destinationResource = nullptr;
+    if (sourceView) sourceView->GetResource(&sourceResource);
+    if (destinationView) destinationView->GetResource(&destinationResource);
+    void* source = identityOf(sourceResource);
+    void* destination = identityOf(destinationResource);
+    for (unsigned i = 0; i < g_postProcessBindingCount; ++i) {
+        const PostProcessBinding& seen = g_postProcessBindings[i];
+        if (seen.stage == stage && seen.source == source && seen.destination == destination) {
+            release(sourceResource); release(destinationResource);
+            release(sourceView); release(destinationView);
+            return;
+        }
+    }
+    D3D11_TEXTURE2D_DESC sourceDesc = {}, destinationDesc = {};
+    ID3D11Texture2D *sourceTexture = nullptr, *destinationTexture = nullptr;
+    if (sourceResource) sourceResource->QueryInterface(
+        __uuidof(ID3D11Texture2D), (void**)&sourceTexture);
+    if (destinationResource) destinationResource->QueryInterface(
+        __uuidof(ID3D11Texture2D), (void**)&destinationTexture);
+    if (sourceTexture) sourceTexture->GetDesc(&sourceDesc);
+    if (destinationTexture) destinationTexture->GetDesc(&destinationDesc);
+    g_postProcessBindings[g_postProcessBindingCount++] = {stage, source, destination};
+    const char* name = stage == 1 ? "color" : stage == 2 ? "gamma" : "fxaa";
+    tq::hdr::log("Post binding: stage=%s src=%u fmt=%u dst=%u fmt=%u targets=%u\r\n",
+        name, screenTargetId(source), (unsigned)sourceDesc.Format,
+        screenTargetId(destination), (unsigned)destinationDesc.Format,
+        g_screenTargetCount);
+    release(sourceTexture); release(destinationTexture);
+    release(sourceResource); release(destinationResource);
+    release(sourceView); release(destinationView);
 }
 
 bool isShadowIdentity(void* identity) {
@@ -473,7 +581,16 @@ HRESULT WINAPI hookCreateShaderResourceView(
     ID3D11Device* device, ID3D11Resource* resource,
     const D3D11_SHADER_RESOURCE_VIEW_DESC* description,
     ID3D11ShaderResourceView** view) {
-    HRESULT hr = g_createShaderResourceView(device, resource, description, view);
+    D3D11_SHADER_RESOURCE_VIEW_DESC translated = {};
+    const D3D11_SHADER_RESOURCE_VIEW_DESC* used = description;
+    void* identity = identityOf(resource);
+    if (description && description->Format == DXGI_FORMAT_R8G8B8A8_UNORM
+        && upgradedIdentity(identity)) {
+        translated = *description;
+        translated.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        used = &translated;
+    }
+    HRESULT hr = g_createShaderResourceView(device, resource, used, view);
     if (FAILED(hr) || !view || !*view || !g_uploadLockReady) return hr;
 
     EnterCriticalSection(&g_uploadLock);
@@ -628,6 +745,67 @@ void startProgramBuild(ID3D11Device* device) {
     }
 }
 
+bool gameScreenTarget(const D3D11_TEXTURE2D_DESC* desc, const void* caller) {
+    BYTE* renderer = (BYTE*)GetModuleHandleW(L"Direct3D11.dll");
+    return desc && renderer && caller == renderer + 0x67341
+        && g_backBufferWidth && g_backBufferHeight
+        && desc->Width == g_backBufferWidth && desc->Height == g_backBufferHeight
+        && (desc->BindFlags & D3D11_BIND_RENDER_TARGET);
+}
+
+void recordScreenTarget(const D3D11_TEXTURE2D_DESC* desc,
+                        ID3D11Texture2D* texture, const void* caller) {
+    if (!gameScreenTarget(desc, caller) || !texture
+        || g_screenTargetCount >= sizeof(g_screenTargets) / sizeof(g_screenTargets[0]))
+        return;
+    ScreenTargetInfo& target = g_screenTargets[g_screenTargetCount++];
+    memset(&target, 0, sizeof(target));
+    target.identity = identityOf(texture);
+    target.id = g_screenTargetCount;
+    texture->GetDesc(&target.desc);
+    target.upgraded = desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                   && target.desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+}
+
+bool fp16SceneTarget(const D3D11_TEXTURE2D_DESC* desc,
+                     const D3D11_SUBRESOURCE_DATA* initial, const void* caller) {
+    // Exact Engine-build/runtime match for the two confirmed gameplay color
+    // surfaces: target 11 feeds FXAA/SMAA and target 12 feeds the gamma pass.
+    // Both must remain FP16 or target 12's UNORM store clips extended scene
+    // values immediately before HDR-safe gamma and presentation.
+    const unsigned nextId = g_screenTargetCount + 1;
+    return tq::hdr::runtime().fp16Active && (nextId == 11 || nextId == 12) && !initial
+        && gameScreenTarget(desc, caller)
+        && desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM
+        && desc->MipLevels == 1 && desc->ArraySize == 1
+        && desc->SampleDesc.Count == 1 && desc->SampleDesc.Quality == 0
+        && desc->Usage == D3D11_USAGE_DEFAULT && !desc->CPUAccessFlags
+        && !desc->MiscFlags
+        && desc->BindFlags == (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+}
+
+bool upgradedIdentity(void* identity) {
+    ScreenTargetInfo* target = screenTarget(identity);
+    return target && target->upgraded;
+}
+
+HRESULT createOriginalTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* desc,
+                              const D3D11_SUBRESOURCE_DATA* initial,
+                              ID3D11Texture2D** texture, const void* caller) {
+    D3D11_TEXTURE2D_DESC fp16 = {};
+    const D3D11_TEXTURE2D_DESC* requested = desc;
+    bool upgrade = fp16SceneTarget(desc, initial, caller);
+    if (upgrade) { fp16 = *desc; fp16.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; }
+    HRESULT hr = g_createTexture2D(device, upgrade ? &fp16 : desc, initial, texture);
+    if (upgrade && FAILED(hr)) {
+        tq::hdr::log("FP16 scene-target creation failed: hr=0x%08lx; retaining R8\r\n",
+                     (unsigned long)hr);
+        hr = g_createTexture2D(device, desc, initial, texture);
+    }
+    if (SUCCEEDED(hr) && texture) recordScreenTarget(requested, *texture, caller);
+    return hr;
+}
+
 HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* desc,
                                    const D3D11_SUBRESOURCE_DATA* initial,
                                    ID3D11Texture2D** texture) {
@@ -637,12 +815,12 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
                                                     caller, &progressivelyHandled);
     if (progressivelyHandled) return progressive;
     if (!g_options.shadows || !shadowDepthDesc(desc) || initial)
-        return g_createTexture2D(device, desc, initial, texture);
+        return createOriginalTexture(device, desc, initial, texture, caller);
     D3D11_TEXTURE2D_DESC scaled = *desc;
     if (scaled.Width <= 8192 / 2) { scaled.Width *= 2; scaled.Height *= 2; }
     HRESULT hr = g_createTexture2D(device, &scaled, initial, texture);
     if (FAILED(hr) || !texture || !*texture) {
-        return g_createTexture2D(device, desc, initial, texture);
+        return createOriginalTexture(device, desc, initial, texture, caller);
     }
     if (g_shadowTextureCount < sizeof(g_shadowTextures) / sizeof(g_shadowTextures[0])) {
         ShadowTexture& s = g_shadowTextures[g_shadowTextureCount++];
@@ -661,14 +839,41 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
                                      enhanced ? patch.size : size, linkage, shader);
     if (enhanced && FAILED(hr)) hr = g_createPixelShader(device, bytecode, size, linkage, shader);
     tq::dxbc::release(&patch);
-    if (SUCCEEDED(hr) && shader && *shader && g_options.smaa && isFxaa(bytecode, size)) {
-        if (g_fxaaCount < sizeof(g_fxaa) / sizeof(g_fxaa[0]))
+    if (SUCCEEDED(hr) && shader && *shader) {
+        bool filmic = tq::hdr::runtime().settings.toneMap != tq::hdr::ToneOriginal;
+        bool fxaa = g_options.smaa && isFxaa(bytecode, size);
+        bool color = filmic && tq::hdr::isColorGradingShader(bytecode, size);
+        bool gamma = filmic && tq::hdr::isGammaShader(bytecode, size);
+        if (fxaa && g_fxaaCount < sizeof(g_fxaa) / sizeof(g_fxaa[0]))
             g_fxaa[g_fxaaCount++] = *shader;
+        if (color && g_colorGradingCount < sizeof(g_colorGrading) / sizeof(g_colorGrading[0]))
+            g_colorGrading[g_colorGradingCount++] = *shader;
+        if (gamma && g_gammaCount < sizeof(g_gamma) / sizeof(g_gamma[0]))
+            g_gamma[g_gammaCount++] = *shader;
+        if (fxaa || color || gamma) {
         // DXMT deadlocks if a device shader is created re-entrantly from either
         // CreatePixelShader or Draw. A one-shot device worker builds the fixed
         // program after this call returns; FXAA remains active until it is ready.
-        startProgramBuild(device);
+            startProgramBuild(device);
+        }
     }
+    return hr;
+}
+
+HRESULT WINAPI hookCreateRenderTargetView(
+    ID3D11Device* device, ID3D11Resource* resource,
+    const D3D11_RENDER_TARGET_VIEW_DESC* description,
+    ID3D11RenderTargetView** view) {
+    void* identity = identityOf(resource);
+    const tq::hdr::Runtime& runtime = tq::hdr::runtime();
+    bool translate = description && description->Format == DXGI_FORMAT_R8G8B8A8_UNORM
+        && ((runtime.fp16Active && identity == g_backBufferIdentity)
+            || upgradedIdentity(identity));
+    if (!translate)
+        return g_createRenderTargetView(device, resource, description, view);
+    D3D11_RENDER_TARGET_VIEW_DESC translated = *description;
+    translated.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    HRESULT hr = g_createRenderTargetView(device, resource, &translated, view);
     return hr;
 }
 
@@ -687,10 +892,25 @@ HRESULT WINAPI hookCreateSamplerState(ID3D11Device* device, const D3D11_SAMPLER_
 
 void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* shader,
                             ID3D11ClassInstance* const* classes, UINT count) {
-    g_fxaaBound = false;
+    g_fxaaBound = g_colorGradingBound = g_gammaBound = false;
     for (unsigned i = 0; i < g_fxaaCount; ++i)
         if (shader == g_fxaa[i]) g_fxaaBound = true;
-    g_psSetShader(context, shader, classes, count);
+    for (unsigned i = 0; i < g_colorGradingCount; ++i)
+        if (shader == g_colorGrading[i]) g_colorGradingBound = true;
+    for (unsigned i = 0; i < g_gammaCount; ++i)
+        if (shader == g_gamma[i]) g_gammaBound = true;
+    ID3D11PixelShader* replacement = shader;
+    if (InterlockedCompareExchange(&g_programState, 2, 2) == 2) {
+        if (g_colorGradingBound && g_hdr.colorGradingPS)
+            replacement = g_hdr.colorGradingPS;
+        else if (g_gammaBound) {
+            if (tq::hdr::runtime().fp16Active && g_hdr.gammaPS)
+                replacement = g_hdr.gammaPS;
+            else if (!tq::hdr::runtime().fp16Active && g_hdr.tonePS)
+                replacement = g_hdr.tonePS;
+        }
+    }
+    g_psSetShader(context, replacement, classes, count);
 }
 
 bool dsvIsShadow(ID3D11DepthStencilView* dsv) {
@@ -727,8 +947,10 @@ void WINAPI hookOMSetRenderTargets(ID3D11DeviceContext* context, UINT count,
                                    ID3D11RenderTargetView* const* rtvs,
                                    ID3D11DepthStencilView* dsv) {
     bool hasColorTarget = false;
-    if (rtvs) for (UINT i = 0; i < count; ++i)
-        if (rtvs[i]) { hasColorTarget = true; break; }
+    if (rtvs) for (UINT i = 0; i < count; ++i) {
+        if (!rtvs[i]) continue;
+        hasColorTarget = true;
+    }
     bool was = g_shadowBound;
     // TQ's water-reflection pass can allocate a square R32 depth/SRV texture
     // resembling the shadow map. Its DSV is paired with a color target; the
@@ -756,17 +978,117 @@ void WINAPI hookRSSetScissors(ID3D11DeviceContext* context, UINT count,
     applyScissors(context);
 }
 
+const char* kColorGradingSource =
+"Texture2D SceneColor:register(t0);Texture2D ColorLut:register(t1);"
+"SamplerState SceneSampler:register(s0);SamplerState LutSampler:register(s1);"
+"float3 grade(float3 c){"
+"float z=c.b*15.0;float slice=floor(z);float f=z-slice;"
+"float2 p=c.rg*15.0+0.5;float2 uv=float2(p.x/256.0,p.y/16.0);"
+"float3 a=ColorLut.SampleLevel(LutSampler,uv+float2(slice/16.0,0),0).rgb;"
+"float3 b=ColorLut.SampleLevel(LutSampler,uv+float2((slice+1.0)/16.0,0),0).rgb;"
+"return lerp(a,b,f);"
+"}"
+"float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
+"float3 raw=max(SceneColor.SampleLevel(SceneSampler,u,0).rgb,0);"
+"float intensity=max(1.0,max(raw.r,max(raw.g,raw.b)));"
+"return float4(grade(saturate(raw/intensity))*intensity,1);}";
+
+const char* kToneSource =
+"Texture2D screenSampler:register(t0);Texture2D gammaSampler:register(t1);"
+"SamplerState screenState:register(s0);SamplerState gammaState:register(s1);"
+"float3 gammaGrade(float3 c){"
+"float intensity=max(1.0,max(c.r,max(c.g,c.b)));float3 n=saturate(c/intensity);"
+"float3 g=float3(gammaSampler.SampleLevel(gammaState,float2(n.r,.5),0).r,"
+"gammaSampler.SampleLevel(gammaState,float2(n.g,.5),0).r,"
+"gammaSampler.SampleLevel(gammaState,float2(n.b,.5),0).r);return g*intensity;}"
+"float3 toLinear(float3 c){float3 lo=c/12.92,hi=pow((c+.055)/1.055,2.4);"
+"return lerp(lo,hi,step(.04045,c));}"
+"float3 toSrgb(float3 c){c=max(c,0);float3 lo=c*12.92;"
+"float3 hi=1.055*pow(c,1.0/2.4)-.055;return lerp(lo,hi,step(.0031308,c));}"
+"float3 linearizeExtended(float3 c){float intensity=max(1.0,max(c.r,max(c.g,c.b)));"
+"return toLinear(saturate(c/intensity))*intensity;}"
+"float agxContrast(float x){float x2=x*x,x4=x2*x2;return saturate("
+"15.5*x4*x2-40.14*x4*x+31.96*x4-6.868*x2*x+.4298*x2+.1191*x-.00232);}"
+"float agxCurve(float x){float v=saturate((log2(max(x,1e-10))+12.47393)/16.5);"
+"return pow(agxContrast(v),2.376);}"
+"float acesCurve(float x){x=max(x,0)*.75;"
+"return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
+"float displayCurve(float x){return TQ_ACES?acesCurve(x):agxCurve(x);}"
+"float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
+"float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
+"return l<=1?low:min(high,TQ_PEAK);}"
+"float3 mapColor(float3 c){float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
+"return max(c*(mapLuma(l)/l),0);}"
+"float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
+"float3 encoded=max(gammaGrade(screenSampler.SampleLevel(screenState,u,0).rgb),0);"
+"return float4(saturate(toSrgb(mapColor(linearizeExtended(encoded)))),1);}";
+
+const char* kGammaSource =
+"Texture2D screenSampler:register(t0);Texture2D gammaSampler:register(t1);"
+"SamplerState screenState:register(s0);SamplerState gammaState:register(s1);"
+"float3 gammaGrade(float3 c){"
+"float intensity=max(1.0,max(c.r,max(c.g,c.b)));float3 n=saturate(c/intensity);"
+"float3 g=float3(gammaSampler.SampleLevel(gammaState,float2(n.r,.5),0).r,"
+"gammaSampler.SampleLevel(gammaState,float2(n.g,.5),0).r,"
+"gammaSampler.SampleLevel(gammaState,float2(n.b,.5),0).r);return g*intensity;}"
+"float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
+"float3 c=max(screenSampler.SampleLevel(screenState,u,0).rgb,0);"
+"return float4(max(gammaGrade(c),0),1);}";
+
+const char* kPresentVertexSource =
+"float4 main(uint id:SV_VertexID,out float2 uv:TEXCOORD0):SV_POSITION{"
+"uv=float2((id<<1)&2,id&2);return float4(uv*float2(2,-2)+float2(-1,1),0,1);}";
+
+const char* kPresentPixelSource =
+"Texture2D frameTex:register(t0);SamplerState frameSampler:register(s0);"
+"float3 toLinear(float3 c){float3 lo=c/12.92,hi=pow((c+.055)/1.055,2.4);"
+"return lerp(lo,hi,step(.04045,c));}"
+"float3 linearizeExtended(float3 c){float intensity=max(1.0,max(c.r,max(c.g,c.b)));"
+"return toLinear(saturate(c/intensity))*intensity;}"
+"float agxContrast(float x){float x2=x*x,x4=x2*x2;return saturate("
+"15.5*x4*x2-40.14*x4*x+31.96*x4-6.868*x2*x+.4298*x2+.1191*x-.00232);}"
+"float agxCurve(float x){float v=saturate((log2(max(x,1e-10))+12.47393)/16.5);"
+"return pow(agxContrast(v),2.376);}"
+"float acesCurve(float x){x=max(x,0)*.75;"
+"return saturate((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14));}"
+"float displayCurve(float x){return TQ_ACES?acesCurve(x):agxCurve(x);}"
+"float mapLuma(float l){float white=displayCurve(1);float low=displayCurve(min(l,1));"
+"float range=max(TQ_PEAK-white,0);float high=white+range*(1-exp(-max(l-1,0)/max(range,1)));"
+"return l<=1?low:min(high,TQ_PEAK);}"
+"float3 mapColor(float3 c){float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
+"return max(c*(mapLuma(l)/l),0);}"
+"float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
+"float3 c=linearizeExtended(max(frameTex.SampleLevel(frameSampler,u,0).rgb,0));"
+"float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
+"float3 outc=mapColor(c);"
+"\n#if TQ_HIGHLIGHT_DEBUG\n"
+"float hit=step(1.0001,l);float3 heat=l<1.5?float3(1,1,0):"
+"l<2?float3(1,.35,0):l<4?float3(1,0,0):float3(1,0,1);"
+"outc=lerp(outc*.28,heat,hit*.88);\n"
+"#endif\n"
+"outc=max(outc,0)*TQ_PAPER_SCALE;"
+"return float4(min(outc,TQ_SCRGB_PEAK),1);}";
+
 const char* kSmaaPrefix =
 "#define SMAA_HLSL_4\n"
 "#define SMAA_PRESET_HIGH\n"
 "cbuffer SmaaMetrics:register(b0){float4 smaaMetrics;}\n"
-"#define SMAA_RT_METRICS smaaMetrics\n";
+"#define SMAA_RT_METRICS smaaMetrics\n"
+"#define TQ_SMAA_PEAK 16.0\n";
 
 const char* kEdgeWrapper =
 "Texture2D tqColorTex:register(t0);\n"
+"float tqLuma(float2 u){float y=max(dot(tqColorTex.SampleLevel("
+"PointSampler,u,0).rgb,float3(.2126,.7152,.0722)),0);"
+"return log2(1+y)/log2(1+TQ_SMAA_PEAK);}\n"
 "float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
-"float4 o[3];SMAAEdgeDetectionVS(u,o);"
-"return float4(SMAALumaEdgeDetectionPS(u,o,tqColorTex),0,0);}\n";
+"float L=tqLuma(u),Ll=tqLuma(u-float2(smaaMetrics.x,0)),"
+"Lt=tqLuma(u-float2(0,smaaMetrics.y));float2 d=abs(L-float2(Ll,Lt));"
+"float2 e=step(.05,d);if(e.x+e.y==0)discard;"
+"float Lr=tqLuma(u+float2(smaaMetrics.x,0)),Lb=tqLuma(u+float2(0,smaaMetrics.y));"
+"float Lll=tqLuma(u-float2(2*smaaMetrics.x,0)),Ltt=tqLuma(u-float2(0,2*smaaMetrics.y));"
+"float md=max(max(max(d.x,d.y),abs(L-Lr)),max(abs(L-Lb),max(abs(Ll-Lll),abs(Lt-Ltt))));"
+"e*=step(md,2*d);return float4(e,0,0);}\n";
 
 const char* kWeightWrapper =
 "Texture2D tqEdgesTex:register(t0);Texture2D tqAreaTex:register(t1);"
@@ -794,6 +1116,10 @@ bool compileShader(const std::string& source, const char* target, ID3DBlob** res
     HRESULT hr = compile ? compile(source.data(), source.size(), "tqflicker", nullptr, nullptr,
                                    "main", target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
                                    result, &errors) : E_FAIL;
+    if (FAILED(hr) && errors && errors->GetBufferPointer())
+        tq::hdr::log("Shader compile failed (%s): %.*s\r\n", target,
+                     (int)errors->GetBufferSize(),
+                     (const char*)errors->GetBufferPointer());
     release(errors);
     return SUCCEEDED(hr) && result && *result;
 }
@@ -814,6 +1140,20 @@ void releaseSmaa() {
     release(g_smaa.depth); release(g_smaa.raster);
 }
 
+void releaseHdrSizeResources() {
+    release(g_hdr.presentCopySRV); release(g_hdr.presentCopy);
+    release(g_hdr.backBufferRTV);
+    g_hdr.width = g_hdr.height = 0;
+}
+
+void releaseHdr() {
+    releaseHdrSizeResources();
+    release(g_hdr.colorGradingPS); release(g_hdr.gammaPS);
+    release(g_hdr.tonePS); release(g_hdr.presentPS);
+    release(g_hdr.fullscreenVS); release(g_hdr.sampler); release(g_hdr.blend);
+    release(g_hdr.depth); release(g_hdr.raster);
+}
+
 bool createLookupTexture(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT format,
                          UINT pitch, const void* bytes, ID3D11Texture2D** texture,
                          ID3D11ShaderResourceView** srv) {
@@ -826,7 +1166,7 @@ bool createLookupTexture(ID3D11Device* device, UINT width, UINT height, DXGI_FOR
         && SUCCEEDED(device->CreateShaderResourceView(*texture, nullptr, srv));
 }
 
-bool createProgramResources(ID3D11Device* device) {
+bool createSmaaProgramResources(ID3D11Device* device) {
     if (g_smaa.edgePS) return true;
     std::string canonical((const char*)third_party_smaa_SMAA_hlsl,
                           third_party_smaa_SMAA_hlsl_len);
@@ -869,6 +1209,90 @@ bool createProgramResources(ID3D11Device* device) {
       && createLookupTexture(device, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, DXGI_FORMAT_R8_UNORM,
                              SEARCHTEX_PITCH, searchTexBytes, &g_smaa.searchTex, &g_smaa.searchSRV);
     if (!ok) releaseSmaa();
+    return ok;
+}
+
+std::string defineNumber(const char* name, float value) {
+    char number[64];
+    _snprintf(number, sizeof(number), "#define %s %.8ff\n", name, value);
+    return std::string(number);
+}
+
+bool createHdrProgramResources(ID3D11Device* device) {
+    const tq::hdr::Runtime& runtime = tq::hdr::runtime();
+    if (runtime.settings.toneMap == tq::hdr::ToneOriginal) return true;
+    if (g_hdr.colorGradingPS && g_hdr.gammaPS && g_hdr.tonePS
+        && (!runtime.fp16Active || (g_hdr.presentPS && g_hdr.fullscreenVS))) return true;
+
+    float peakRelative = runtime.active
+        ? runtime.peakNits / runtime.settings.paperWhiteNits : 1.0f;
+    if (peakRelative < 1.0f) peakRelative = 1.0f;
+    float paperScale = runtime.displayHdr
+        ? runtime.settings.paperWhiteNits / 80.0f : 1.0f;
+    float scrgbPeak = runtime.active ? runtime.peakNits / 80.0f : paperScale;
+    std::string tone = std::string("#define TQ_ACES ")
+        + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
+        + defineNumber("TQ_PEAK", peakRelative) + kToneSource;
+    std::string present = std::string("#define TQ_ACES ")
+        + (runtime.settings.toneMap == tq::hdr::ToneAces ? "1\n" : "0\n")
+        + std::string("#define TQ_HIGHLIGHT_DEBUG ")
+        + (runtime.settings.debug ? "1\n" : "0\n")
+        + defineNumber("TQ_PEAK", peakRelative)
+        + defineNumber("TQ_PAPER_SCALE", paperScale)
+        + defineNumber("TQ_SCRGB_PEAK", scrgbPeak)
+        + kPresentPixelSource;
+    ID3DBlob *color = nullptr, *gamma = nullptr, *toneBlob = nullptr;
+    ID3DBlob *presentBlob = nullptr, *vertex = nullptr;
+    bool ok = compileShader(kColorGradingSource, "ps_5_0", &color)
+           && compileShader(kGammaSource, "ps_5_0", &gamma)
+           && compileShader(tone, "ps_5_0", &toneBlob);
+    if (ok && runtime.fp16Active)
+        ok = compileShader(present, "ps_5_0", &presentBlob)
+          && compileShader(kPresentVertexSource, "vs_5_0", &vertex);
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, color->GetBufferPointer(), color->GetBufferSize(), nullptr,
+        &g_hdr.colorGradingPS));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, gamma->GetBufferPointer(), gamma->GetBufferSize(), nullptr,
+        &g_hdr.gammaPS));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, toneBlob->GetBufferPointer(), toneBlob->GetBufferSize(), nullptr,
+        &g_hdr.tonePS));
+    if (ok && runtime.fp16Active) ok = SUCCEEDED(g_createPixelShader(
+        device, presentBlob->GetBufferPointer(), presentBlob->GetBufferSize(), nullptr,
+        &g_hdr.presentPS));
+    if (ok && runtime.fp16Active) ok = SUCCEEDED(device->CreateVertexShader(
+        vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr,
+        &g_hdr.fullscreenVS));
+    release(color); release(gamma); release(toneBlob); release(presentBlob); release(vertex);
+    if (!ok) { releaseHdr(); return false; }
+
+    D3D11_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    D3D11_BLEND_DESC blend = {};
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    D3D11_DEPTH_STENCIL_DESC depth = {};
+    D3D11_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
+    raster.DepthClipEnable = TRUE;
+    ok = SUCCEEDED(g_createSamplerState(device, &sampler, &g_hdr.sampler))
+      && SUCCEEDED(device->CreateBlendState(&blend, &g_hdr.blend))
+      && SUCCEEDED(device->CreateDepthStencilState(&depth, &g_hdr.depth))
+      && SUCCEEDED(device->CreateRasterizerState(&raster, &g_hdr.raster));
+    if (!ok) releaseHdr();
+    tq::hdr::log("Post-process program: tone=%u fp16=%u hdr=%u peakRelative=%.3f ready=%u\r\n",
+        (unsigned)runtime.settings.toneMap, runtime.fp16Active ? 1u : 0u,
+        runtime.active ? 1u : 0u,
+        peakRelative, ok ? 1u : 0u);
+    return ok;
+}
+
+bool createProgramResources(ID3D11Device* device) {
+    bool ok = true;
+    if (g_options.smaa) ok = createSmaaProgramResources(device);
+    if (ok) ok = createHdrProgramResources(device);
     return ok;
 }
 
@@ -999,7 +1423,149 @@ bool runSmaa(ID3D11DeviceContext* c, bool indexed, UINT count, UINT start, INT b
     return true;
 }
 
+bool prepareHdrPresentation(IDXGISwapChain* swapChain) {
+    if (!swapChain || !g_device || !tq::hdr::runtime().fp16Active
+        || !g_hdr.presentPS || !g_hdr.fullscreenVS) return false;
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (FAILED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                    (void**)&backBuffer)) || !backBuffer)
+        return false;
+    D3D11_TEXTURE2D_DESC desc = {};
+    backBuffer->GetDesc(&desc);
+    g_backBufferIdentity = identityOf(backBuffer);
+    g_backBufferWidth = desc.Width; g_backBufferHeight = desc.Height;
+    if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        backBuffer->Release(); return false;
+    }
+    if (g_hdr.presentCopy && g_hdr.width == desc.Width && g_hdr.height == desc.Height) {
+        backBuffer->Release(); return true;
+    }
+    releaseHdrSizeResources();
+    D3D11_TEXTURE2D_DESC copy = desc;
+    copy.Usage = D3D11_USAGE_DEFAULT;
+    copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    copy.CPUAccessFlags = 0; copy.MiscFlags = 0;
+    bool ok = SUCCEEDED(g_createTexture2D(g_device, &copy, nullptr, &g_hdr.presentCopy))
+           && SUCCEEDED(g_createShaderResourceView(
+                g_device, g_hdr.presentCopy, nullptr, &g_hdr.presentCopySRV))
+           && SUCCEEDED(g_createRenderTargetView(
+                g_device, backBuffer, nullptr, &g_hdr.backBufferRTV));
+    if (ok) { g_hdr.width = desc.Width; g_hdr.height = desc.Height; }
+    else releaseHdrSizeResources();
+    tq::hdr::log("FP16 presentation resources: %ux%u format=%u ready=%u\r\n",
+                 desc.Width, desc.Height, (unsigned)desc.Format, ok ? 1u : 0u);
+    backBuffer->Release();
+    return ok;
+}
+
+bool presentHdrFrame(IDXGISwapChain* swapChain) {
+    if (InterlockedCompareExchange(&g_programState, 2, 2) != 2
+        || !prepareHdrPresentation(swapChain)) return false;
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (FAILED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                    (void**)&backBuffer)) || !backBuffer)
+        return false;
+    SavedState old;
+    saveState(g_context, old);
+    ID3D11RenderTargetView* noTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11ShaderResourceView* noSrvs[3] = {};
+    g_context->PSSetShaderResources(0, 3, noSrvs);
+    g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                                  noTargets, nullptr);
+    g_inside = true;
+    g_context->CopyResource(g_hdr.presentCopy, backBuffer);
+    g_context->OMSetRenderTargets(1, &g_hdr.backBufferRTV, nullptr);
+    g_context->OMSetBlendState(g_hdr.blend, nullptr, 0xffffffff);
+    g_context->OMSetDepthStencilState(g_hdr.depth, 0);
+    g_context->RSSetState(g_hdr.raster);
+    D3D11_VIEWPORT viewport = {0, 0, (FLOAT)g_hdr.width, (FLOAT)g_hdr.height, 0, 1};
+    g_context->RSSetViewports(1, &viewport);
+    g_context->IASetInputLayout(nullptr);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->VSSetShader(g_hdr.fullscreenVS, nullptr, 0);
+    g_context->PSSetShader(g_hdr.presentPS, nullptr, 0);
+    g_context->PSSetSamplers(0, 1, &g_hdr.sampler);
+    g_context->PSSetShaderResources(0, 1, &g_hdr.presentCopySRV);
+    g_draw(g_context, 3, 0);
+    g_inside = false;
+    g_context->PSSetShaderResources(0, 3, noSrvs);
+    restoreState(g_context, old);
+    backBuffer->Release();
+    return true;
+}
+
+bool viewTargetsCurrentBackBuffer(ID3D11RenderTargetView* view) {
+    if (!view || !g_swapChain) return false;
+    ID3D11Resource* viewed = nullptr;
+    ID3D11Texture2D* current = nullptr;
+    view->GetResource(&viewed);
+    HRESULT hr = g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                        (void**)&current);
+    bool matches = viewed && SUCCEEDED(hr) && current
+                && identityOf(viewed) == identityOf(current);
+    release(viewed);
+    release(current);
+    return matches;
+}
+
+bool restoreGameSpaceBackBuffer() {
+    if (!g_backBufferNeedsRestore || !g_context || !g_swapChain
+        || !g_hdr.presentCopy) return false;
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (FAILED(g_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                      (void**)&backBuffer)) || !backBuffer)
+        return false;
+    D3D11_TEXTURE2D_DESC source = {}, destination = {};
+    g_hdr.presentCopy->GetDesc(&source);
+    backBuffer->GetDesc(&destination);
+    bool compatible = source.Width == destination.Width
+                   && source.Height == destination.Height
+                   && source.Format == destination.Format
+                   && source.SampleDesc.Count == destination.SampleDesc.Count
+                   && source.SampleDesc.Quality == destination.SampleDesc.Quality;
+    if (compatible) {
+        ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+        ID3D11DepthStencilView* dsv = nullptr;
+        g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                                      rtvs, &dsv);
+        ID3D11RenderTargetView* noTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+        g_omSetRenderTargets(g_context, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                             noTargets, nullptr);
+        g_context->CopyResource(backBuffer, g_hdr.presentCopy);
+        g_omSetRenderTargets(g_context, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                             rtvs, dsv);
+        for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+            release(rtvs[i]);
+        release(dsv);
+        g_backBufferNeedsRestore = false;
+    }
+    backBuffer->Release();
+    return compatible;
+}
+
+void restoreBeforeBackBufferDraw(ID3D11DeviceContext* context) {
+    if (!g_backBufferNeedsRestore || context != g_context) return;
+    ID3D11RenderTargetView* target = nullptr;
+    context->OMGetRenderTargets(1, &target, nullptr);
+    bool backBuffer = viewTargetsCurrentBackBuffer(target);
+    release(target);
+    if (backBuffer) restoreGameSpaceBackBuffer();
+}
+
+void WINAPI hookClearRenderTargetView(ID3D11DeviceContext* context,
+                                      ID3D11RenderTargetView* view,
+                                      const FLOAT color[4]) {
+    // A full clear replaces every pixel, so this frame does not depend on the
+    // prior flip-buffer contents and needs no preservation copy.
+    if (!g_inside && g_backBufferNeedsRestore && context == g_context
+        && viewTargetsCurrentBackBuffer(view))
+        g_backBufferNeedsRestore = false;
+    g_clearRenderTargetView(context, view, color);
+}
+
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
+    if (!g_inside) tracePostProcessBinding(context);
+    if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, false, count, start, 0); g_inside = false;
         if (done) return;
@@ -1008,6 +1574,8 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    if (!g_inside) tracePostProcessBinding(context);
+    if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, true, count, start, base); g_inside = false;
         if (done) return;
@@ -1017,35 +1585,75 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
 
 }  // namespace
 
-void install(ID3D11Device* device, ID3D11DeviceContext* context) {
+void install(ID3D11Device* device, ID3D11DeviceContext* context,
+             IDXGISwapChain* swapChain) {
     if (!device || InterlockedCompareExchange(&g_installed, 1, 0)) return;
     readOptions();
     if (!context) device->GetImmediateContext(&context); else context->AddRef();
     if (!context) { InterlockedExchange(&g_installed, 0); return; }
+    const tq::hdr::Runtime& hdrRuntime = tq::hdr::runtime();
+    bool toneEnabled = hdrRuntime.settings.toneMap != tq::hdr::ToneOriginal;
+    tq::hdr::log("Visual install: tone=%u hdrRequested=%u fp16=%u hdr=%u\r\n",
+                 (unsigned)hdrRuntime.settings.toneMap,
+                 hdrRuntime.settings.requestHdr ? 1u : 0u,
+                 hdrRuntime.fp16Active ? 1u : 0u,
+                 hdrRuntime.active ? 1u : 0u);
     if (g_options.streaming) {
         InitializeCriticalSection(&g_uploadLock);
         g_uploadLockReady = true;
-        tq::streaming::setPresentCallback(&onPresent);
+    }
+    tq::streaming::setPresentCallback(&onPresent);
+    tq::streaming::setPostPresentCallback(&onPostPresent);
+    if (hdrRuntime.fp16Active) {
+        tq::streaming::setPreResizeCallback(&onBeforeResize);
+        tq::streaming::setResizeCallback(&onResize);
     }
     g_device = device;
     g_context = context;
+    if (swapChain) {
+        g_swapChain = swapChain;
+        g_swapChain->AddRef();
+        DXGI_SWAP_CHAIN_DESC swapDesc = {};
+        if (SUCCEEDED(swapChain->GetDesc(&swapDesc))) {
+            g_backBufferWidth = swapDesc.BufferDesc.Width;
+            g_backBufferHeight = swapDesc.BufferDesc.Height;
+            tq::hdr::log("Created swap chain: %ux%u format=%u buffers=%u effect=%u fp16=%u hdr=%u\r\n",
+                g_backBufferWidth, g_backBufferHeight,
+                (unsigned)swapDesc.BufferDesc.Format, swapDesc.BufferCount,
+                (unsigned)swapDesc.SwapEffect, hdrRuntime.fp16Active ? 1u : 0u,
+                hdrRuntime.active ? 1u : 0u);
+        }
+        ID3D11Texture2D* backBuffer = nullptr;
+        if (SUCCEEDED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                           (void**)&backBuffer)) && backBuffer) {
+            D3D11_TEXTURE2D_DESC d = {}; backBuffer->GetDesc(&d);
+            g_backBufferIdentity = identityOf(backBuffer);
+            if (!g_backBufferWidth) g_backBufferWidth = d.Width;
+            if (!g_backBufferHeight) g_backBufferHeight = d.Height;
+            backBuffer->Release();
+        }
+    }
     void** dv = *(void***)device;
     void** cv = *(void***)context;
     bool ok = true;
     if (g_options.anisotropy > 1)
         ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
     else g_createSamplerState = (CreateSamplerStateFn)dv[23];
-    if (g_options.shadows || g_options.streaming)
+    if (g_options.shadows || g_options.streaming || toneEnabled)
         ok &= patchSlot(&dv[5], (void*)&hookCreateTexture2D, (void**)&g_createTexture2D);
     else g_createTexture2D = (CreateTexture2DFn)dv[5];
-    if (g_options.streaming)
+    if (g_options.streaming || hdrRuntime.fp16Active)
         ok &= patchSlot(&dv[7], (void*)&hookCreateShaderResourceView,
                         (void**)&g_createShaderResourceView);
     else g_createShaderResourceView = (CreateShaderResourceViewFn)dv[7];
-    if (g_options.smaa)
+    if (g_options.smaa || toneEnabled)
         ok &= patchSlot(&dv[15], (void*)&hookCreatePixelShader, (void**)&g_createPixelShader);
     else g_createPixelShader = (CreatePixelShaderFn)dv[15];
-    if (g_options.smaa) {
+    if (hdrRuntime.fp16Active)
+        ok &= patchSlot(&dv[9], (void*)&hookCreateRenderTargetView,
+                        (void**)&g_createRenderTargetView);
+    else g_createRenderTargetView = (CreateRenderTargetViewFn)dv[9];
+    if (g_options.smaa || toneEnabled) {
         ok &= patchSlot(&cv[9], (void*)&hookPSSetShader, (void**)&g_psSetShader);
         ok &= patchSlot(&cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
         ok &= patchSlot(&cv[13], (void*)&hookDraw, (void**)&g_draw);
@@ -1054,12 +1662,19 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
         ok &= patchSlot(&cv[8], (void*)&hookPSSetShaderResources,
                         (void**)&g_psSetShaderResources);
     else g_psSetShaderResources = (PSSetShaderResourcesFn)cv[8];
-    if (g_options.shadows) {
+    if (g_options.shadows)
         ok &= patchSlot(&cv[33], (void*)&hookOMSetRenderTargets, (void**)&g_omSetRenderTargets);
+    else g_omSetRenderTargets = (OMSetRenderTargetsFn)cv[33];
+    if (hdrRuntime.fp16Active)
+        ok &= patchSlot(&cv[50], (void*)&hookClearRenderTargetView,
+                        (void**)&g_clearRenderTargetView);
+    else g_clearRenderTargetView = (ClearRenderTargetViewFn)cv[50];
+    if (g_options.shadows) {
         ok &= patchSlot(&cv[44], (void*)&hookRSSetViewports, (void**)&g_rsSetViewports);
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
+    if (ok && (g_options.smaa || toneEnabled)) startProgramBuild(device);
     if (!ok) {
         restoreSlots();
         g_context->Release();
@@ -1069,16 +1684,63 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context) {
             DeleteCriticalSection(&g_uploadLock);
         }
         tq::streaming::setPresentCallback(nullptr);
+        tq::streaming::setPostPresentCallback(nullptr);
+        tq::streaming::setPreResizeCallback(nullptr);
+        tq::streaming::setResizeCallback(nullptr);
         InterlockedExchange(&g_installed, 0);
     }
 }
 
-void onPresent() {
+void onPresent(IDXGISwapChain* swapChain) {
     advanceTextureUploadsInternal();
+    if (tq::hdr::runtime().fp16Active) {
+        // If the game submits another Present without touching the new flip
+        // buffer, restore before capturing it as the next game-space frame.
+        if (g_backBufferNeedsRestore) restoreGameSpaceBackBuffer();
+        presentHdrFrame(swapChain);
+    }
+}
+
+void onPostPresent(IDXGISwapChain* swapChain) {
+    (void)swapChain;
+    // Defer the copy until the next frame actually reuses old pixels. A normal
+    // full clear cancels it in hookClearRenderTargetView at zero copy cost.
+    if (tq::hdr::runtime().fp16Active && g_hdr.presentCopy)
+        g_backBufferNeedsRestore = true;
+}
+
+void onBeforeResize(IDXGISwapChain* swapChain) {
+    (void)swapChain;
+    // DXGI requires every reference to a swap-chain buffer to be released
+    // before ResizeBuffers. Also restart ordinal target matching because the
+    // game recreates its resolution-dependent post-process chain afterward.
+    releaseHdrSizeResources();
+    g_backBufferIdentity = nullptr;
+    g_backBufferWidth = g_backBufferHeight = 0;
+    g_backBufferNeedsRestore = false;
+    memset(g_screenTargets, 0, sizeof(g_screenTargets));
+    g_screenTargetCount = 0;
+    memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
+    g_postProcessBindingCount = 0;
+}
+
+void onResize(IDXGISwapChain* swapChain) {
+    tq::hdr::reapplyColorSpace(swapChain);
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (swapChain && SUCCEEDED(swapChain->GetBuffer(
+        0, __uuidof(ID3D11Texture2D), (void**)&backBuffer)) && backBuffer) {
+        D3D11_TEXTURE2D_DESC d = {}; backBuffer->GetDesc(&d);
+        g_backBufferIdentity = identityOf(backBuffer);
+        g_backBufferWidth = d.Width; g_backBufferHeight = d.Height;
+        backBuffer->Release();
+    }
 }
 
 void shutdown() {
     tq::streaming::setPresentCallback(nullptr);
+    tq::streaming::setPostPresentCallback(nullptr);
+    tq::streaming::setPreResizeCallback(nullptr);
+    tq::streaming::setResizeCallback(nullptr);
     restoreSlots();
     if (g_uploadLockReady) {
         EnterCriticalSection(&g_uploadLock);
@@ -1107,15 +1769,27 @@ void shutdown() {
     // safer than freeing them beneath a worker that DXMT has not returned.
     if (workerStopped) {
         releaseSmaa();
+        releaseHdr();
         if (g_compiler) { FreeLibrary(g_compiler); g_compiler = nullptr; }
     }
     memset(g_fxaa, 0, sizeof(g_fxaa)); g_fxaaCount = 0;
+    memset(g_colorGrading, 0, sizeof(g_colorGrading)); g_colorGradingCount = 0;
+    memset(g_gamma, 0, sizeof(g_gamma)); g_gammaCount = 0;
+    memset(g_screenTargets, 0, sizeof(g_screenTargets)); g_screenTargetCount = 0;
+    memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
+    g_postProcessBindingCount = 0;
     memset(g_shadowTextures, 0, sizeof(g_shadowTextures)); g_shadowTextureCount = 0;
     if (g_context) { g_context->Release(); g_context = nullptr; }
+    if (g_swapChain) { g_swapChain->Release(); g_swapChain = nullptr; }
     g_device = nullptr; g_fxaaBound = g_shadowBound = false;
+    g_colorGradingBound = g_gammaBound = false;
+    g_backBufferNeedsRestore = false;
+    g_backBufferIdentity = nullptr; g_backBufferWidth = g_backBufferHeight = 0;
     g_createTexture2D = nullptr;
     g_createPixelShader = nullptr;
     g_createShaderResourceView = nullptr;
+    g_createRenderTargetView = nullptr;
+    g_clearRenderTargetView = nullptr;
     g_psSetShaderResources = nullptr;
     g_updateSubresource = nullptr;
     g_archiveUnmap = nullptr;

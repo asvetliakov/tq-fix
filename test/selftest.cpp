@@ -6,6 +6,7 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "hdr.h"
 #include "streaming.h"
 
 namespace {
@@ -50,6 +51,81 @@ int main(int argc, char** argv) {
           "streaming=optimized enables progressive uploads");
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
+
+    tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
+    check(defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneAgx
+          && defaultHdr.paperWhiteNits == 203.0f
+          && defaultHdr.peakNitsOverride == 0.0f && !defaultHdr.debug,
+          "HDR defaults to auto/AgX/203 nits with diagnostics disabled");
+
+    const tq::hdr::ToneMap filmicModes[] = {
+        tq::hdr::ToneAgx, tq::hdr::ToneAces
+    };
+    bool sdrCurvesValid = true;
+    bool hdrCurvesValid = true;
+    for (unsigned mode = 0; mode < sizeof(filmicModes) / sizeof(filmicModes[0]); ++mode) {
+        float previousSdr = -1.0f;
+        float previousHdr = -1.0f;
+        for (unsigned i = 0; i <= 1024; ++i) {
+            float input = i * (32.0f / 1024.0f);
+            float sdr = tq::hdr::toneMapLuminance(filmicModes[mode], input, 1.0f);
+            float hdr = tq::hdr::toneMapLuminance(filmicModes[mode], input, 4.926108f);
+            sdrCurvesValid &= sdr == sdr && sdr >= 0.0f && sdr <= 1.00001f
+                           && sdr + 0.00001f >= previousSdr;
+            hdrCurvesValid &= hdr == hdr && hdr >= 0.0f && hdr <= 4.92612f
+                           && hdr + 0.00001f >= previousHdr;
+            previousSdr = sdr;
+            previousHdr = hdr;
+        }
+    }
+    float agxWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 1.0f, 1.0f);
+    float acesWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 1.0f, 1.0f);
+    float agxHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 1.0f);
+    float acesHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 1.0f);
+    check(sdrCurvesValid && agxWhite > 0.4f && agxWhite < 0.9f
+          && acesWhite > 0.4f && acesWhite < 0.9f
+          && agxHighlight > agxWhite && agxHighlight < 1.0f
+          && acesHighlight > acesWhite && acesHighlight < 1.0f,
+          "AgX and ACES monotonically roll extended highlights into SDR");
+    float agxHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 4.926108f);
+    float acesHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAces, 4.0f, 4.926108f);
+    check(hdrCurvesValid && agxHdr > 1.0f && agxHdr < 4.926108f
+          && acesHdr > 1.0f && acesHdr < 4.926108f,
+          "AgX and ACES preserve extended luminance for HDR output");
+    check(agxWhite != acesWhite && agxHighlight != acesHighlight,
+          "AgX and ACES select measurably different display curves");
+
+    unsigned char colorGrade[1288] = {};
+    const unsigned char colorChecksum[16] = {
+        0x15,0x07,0x85,0xe4,0xfb,0xb5,0xca,0x43,
+        0x79,0xfc,0x92,0xf9,0x64,0x2c,0x0c,0x9b
+    };
+    memcpy(colorGrade, "DXBC", 4);
+    memcpy(colorGrade + 4, colorChecksum, sizeof(colorChecksum));
+    *(uint32_t*)(colorGrade + 24) = sizeof(colorGrade);
+    memcpy(colorGrade + 64, "SceneColor", 11);
+    memcpy(colorGrade + 96, "ColorLut", 9);
+    check(tq::hdr::isColorGradingShader(colorGrade, sizeof(colorGrade)),
+          "recognize the exact Titan Quest color-grading shader signature");
+    colorGrade[4] ^= 1;
+    check(!tq::hdr::isColorGradingShader(colorGrade, sizeof(colorGrade)),
+          "reject a near-match color-grading shader signature");
+
+    unsigned char gamma[1108] = {};
+    const unsigned char gammaChecksum[16] = {
+        0xa2,0x0f,0xf7,0xb0,0xe5,0x78,0x2f,0x87,
+        0x20,0x5c,0x22,0x36,0xb1,0xf7,0xe2,0x05
+    };
+    memcpy(gamma, "DXBC", 4);
+    memcpy(gamma + 4, gammaChecksum, sizeof(gammaChecksum));
+    *(uint32_t*)(gamma + 24) = sizeof(gamma);
+    memcpy(gamma + 64, "screenSampler", 14);
+    memcpy(gamma + 96, "gammaSampler", 13);
+    check(tq::hdr::isGammaShader(gamma, sizeof(gamma)),
+          "recognize the exact Titan Quest gamma shader signature");
+    gamma[24] ^= 1;
+    check(!tq::hdr::isGammaShader(gamma, sizeof(gamma)),
+          "reject a malformed gamma shader container");
 
     const uintptr_t viewportSlot = 0x12345678u;
     const uintptr_t frustumSlot = 0x23456789u;
@@ -405,6 +481,40 @@ int main(int argc, char** argv) {
             free(vsBytes);
         }
         if (fxaa) fxaa->Release();
+
+        long gradeSize = 0, gammaSize = 0;
+        void* gradeBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-colorgrading.dxbc", &gradeSize);
+        void* gammaBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-gamma.dxbc", &gammaSize);
+        ID3D11PixelShader *gradeShader = nullptr, *gammaShader = nullptr;
+        bool postShaders = gradeBytes && gammaBytes
+            && SUCCEEDED(device->CreatePixelShader(gradeBytes, gradeSize, nullptr, &gradeShader))
+            && SUCCEEDED(device->CreatePixelShader(gammaBytes, gammaSize, nullptr, &gammaShader));
+        check(postShaders && gradeShader && gammaShader,
+              "the exact color-grading and gamma shaders pass validation");
+        if (postShaders && context) {
+            Sleep(3000);
+            context->PSSetShader(gradeShader, nullptr, 0);
+            ID3D11PixelShader* reboundGrade = nullptr;
+            context->PSGetShader(&reboundGrade, nullptr, nullptr);
+            check(reboundGrade && reboundGrade != gradeShader,
+                  "the HDR-safe shader replaces only the exact color-grading pass");
+            if (reboundGrade) reboundGrade->Release();
+            context->PSSetShader(gammaShader, nullptr, 0);
+            ID3D11PixelShader* reboundGamma = nullptr;
+            context->PSGetShader(&reboundGamma, nullptr, nullptr);
+            check(reboundGamma && reboundGamma != gammaShader,
+                  "the selected filmic transform replaces the exact gamma pass");
+            if (reboundGamma) reboundGamma->Release();
+        } else {
+            check(false, "replace the exact color-grading pass");
+            check(false, "replace the exact gamma pass");
+        }
+        if (gradeShader) gradeShader->Release();
+        if (gammaShader) gammaShader->Release();
+        free(gradeBytes); free(gammaBytes);
+
         tq::dxbc::PatchResult notShadow = {};
         check(!tq::dxbc::enhanceShadowPcf(fxaaBytes, (SIZE_T)fxaaSize, &notShadow),
               "the shadow transformer rejects the FXAA shader");
@@ -480,6 +590,8 @@ int main(int argc, char** argv) {
     if (proxy) FreeLibrary(proxy);
     if (host) FreeLibrary(host);
 
+    check(GetFileAttributesA("tqflicker-hdr.log") == INVALID_FILE_ATTRIBUTES,
+          "HDR logging creates no file when hdr_debug is absent");
     fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
     fclose(g_report);
     return g_failures ? 1 : 0;
