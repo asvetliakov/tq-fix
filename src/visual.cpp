@@ -83,6 +83,10 @@ bool g_fxaaBound;
 bool g_colorGradingBound;
 bool g_gammaBound;
 bool g_backBufferNeedsRestore;
+ID3D11RenderTargetView* g_flipOutputRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+ID3D11DepthStencilView* g_flipOutputDsv;
+bool g_flipOutputValid;
+LONG g_firstFlipOutputRestoreLogged;
 
 struct ScreenTargetInfo {
     void* identity;
@@ -1421,6 +1425,52 @@ void restoreState(ID3D11DeviceContext* c, SavedState& s) {
     release(s.dsv); release(s.blend); release(s.depth); release(s.raster);
 }
 
+void releaseFlipOutputTargets() {
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+        release(g_flipOutputRtvs[i]);
+    release(g_flipOutputDsv);
+    g_flipOutputValid = false;
+}
+
+bool viewTargetsTexture(ID3D11RenderTargetView* view, ID3D11Texture2D* texture) {
+    if (!view || !texture) return false;
+    ID3D11Resource* resource = nullptr;
+    view->GetResource(&resource);
+    bool matches = resource && identityOf(resource) == identityOf(texture);
+    release(resource);
+    return matches;
+}
+
+void rememberFlipOutputTargets(const SavedState& state,
+                               ID3D11Texture2D* backBuffer) {
+    bool containsBackBuffer = false;
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+        containsBackBuffer |= viewTargetsTexture(state.rtvs[i], backBuffer);
+    if (!containsBackBuffer) {
+        releaseFlipOutputTargets();
+        return;
+    }
+    releaseFlipOutputTargets();
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+        g_flipOutputRtvs[i] = state.rtvs[i];
+        if (g_flipOutputRtvs[i]) g_flipOutputRtvs[i]->AddRef();
+    }
+    g_flipOutputDsv = state.dsv;
+    if (g_flipOutputDsv) g_flipOutputDsv->AddRef();
+    g_flipOutputValid = true;
+}
+
+bool restoreFlipOutputTargets() {
+    if (!g_flipOutputValid || !g_context || !g_omSetRenderTargets) return false;
+    g_inside = true;
+    g_omSetRenderTargets(g_context, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+                         g_flipOutputRtvs, g_flipOutputDsv);
+    g_inside = false;
+    if (!InterlockedCompareExchange(&g_firstFlipOutputRestoreLogged, 1, 0))
+        tq::hdr::log("Flip-model output binding restored after Present\r\n");
+    return true;
+}
+
 void issueDraw(ID3D11DeviceContext* c, bool indexed, UINT count, UINT start, INT base) {
     if (indexed) g_drawIndexed(c, count, start, base);
     else g_draw(c, count, start);
@@ -1614,6 +1664,7 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
         return false;
     SavedState old;
     saveState(g_context, old);
+    rememberFlipOutputTargets(old, backBuffer);
     ID3D11RenderTargetView* noTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11ShaderResourceView* noSrvs[3] = {};
     g_context->PSSetShaderResources(0, 3, noSrvs);
@@ -1896,8 +1947,10 @@ void onPostPresent(IDXGISwapChain* swapChain) {
     (void)swapChain;
     // Defer the copy until the next frame actually reuses old pixels. A normal
     // full clear cancels it in hookClearRenderTargetView at zero copy cost.
-    if (tq::hdr::runtime().fp16Active && g_hdr.presentCopy)
+    if (tq::hdr::runtime().fp16Active && g_hdr.presentCopy) {
         g_backBufferNeedsRestore = true;
+        restoreFlipOutputTargets();
+    }
 }
 
 void onBeforeResize(IDXGISwapChain* swapChain) {
@@ -1906,6 +1959,7 @@ void onBeforeResize(IDXGISwapChain* swapChain) {
     // before ResizeBuffers. Also restart ordinal target matching because the
     // game recreates its resolution-dependent post-process chain afterward.
     releaseHdrSizeResources();
+    releaseFlipOutputTargets();
     g_backBufferIdentity = nullptr;
     g_backBufferWidth = g_backBufferHeight = 0;
     g_backBufferNeedsRestore = false;
@@ -1975,6 +2029,8 @@ void shutdown() {
     g_device = nullptr; g_fxaaBound = g_shadowBound = false;
     g_colorGradingBound = g_gammaBound = false;
     g_backBufferNeedsRestore = false;
+    releaseFlipOutputTargets();
+    InterlockedExchange(&g_firstFlipOutputRestoreLogged, 0);
     g_backBufferIdentity = nullptr; g_backBufferWidth = g_backBufferHeight = 0;
     g_createTexture2D = nullptr;
     g_createPixelShader = nullptr;
