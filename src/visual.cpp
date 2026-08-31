@@ -1280,7 +1280,8 @@ const char* kPresentVertexSource =
 "uv=float2((id<<1)&2,id&2);return float4(uv*float2(2,-2)+float2(-1,1),0,1);}";
 
 const char* kPresentPixelSource =
-"Texture2D frameTex:register(t0);SamplerState frameSampler:register(s0);"
+"Texture2D frameTex:register(t0);Texture2D bloomTex:register(t1);"
+"SamplerState frameSampler:register(s0);"
 "float3 toLinear(float3 c){float3 lo=c/12.92,hi=pow((c+.055)/1.055,2.4);"
 "return lerp(lo,hi,step(.04045,c));}"
 "float3 linearizeExtended(float3 c){float intensity=max(1.0,max(c.r,max(c.g,c.b)));"
@@ -1304,7 +1305,9 @@ const char* kPresentPixelSource =
 "float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
 "return max(c*(mapLuma(l)/l),0);}"
 "float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD0):SV_Target{"
-"float3 c=linearizeExtended(max(frameTex.SampleLevel(frameSampler,u,0).rgb,0));"
+"float3 c=max(frameTex.SampleLevel(frameSampler,u,0).rgb,0);"
+"c+=max(bloomTex.SampleLevel(frameSampler,u,0).rgb,0)*TQ_BLOOM_STRENGTH;"
+"c=linearizeExtended(c);"
 "float l=max(dot(c,float3(.2126,.7152,.0722)),1e-6);"
 "float3 outc=mapColor(c);"
 "\n#if TQ_HIGHLIGHT_DEBUG\n"
@@ -1537,6 +1540,7 @@ bool createHdrProgramResources(ID3D11Device* device) {
         + defineNumber("TQ_PEAK", peakRelative)
         + defineNumber("TQ_PAPER_SCALE", paperScale)
         + defineNumber("TQ_SCRGB_PEAK", scrgbPeak)
+        + defineNumber("TQ_BLOOM_STRENGTH", g_options.bloomStrength)
         + kPresentPixelSource;
     ID3DBlob *color = nullptr, *gamma = nullptr, *toneBlob = nullptr;
     ID3DBlob *presentBlob = nullptr, *vertex = nullptr, *alphaClamp = nullptr;
@@ -2067,16 +2071,10 @@ bool renderEnhancedBloom() {
         g_draw(g_context, 3, 0);
     }
 
-    g_psSetShaderResources(g_context, 0, 3, nullViews);
-    updateBloomConstants(g_context, constants, g_bloom.width, g_bloom.height);
-    setBloomViewport(g_context, g_hdr.width, g_hdr.height);
-    g_omSetRenderTargets(g_context, 1, &g_hdr.backBufferRTV, nullptr);
-    g_context->OMSetBlendState(g_bloom.additiveBlend, nullptr, 0xffffffff);
-    ID3D11ShaderResourceView* finalBloom = g_bloom.levels > 1
-                                        ? g_bloom.upSRV[0] : g_bloom.downSRV[0];
-    g_psSetShaderResources(g_context, 0, 1, &finalBloom);
-    g_psSetShader(g_context, g_bloom.compositePS, nullptr, 0);
-    g_draw(g_context, 3, 0);
+    // Keep Titan Quest's game-space back buffer pristine. Some menu/loading
+    // transitions deliberately reuse it; writing bloom here would make the
+    // next extraction bloom an already-bloomed image. The final presentation
+    // shader samples this completed pyramid once instead.
     g_psSetShaderResources(g_context, 0, 3, nullViews);
 
     endBloomTiming(g_context, timing);
@@ -2344,7 +2342,9 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
         return false;
     SavedState old;
     saveState(g_context, old);
-    g_bloom.freshForPresent = false;
+    const bool bloomReady = g_bloom.freshForPresent
+                         && enhancedBloomSelected()
+                         && g_bloom.levels > 0;
     rememberFlipOutputTargets(old, backBuffer);
     ID3D11RenderTargetView* noTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11ShaderResourceView* noSrvs[3] = {};
@@ -2385,9 +2385,16 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     g_context->VSSetShader(g_hdr.fullscreenVS, nullptr, 0);
     g_context->PSSetShader(g_hdr.presentPS, nullptr, 0);
     g_context->PSSetSamplers(0, 1, &g_hdr.sampler);
-    g_context->PSSetShaderResources(0, 1, &g_hdr.presentCopySRV);
+    ID3D11ShaderResourceView* presentInputs[2] = {
+        g_hdr.presentCopySRV,
+        bloomReady ? (g_bloom.levels > 1 ? g_bloom.upSRV[0]
+                                         : g_bloom.downSRV[0])
+                   : nullptr
+    };
+    g_context->PSSetShaderResources(0, 2, presentInputs);
     g_draw(g_context, 3, 0);
     g_context->PSSetShaderResources(0, 3, noSrvs);
+    g_bloom.freshForPresent = false;
     g_inside = false;
 #ifdef TQ_DIAGNOSTIC
     if (probe) {
