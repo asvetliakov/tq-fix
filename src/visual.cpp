@@ -101,6 +101,9 @@ ID3D11PixelShader* g_colorGrading[8];
 unsigned g_colorGradingCount;
 ID3D11PixelShader* g_gamma[8];
 unsigned g_gammaCount;
+ID3D11PixelShader* g_alphaClampCopies[8];
+unsigned g_alphaClampCopyCount;
+ID3D11PixelShader* g_gamePixelShader;
 bool g_fxaaBound;
 bool g_colorGradingBound;
 bool g_gammaBound;
@@ -208,6 +211,7 @@ struct HdrResources {
     ID3D11PixelShader* gammaPS;
     ID3D11PixelShader* tonePS;
     ID3D11PixelShader* presentPS;
+    ID3D11PixelShader* alphaClampPS;
     ID3D11VertexShader* fullscreenVS;
     ID3D11Texture2D* presentCopy;
     ID3D11ShaderResourceView* presentCopySRV;
@@ -302,6 +306,17 @@ bool isFxaa(const void* bytecode, SIZE_T size) {
     const BYTE* b = (const BYTE*)bytecode;
     return contains(b, size, "AASettings") && contains(b, size, "PixelStep")
         && contains(b, size, "texFrame");
+}
+
+bool isAlphaClampCopy(const void* bytecode, SIZE_T size) {
+    static const BYTE checksum[16] = {
+        0x47, 0x92, 0x15, 0x61, 0x8a, 0xaf, 0xca, 0xb4,
+        0x1c, 0x14, 0x61, 0xbc, 0x45, 0x1c, 0x23, 0x5a
+    };
+    return bytecode && size == 748 && !memcmp(bytecode, "DXBC", 4)
+        && !memcmp((const BYTE*)bytecode + 4, checksum, sizeof(checksum))
+        && *(const uint32_t*)((const BYTE*)bytecode + 24) == size
+        && contains((const BYTE*)bytecode, size, "baseSamplerTex");
 }
 
 void* identityOf(IUnknown* object) {
@@ -977,13 +992,17 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
         bool fxaa = g_options.smaa && isFxaa(bytecode, size);
         bool color = outputTransform && tq::hdr::isColorGradingShader(bytecode, size);
         bool gamma = outputTransform && tq::hdr::isGammaShader(bytecode, size);
+        bool alphaClampCopy = outputTransform && isAlphaClampCopy(bytecode, size);
         if (fxaa && g_fxaaCount < sizeof(g_fxaa) / sizeof(g_fxaa[0]))
             g_fxaa[g_fxaaCount++] = *shader;
         if (color && g_colorGradingCount < sizeof(g_colorGrading) / sizeof(g_colorGrading[0]))
             g_colorGrading[g_colorGradingCount++] = *shader;
         if (gamma && g_gammaCount < sizeof(g_gamma) / sizeof(g_gamma[0]))
             g_gamma[g_gammaCount++] = *shader;
-        if (fxaa || color || gamma) {
+        if (alphaClampCopy && g_alphaClampCopyCount
+                < sizeof(g_alphaClampCopies) / sizeof(g_alphaClampCopies[0]))
+            g_alphaClampCopies[g_alphaClampCopyCount++] = *shader;
+        if (fxaa || color || gamma || alphaClampCopy) {
         // DXMT deadlocks if a device shader is created re-entrantly from either
         // CreatePixelShader or Draw. A one-shot device worker builds the fixed
         // program after this call returns; FXAA remains active until it is ready.
@@ -1042,6 +1061,7 @@ HRESULT WINAPI hookCreateSamplerState(ID3D11Device* device, const D3D11_SAMPLER_
 
 void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* shader,
                             ID3D11ClassInstance* const* classes, UINT count) {
+    if (context == g_context) g_gamePixelShader = shader;
     g_fxaaBound = g_colorGradingBound = g_gammaBound = false;
     for (unsigned i = 0; i < g_fxaaCount; ++i)
         if (shader == g_fxaa[i]) g_fxaaBound = true;
@@ -1265,6 +1285,16 @@ const char* kBlendWrapper =
 "float4 o;SMAANeighborhoodBlendingVS(u,o);"
 "return SMAANeighborhoodBlendingPS(u,o,tqColorTex,tqBlendTex);}\n";
 
+// This crossfade originally rendered through UNORM, which saturated alpha.
+// Preserve that blend contract without clamping the FP16 RGB highlights.
+const char* kAlphaClampCopySource =
+"Texture2D baseSamplerTex:register(t0);"
+"SamplerState baseSampler:register(s0);"
+"float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0,"
+"float4 modulation:TEXCOORD1):SV_Target{"
+"float4 value=baseSamplerTex.Sample(baseSampler,uv)*modulation;"
+"value.a=saturate(value.a);return value;}";
+
 typedef HRESULT(WINAPI* D3DCompileFn)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*,
                                       ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
                                       ID3DBlob**, ID3DBlob**);
@@ -1315,7 +1345,7 @@ void releaseHdrSizeResources() {
 void releaseHdr() {
     releaseHdrSizeResources();
     release(g_hdr.colorGradingPS); release(g_hdr.gammaPS);
-    release(g_hdr.tonePS); release(g_hdr.presentPS);
+    release(g_hdr.tonePS); release(g_hdr.presentPS); release(g_hdr.alphaClampPS);
     release(g_hdr.fullscreenVS); release(g_hdr.sampler); release(g_hdr.blend);
     release(g_hdr.depth); release(g_hdr.raster);
 }
@@ -1388,7 +1418,8 @@ bool createHdrProgramResources(ID3D11Device* device) {
     const tq::hdr::Runtime& runtime = tq::hdr::runtime();
     if (runtime.settings.toneMap == tq::hdr::ToneOriginal) return true;
     if (g_hdr.colorGradingPS && g_hdr.gammaPS && g_hdr.tonePS
-        && (!runtime.fp16Active || (g_hdr.presentPS && g_hdr.fullscreenVS))) return true;
+        && (!runtime.fp16Active || (g_hdr.presentPS && g_hdr.fullscreenVS
+                                    && g_hdr.alphaClampPS))) return true;
 
     float peakRelative = runtime.active
         ? runtime.peakNits / runtime.settings.paperWhiteNits : 1.0f;
@@ -1408,13 +1439,14 @@ bool createHdrProgramResources(ID3D11Device* device) {
         + defineNumber("TQ_SCRGB_PEAK", scrgbPeak)
         + kPresentPixelSource;
     ID3DBlob *color = nullptr, *gamma = nullptr, *toneBlob = nullptr;
-    ID3DBlob *presentBlob = nullptr, *vertex = nullptr;
+    ID3DBlob *presentBlob = nullptr, *vertex = nullptr, *alphaClamp = nullptr;
     bool ok = compileShader(kColorGradingSource, "ps_5_0", &color)
            && compileShader(kGammaSource, "ps_5_0", &gamma)
            && compileShader(tone, "ps_5_0", &toneBlob);
     if (ok && runtime.fp16Active)
         ok = compileShader(present, "ps_5_0", &presentBlob)
-          && compileShader(kPresentVertexSource, "vs_5_0", &vertex);
+          && compileShader(kPresentVertexSource, "vs_5_0", &vertex)
+          && compileShader(kAlphaClampCopySource, "ps_5_0", &alphaClamp);
     if (ok) ok = SUCCEEDED(g_createPixelShader(
         device, color->GetBufferPointer(), color->GetBufferSize(), nullptr,
         &g_hdr.colorGradingPS));
@@ -1430,7 +1462,11 @@ bool createHdrProgramResources(ID3D11Device* device) {
     if (ok && runtime.fp16Active) ok = SUCCEEDED(device->CreateVertexShader(
         vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr,
         &g_hdr.fullscreenVS));
+    if (ok && runtime.fp16Active) ok = SUCCEEDED(g_createPixelShader(
+        device, alphaClamp->GetBufferPointer(), alphaClamp->GetBufferSize(), nullptr,
+        &g_hdr.alphaClampPS));
     release(color); release(gamma); release(toneBlob); release(presentBlob); release(vertex);
+    release(alphaClamp);
     if (!ok) { releaseHdr(); return false; }
 
     D3D11_SAMPLER_DESC sampler = {};
@@ -1844,6 +1880,55 @@ bool viewTargetsCurrentBackBuffer(ID3D11RenderTargetView* view) {
     return matches;
 }
 
+bool shouldClampRegionalCompositeAlpha(ID3D11DeviceContext* context) {
+    if (!context || context != g_context || !tq::hdr::runtime().fp16Active
+        || !g_hdr.alphaClampPS || !g_gamePixelShader) return false;
+    bool knownCopy = false;
+    for (unsigned i = 0; i < g_alphaClampCopyCount; ++i)
+        if (g_gamePixelShader == g_alphaClampCopies[i]) knownCopy = true;
+    if (!knownCopy) return false;
+
+    ID3D11ShaderResourceView* sourceView = nullptr;
+    context->PSGetShaderResources(0, 1, &sourceView);
+    ID3D11Resource* source = nullptr;
+    if (sourceView) sourceView->GetResource(&source);
+    bool sourceMatches = screenTargetId(identityOf(source)) == 5;
+    release(source);
+    release(sourceView);
+    if (!sourceMatches) return false;
+
+    ID3D11RenderTargetView* destination = nullptr;
+    context->OMGetRenderTargets(1, &destination, nullptr);
+    bool destinationMatches = viewTargetsCurrentBackBuffer(destination);
+    release(destination);
+    if (!destinationMatches) return false;
+
+    ID3D11BlendState* blend = nullptr;
+    FLOAT factor[4] = {};
+    UINT sampleMask = 0;
+    context->OMGetBlendState(&blend, factor, &sampleMask);
+    if (!blend) return false;
+    D3D11_BLEND_DESC desc = {};
+    blend->GetDesc(&desc);
+    release(blend);
+    const D3D11_RENDER_TARGET_BLEND_DESC& target = desc.RenderTarget[0];
+    return target.BlendEnable
+        && target.SrcBlend == D3D11_BLEND_INV_SRC_ALPHA
+        && target.DestBlend == D3D11_BLEND_SRC_ALPHA
+        && target.BlendOp == D3D11_BLEND_OP_ADD
+        && target.RenderTargetWriteMask == (D3D11_COLOR_WRITE_ENABLE_RED
+                                           | D3D11_COLOR_WRITE_ENABLE_GREEN
+                                           | D3D11_COLOR_WRITE_ENABLE_BLUE);
+}
+
+void bindRegionalCompositeShader(ID3D11DeviceContext* context, bool clamp) {
+    if (clamp) g_psSetShader(context, g_hdr.alphaClampPS, nullptr, 0);
+}
+
+void restoreRegionalCompositeShader(ID3D11DeviceContext* context, bool clamp) {
+    if (clamp) g_psSetShader(context, g_gamePixelShader, nullptr, 0);
+}
+
 bool restoreGameSpaceBackBuffer() {
     if (!g_backBufferNeedsRestore || !g_context || !g_swapChain
         || !g_hdr.presentCopy) return false;
@@ -1969,7 +2054,11 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
         g_inside = true; bool done = runSmaa(context, false, count, start, 0); g_inside = false;
         if (done) return;
     }
+    bool clampRegionalAlpha = !g_inside
+        && shouldClampRegionalCompositeAlpha(context);
+    bindRegionalCompositeShader(context, clampRegionalAlpha);
     g_draw(context, count, start);
+    restoreRegionalCompositeShader(context, clampRegionalAlpha);
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
@@ -1987,7 +2076,11 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         g_inside = true; bool done = runSmaa(context, true, count, start, base); g_inside = false;
         if (done) return;
     }
+    bool clampRegionalAlpha = !g_inside
+        && shouldClampRegionalCompositeAlpha(context);
+    bindRegionalCompositeShader(context, clampRegionalAlpha);
     g_drawIndexed(context, count, start, base);
+    restoreRegionalCompositeShader(context, clampRegionalAlpha);
 }
 
 }  // namespace
@@ -2234,6 +2327,9 @@ void shutdown() {
     memset(g_fxaa, 0, sizeof(g_fxaa)); g_fxaaCount = 0;
     memset(g_colorGrading, 0, sizeof(g_colorGrading)); g_colorGradingCount = 0;
     memset(g_gamma, 0, sizeof(g_gamma)); g_gammaCount = 0;
+    memset(g_alphaClampCopies, 0, sizeof(g_alphaClampCopies));
+    g_alphaClampCopyCount = 0;
+    g_gamePixelShader = nullptr;
     memset(g_screenTargets, 0, sizeof(g_screenTargets)); g_screenTargetCount = 0;
     memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
     g_postProcessBindingCount = 0;
