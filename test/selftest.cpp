@@ -1,14 +1,18 @@
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dxbc_patch.h"
+#include "bloom_hook.h"
 #include "frustum_fix.h"
 #include "hdr.h"
 #include "streaming.h"
 #include "visual.h"
+#include "bloom_shaders.inc"
 
 namespace {
 
@@ -103,6 +107,100 @@ void testRendererPresentHook() {
     VirtualFree(image, 0, MEM_RELEASE);
 }
 
+void testBloomHook() {
+    const SIZE_T imageSize = 0x300000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                     MEM_RESERVE | MEM_COMMIT,
+                                     PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest Engine image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    memcpy(section->Name, ".text", 5);
+    section->VirtualAddress = 0x1000;
+    section->Misc.VirtualSize = 0x2aa69c;
+
+    static const BYTE body[] = {
+        0x55,0x8b,0xec,0x83,0xe4,0xf8, // validated prologue
+        0x8b,0xe5,0x5d,0xc2,0x14,0x00  // synthetic epilogue
+    };
+    BYTE* original = image + 0x15d7f0;
+    memcpy(original, body, sizeof(body));
+    bool hooked = tq::bloomhook::install(
+        (HMODULE)image, (tq::bloomhook::HotBlurFn)(void*)original);
+    check(hooked && tq::bloomhook::installed()
+          && original[0] == 0x68 && original[5] == 0xc3,
+          "detour the exact Engine bloom export with one absolute branch");
+    tq::bloomhook::shutdown();
+    check(!tq::bloomhook::installed()
+          && !memcmp(original, body, sizeof(body)),
+          "restore the Engine bloom function entry during shutdown");
+    original[0] ^= 1;
+    check(!tq::bloomhook::install(
+              (HMODULE)image, (tq::bloomhook::HotBlurFn)(void*)original)
+          && !tq::bloomhook::installed(),
+          "reject a near-match bloom prologue without patching it");
+    tq::bloomhook::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+void testBloomExtraction() {
+    bool monotonic = true;
+    float previous = -1.0f;
+    for (unsigned i = 0; i <= 2048; ++i) {
+        float input = i * (8.0f / 2048.0f);
+        float output = tq::bloomhook::extractBrightness(input, 1.0f, 0.25f);
+        monotonic &= output == output && output >= 0.0f
+                  && output + 0.00001f >= previous;
+        previous = output;
+    }
+    float dark = tq::bloomhook::extractBrightness(0.5f, 1.0f, 0.25f);
+    float shoulder = tq::bloomhook::extractBrightness(0.9f, 1.0f, 0.25f);
+    float white = tq::bloomhook::extractBrightness(1.0f, 1.0f, 0.25f);
+    float highlight = tq::bloomhook::extractBrightness(2.0f, 1.0f, 0.25f);
+    check(monotonic && dark == 0.0f && shoulder > 0.0f && shoulder < 0.1f
+          && white > shoulder && white < 0.1f
+          && highlight > 0.999f && highlight < 1.001f,
+          "global HDR bloom extraction is soft, monotonic, and unclipped");
+}
+
+void testBloomShaders() {
+    HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!compiler) compiler = LoadLibraryW(L"d3dcompiler_43.dll");
+    typedef HRESULT(WINAPI* CompileFn)(
+        LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+        LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+    CompileFn compile = compiler
+        ? (CompileFn)(void*)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    const char* sources[] = {
+        kBloomExtractSource, kBloomDownsampleSource,
+        kBloomUpsampleSource, kBloomCompositeSource
+    };
+    bool accepted = compile != nullptr;
+    for (unsigned i = 0; accepted && i < sizeof(sources) / sizeof(sources[0]); ++i) {
+        ID3DBlob *shader = nullptr, *errors = nullptr;
+        HRESULT hr = compile(sources[i], strlen(sources[i]), "bloom-selftest",
+                             nullptr, nullptr, "main", "ps_5_0",
+                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                             &shader, &errors);
+        accepted &= SUCCEEDED(hr) && shader && shader->GetBufferSize() > 0;
+        if (shader) shader->Release();
+        if (errors) errors->Release();
+    }
+    check(accepted, "compile all HDR bloom shaders with the runtime compiler");
+    if (compiler) FreeLibrary(compiler);
+}
+
 void* readFile(const char* path, long* size) {
     *size = 0;
     FILE* file = fopen(path, "rb");
@@ -136,6 +234,9 @@ int main(int argc, char** argv) {
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
     testRendererPresentHook();
+    testBloomHook();
+    testBloomExtraction();
+    testBloomShaders();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
     check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal

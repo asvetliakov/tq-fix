@@ -23,6 +23,8 @@ it:
 - can keep the final scene/post-process chain in FP16 and apply either a
   look-preserving Frostbite-style display mapper or a modern AgX-derived output
   transform for SDR and HDR displays when explicitly enabled.
+- replaces the game's fixed, low-resolution bloom with an aspect-correct
+  multi-scale float bloom while the enhanced FP16 output path is active.
 
 For widescreen play, it also replaces the game's fixed 4:3 CPU-side
 entity-update frustum construction (expressed internally as 1024x768) with the
@@ -48,6 +50,8 @@ aa=smaa
 anisotropy=16
 shadows=enhanced
 edge_updates=expanded
+bloom=enhanced
+bloom_strength=0.85
 hdr=off
 tonemap=original
 paper_white_nits=203
@@ -81,6 +85,19 @@ HDR output.
 HDR is available but the report is unusable. A numeric `peak_nits` overrides
 automatic detection.
 
+With Frostbite or AgX selected, `bloom=enhanced` replaces Titan Quest's fixed
+512x512/8-bit bloom with a quarter-resolution, up-to-five-level float pyramid
+sized to the current display aspect ratio. It runs once on every completed game
+scene, uses a consistent soft-threshold profile, and does not clamp brightness
+above reference white. The old regional bloom parameters and the in-game Bloom
+toggle are intentionally ignored; the INI setting is authoritative. The same
+bloom runs before display mapping in enhanced SDR and HDR modes. Use
+`bloom=original` to restore the game's original regional bloom, or `bloom=off`
+to disable bloom entirely. With `tonemap=original`, `bloom=enhanced` safely
+falls back to the original bloom because the float post-processing path is not
+active; `bloom=off` still disables it. `bloom_strength` controls the enhanced
+composite intensity from `0.0` to `4.0` and defaults to `0.85`.
+
 Temporary HDR diagnostics can be enabled for testing:
 
 ```ini
@@ -93,6 +110,17 @@ above reference white with a yellow/orange/red/magenta highlight heatmap. Log
 writes are buffered and handled by a worker rather than the render thread.
 There is no on-screen legend. Diagnostics are disabled by default and require a
 game restart when changed.
+
+To enable live bloom comparison, use:
+
+```ini
+[debug]
+bloom_toggle=1
+```
+
+Press `Ctrl+Shift+B` to switch between Titan Quest's original bloom and enhanced
+bloom. The toggle is disabled by default and requires a game restart when the
+setting is changed.
 
 For startup or crash diagnosis without changing the rendered image, enable the
 lightweight trace instead:
@@ -157,7 +185,9 @@ CrossOver Preview with DXMT, and Apple Silicon. The regression test runs all 37
 captured skinning variants, a captured shadow receiver, and a complete captured
 FXAA replacement draw through the real 32-bit DXMT device. It also verifies
 shadow resource selection, reflection-pass isolation, and pipeline-state
-restoration. The build also validates the proxy's named export surface against
+restoration. Bloom tests validate both exact Engine callers, the unclipped
+extraction curve, and every runtime bloom shader. The build also validates the
+proxy's named export surface against
 native Windows x86 and CrossOver WinMM reference DLLs when those references are
 available locally. Native Windows runtime testing is still required before
 calling that environment fully validated.

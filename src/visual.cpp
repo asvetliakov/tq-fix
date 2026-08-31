@@ -1,9 +1,11 @@
 #include "visual.h"
+#include "bloom_hook.h"
 #include "dxbc_patch.h"
 #include "hdr.h"
 #include "streaming.h"
 
 #include <d3dcompiler.h>
+#include <math.h>
 #include <stdint.h>
 #include <string>
 #include <string.h>
@@ -16,8 +18,18 @@ namespace tq {
 namespace visual {
 namespace {
 
-struct Options { bool smaa, shadows, streaming; UINT anisotropy; };
-Options g_options = {true, true, true, 16};
+enum BloomMode { BloomOriginal, BloomEnhanced, BloomOff };
+
+struct Options {
+    bool smaa, shadows, streaming, bloomToggle;
+    BloomMode bloom;
+    float bloomStrength;
+    UINT anisotropy;
+};
+Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16};
+bool g_bloomToggleKeyDown;
+bool g_bloomEnhancedRuntime = true;
+bool g_globalBloomEnabled;
 
 struct Patch { void** slot; void* original; void* replacement; };
 Patch g_patches[24];
@@ -215,6 +227,7 @@ struct HdrResources {
     ID3D11VertexShader* fullscreenVS;
     ID3D11Texture2D* presentCopy;
     ID3D11ShaderResourceView* presentCopySRV;
+    ID3D11ShaderResourceView* backBufferSRV;
     ID3D11RenderTargetView* backBufferRTV;
     ID3D11SamplerState* sampler;
     ID3D11BlendState* blend;
@@ -222,6 +235,44 @@ struct HdrResources {
     ID3D11RasterizerState* raster;
     UINT width, height;
 } g_hdr;
+
+const unsigned kBloomMaxLevels = 5;
+const unsigned kBloomTimingSlots = 4;
+
+struct BloomTiming {
+    ID3D11Query* disjoint;
+    ID3D11Query* begin;
+    ID3D11Query* end;
+    bool pending;
+};
+
+struct BloomResources {
+    ID3D11PixelShader* extractPS;
+    ID3D11PixelShader* downsamplePS;
+    ID3D11PixelShader* upsamplePS;
+    ID3D11PixelShader* compositePS;
+    ID3D11Buffer* constants;
+    ID3D11SamplerState* sampler;
+    ID3D11BlendState* opaqueBlend;
+    ID3D11BlendState* additiveBlend;
+    ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* raster;
+    ID3D11Texture2D* downTexture;
+    ID3D11Texture2D* upTexture;
+    ID3D11ShaderResourceView* downSRV[kBloomMaxLevels];
+    ID3D11RenderTargetView* downRTV[kBloomMaxLevels];
+    ID3D11ShaderResourceView* upSRV[kBloomMaxLevels];
+    ID3D11RenderTargetView* upRTV[kBloomMaxLevels];
+    BloomTiming timing[kBloomTimingSlots];
+    UINT width, height, levels;
+    DXGI_FORMAT format;
+    UINT rejectedWidth, rejectedHeight;
+    unsigned timingCursor, timingSamples;
+    double timingTotalMs, timingMaxMs;
+    unsigned calls;
+    bool freshForPresent;
+    bool rejectionLogged;
+} g_bloom;
 
 #ifdef TQ_DIAGNOSTIC
 ID3D11Texture2D* g_fp16Probe;
@@ -275,6 +326,19 @@ void readOptions() {
     g_options.smaa = _wcsicmp(value, L"fxaa") != 0;
     GetPrivateProfileStringW(L"graphics", L"shadows", L"enhanced", value, 32, path);
     g_options.shadows = _wcsicmp(value, L"original") != 0;
+    GetPrivateProfileStringW(L"graphics", L"bloom", L"enhanced", value, 32, path);
+    g_options.bloom = !_wcsicmp(value, L"original") ? BloomOriginal
+                    : !_wcsicmp(value, L"off") ? BloomOff : BloomEnhanced;
+    GetPrivateProfileStringW(L"graphics", L"bloom_strength", L"0.85",
+                             value, 32, path);
+    wchar_t* strengthEnd = nullptr;
+    double bloomStrength = wcstod(value, &strengthEnd);
+    g_options.bloomStrength = strengthEnd != value && *strengthEnd == 0
+                           && isfinite(bloomStrength)
+                           && bloomStrength >= 0.0 && bloomStrength <= 4.0
+                            ? (float)bloomStrength : 0.85f;
+    g_options.bloomToggle = GetPrivateProfileIntW(
+        L"debug", L"bloom_toggle", 0, path) != 0;
     GetPrivateProfileStringW(L"performance", L"streaming", L"optimized",
                              value, 32, path);
     g_options.streaming = tq::streaming::optimizationEnabled(value);
@@ -1295,6 +1359,8 @@ const char* kAlphaClampCopySource =
 "float4 value=baseSamplerTex.Sample(baseSampler,uv)*modulation;"
 "value.a=saturate(value.a);return value;}";
 
+#include "bloom_shaders.inc"
+
 typedef HRESULT(WINAPI* D3DCompileFn)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*,
                                       ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
                                       ID3DBlob**, ID3DBlob**);
@@ -1332,8 +1398,41 @@ void releaseSmaa() {
     release(g_smaa.depth); release(g_smaa.raster);
 }
 
+void releaseBloomSizeResources() {
+    for (unsigned i = 0; i < kBloomMaxLevels; ++i) {
+        release(g_bloom.downSRV[i]); release(g_bloom.downRTV[i]);
+        release(g_bloom.upSRV[i]); release(g_bloom.upRTV[i]);
+    }
+    release(g_bloom.downTexture); release(g_bloom.upTexture);
+    g_bloom.width = g_bloom.height = g_bloom.levels = 0;
+    g_bloom.format = DXGI_FORMAT_UNKNOWN;
+    g_bloom.rejectedWidth = g_bloom.rejectedHeight = 0;
+    g_bloom.rejectionLogged = false;
+}
+
+void releaseBloom() {
+    releaseBloomSizeResources();
+    release(g_bloom.extractPS); release(g_bloom.downsamplePS);
+    release(g_bloom.upsamplePS); release(g_bloom.compositePS);
+    release(g_bloom.constants); release(g_bloom.sampler);
+    release(g_bloom.opaqueBlend); release(g_bloom.additiveBlend);
+    release(g_bloom.depth); release(g_bloom.raster);
+    for (unsigned i = 0; i < kBloomTimingSlots; ++i) {
+        release(g_bloom.timing[i].disjoint);
+        release(g_bloom.timing[i].begin);
+        release(g_bloom.timing[i].end);
+        g_bloom.timing[i].pending = false;
+    }
+    g_bloom.timingCursor = g_bloom.timingSamples = 0;
+    g_bloom.timingTotalMs = g_bloom.timingMaxMs = 0.0;
+    g_bloom.calls = 0;
+    g_bloom.freshForPresent = false;
+}
+
 void releaseHdrSizeResources() {
+    releaseBloomSizeResources();
     release(g_hdr.presentCopySRV); release(g_hdr.presentCopy);
+    release(g_hdr.backBufferSRV);
     release(g_hdr.backBufferRTV);
 #ifdef TQ_DIAGNOSTIC
     release(g_fp16Probe);
@@ -1344,6 +1443,7 @@ void releaseHdrSizeResources() {
 
 void releaseHdr() {
     releaseHdrSizeResources();
+    releaseBloom();
     release(g_hdr.colorGradingPS); release(g_hdr.gammaPS);
     release(g_hdr.tonePS); release(g_hdr.presentPS); release(g_hdr.alphaClampPS);
     release(g_hdr.fullscreenVS); release(g_hdr.sampler); release(g_hdr.blend);
@@ -1491,10 +1591,103 @@ bool createHdrProgramResources(ID3D11Device* device) {
     return ok;
 }
 
+bool createBloomProgramResources(ID3D11Device* device) {
+    if (g_options.bloom != BloomEnhanced
+        || !tq::hdr::runtime().fp16Active) return true;
+    if (g_bloom.extractPS && g_bloom.downsamplePS && g_bloom.upsamplePS
+        && g_bloom.compositePS && g_bloom.constants) return true;
+
+    ID3DBlob *extract = nullptr, *downsample = nullptr;
+    ID3DBlob *upsample = nullptr, *composite = nullptr;
+    bool ok = compileShader(kBloomExtractSource, "ps_5_0", &extract)
+           && compileShader(kBloomDownsampleSource, "ps_5_0", &downsample)
+           && compileShader(kBloomUpsampleSource, "ps_5_0", &upsample)
+           && compileShader(kBloomCompositeSource, "ps_5_0", &composite);
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, extract->GetBufferPointer(), extract->GetBufferSize(), nullptr,
+        &g_bloom.extractPS));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, downsample->GetBufferPointer(), downsample->GetBufferSize(), nullptr,
+        &g_bloom.downsamplePS));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, upsample->GetBufferPointer(), upsample->GetBufferSize(), nullptr,
+        &g_bloom.upsamplePS));
+    if (ok) ok = SUCCEEDED(g_createPixelShader(
+        device, composite->GetBufferPointer(), composite->GetBufferSize(), nullptr,
+        &g_bloom.compositePS));
+    release(extract); release(downsample); release(upsample); release(composite);
+
+    D3D11_BUFFER_DESC constants = {};
+    constants.ByteWidth = 32;
+    constants.Usage = D3D11_USAGE_DEFAULT;
+    constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    D3D11_BLEND_DESC opaque = {};
+    opaque.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    D3D11_BLEND_DESC additive = {};
+    additive.RenderTarget[0].BlendEnable = TRUE;
+    additive.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    additive.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    additive.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    additive.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    additive.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    additive.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    additive.RenderTarget[0].RenderTargetWriteMask =
+        D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN
+      | D3D11_COLOR_WRITE_ENABLE_BLUE;
+    D3D11_DEPTH_STENCIL_DESC depth = {};
+    D3D11_RASTERIZER_DESC raster = {};
+    raster.FillMode = D3D11_FILL_SOLID;
+    raster.CullMode = D3D11_CULL_NONE;
+    raster.DepthClipEnable = TRUE;
+    if (ok) ok = SUCCEEDED(device->CreateBuffer(&constants, nullptr, &g_bloom.constants))
+              && SUCCEEDED(g_createSamplerState(device, &sampler, &g_bloom.sampler))
+              && SUCCEEDED(device->CreateBlendState(&opaque, &g_bloom.opaqueBlend))
+              && SUCCEEDED(device->CreateBlendState(&additive, &g_bloom.additiveBlend))
+              && SUCCEEDED(device->CreateDepthStencilState(&depth, &g_bloom.depth))
+              && SUCCEEDED(device->CreateRasterizerState(&raster, &g_bloom.raster));
+    if (!ok) {
+        releaseBloom();
+        tq::hdr::log("Enhanced bloom program unavailable; original bloom retained\r\n");
+        return false;
+    }
+
+    if (tq::hdr::runtime().settings.debug) {
+        bool timingReady = true;
+        for (unsigned i = 0; i < kBloomTimingSlots && timingReady; ++i) {
+            D3D11_QUERY_DESC query = {};
+            query.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            timingReady = SUCCEEDED(device->CreateQuery(&query,
+                                                        &g_bloom.timing[i].disjoint));
+            query.Query = D3D11_QUERY_TIMESTAMP;
+            if (timingReady) timingReady = SUCCEEDED(device->CreateQuery(
+                &query, &g_bloom.timing[i].begin));
+            if (timingReady) timingReady = SUCCEEDED(device->CreateQuery(
+                &query, &g_bloom.timing[i].end));
+        }
+        if (!timingReady) {
+            for (unsigned i = 0; i < kBloomTimingSlots; ++i) {
+                release(g_bloom.timing[i].disjoint);
+                release(g_bloom.timing[i].begin);
+                release(g_bloom.timing[i].end);
+            }
+            tq::hdr::log("Enhanced bloom GPU timing unavailable\r\n");
+        }
+    }
+    tq::hdr::log("Enhanced bloom program ready\r\n");
+    return true;
+}
+
 bool createProgramResources(ID3D11Device* device) {
     bool ok = true;
     if (g_options.smaa) ok = createSmaaProgramResources(device);
     if (ok) ok = createHdrProgramResources(device);
+    if (ok && g_options.bloom == BloomEnhanced
+        && tq::hdr::runtime().fp16Active)
+        createBloomProgramResources(device);
     return ok;
 }
 
@@ -1568,6 +1761,338 @@ void restoreState(ID3D11DeviceContext* c, SavedState& s) {
     for (UINT i = 0; i < 2; ++i) release(s.samplers[i]);
     for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) release(s.rtvs[i]);
     release(s.dsv); release(s.blend); release(s.depth); release(s.raster);
+}
+
+struct BloomConstants {
+    float sourceTexel[2];
+    float threshold;
+    float knee;
+    float invRange;
+    float saturation;
+    float strength;
+    float scatter;
+};
+
+UINT bloomMipSize(UINT base, UINT level) {
+    UINT value = base >> level;
+    return value ? value : 1;
+}
+
+bool bloomFormatSupported(ID3D11Device* device, DXGI_FORMAT format) {
+    UINT support = 0;
+    const UINT required = D3D11_FORMAT_SUPPORT_TEXTURE2D
+                        | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE
+                        | D3D11_FORMAT_SUPPORT_RENDER_TARGET;
+    return device && SUCCEEDED(device->CheckFormatSupport(format, &support))
+        && (support & required) == required;
+}
+
+bool createBloomTexture(ID3D11Device* device, UINT width, UINT height, UINT levels,
+                        DXGI_FORMAT format, ID3D11Texture2D** texture,
+                        ID3D11ShaderResourceView** srvs,
+                        ID3D11RenderTargetView** rtvs) {
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width; desc.Height = height;
+    desc.MipLevels = levels; desc.ArraySize = 1;
+    desc.Format = format; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_createTexture2D(device, &desc, nullptr, texture)) || !*texture)
+        return false;
+    for (UINT level = 0; level < levels; ++level) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+        srv.Format = format;
+        srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srv.Texture2D.MostDetailedMip = level;
+        srv.Texture2D.MipLevels = 1;
+        D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
+        rtv.Format = format;
+        rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtv.Texture2D.MipSlice = level;
+        if (FAILED(g_createShaderResourceView(device, *texture, &srv, &srvs[level]))
+            || FAILED(g_createRenderTargetView(device, *texture, &rtv, &rtvs[level])))
+            return false;
+    }
+    return true;
+}
+
+bool prepareBloom(ID3D11Device* device, UINT fullWidth, UINT fullHeight) {
+    if (!device || !fullWidth || !fullHeight || !g_bloom.extractPS
+        || !g_hdr.fullscreenVS) return false;
+    UINT width = (fullWidth + 3) / 4;
+    UINT height = (fullHeight + 3) / 4;
+    UINT levels = 1;
+    while (levels < kBloomMaxLevels) {
+        UINT nextWidth = bloomMipSize(width, levels);
+        UINT nextHeight = bloomMipSize(height, levels);
+        if (nextWidth < 16 || nextHeight < 16) break;
+        ++levels;
+    }
+    if (g_bloom.downTexture && g_bloom.width == width && g_bloom.height == height
+        && g_bloom.levels == levels) return true;
+    if (g_bloom.rejectedWidth == fullWidth && g_bloom.rejectedHeight == fullHeight)
+        return false;
+    releaseBloomSizeResources();
+    DXGI_FORMAT format = bloomFormatSupported(device, DXGI_FORMAT_R11G11B10_FLOAT)
+                       ? DXGI_FORMAT_R11G11B10_FLOAT
+                       : DXGI_FORMAT_R16G16B16A16_FLOAT;
+    bool ok = bloomFormatSupported(device, format)
+           && createBloomTexture(device, width, height, levels, format,
+                                 &g_bloom.downTexture, g_bloom.downSRV,
+                                 g_bloom.downRTV)
+           && createBloomTexture(device, width, height, levels, format,
+                                 &g_bloom.upTexture, g_bloom.upSRV,
+                                 g_bloom.upRTV);
+    if (!ok) {
+        releaseBloomSizeResources();
+        g_bloom.rejectedWidth = fullWidth;
+        g_bloom.rejectedHeight = fullHeight;
+        tq::hdr::log("Enhanced bloom targets unavailable at %ux%u; original bloom retained\r\n",
+                     fullWidth, fullHeight);
+        return false;
+    }
+    g_bloom.width = width; g_bloom.height = height;
+    g_bloom.levels = levels; g_bloom.format = format;
+    uint64_t pixels = 0;
+    for (UINT i = 0; i < levels; ++i)
+        pixels += (uint64_t)bloomMipSize(width, i) * bloomMipSize(height, i);
+    unsigned bytesPerPixel = format == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 8u;
+    tq::hdr::log("Enhanced bloom targets: source=%ux%u base=%ux%u levels=%u "
+                 "format=%u memory=%.2fMiB\r\n",
+                 fullWidth, fullHeight, width, height, levels, (unsigned)format,
+                 (double)(pixels * bytesPerPixel * 2) / (1024.0 * 1024.0));
+    return true;
+}
+
+void pollBloomTimings(ID3D11DeviceContext* context) {
+    if (!tq::hdr::runtime().settings.debug || !context) return;
+    for (unsigned i = 0; i < kBloomTimingSlots; ++i) {
+        BloomTiming& timing = g_bloom.timing[i];
+        if (!timing.pending || !timing.disjoint || !timing.begin || !timing.end)
+            continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint = {};
+        UINT64 begin = 0, end = 0;
+        if (context->GetData(timing.disjoint, &disjoint, sizeof(disjoint),
+                             D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK
+            || context->GetData(timing.begin, &begin, sizeof(begin),
+                                D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK
+            || context->GetData(timing.end, &end, sizeof(end),
+                                D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK)
+            continue;
+        timing.pending = false;
+        if (disjoint.Disjoint || !disjoint.Frequency || end < begin) continue;
+        double milliseconds = (double)(end - begin) * 1000.0
+                            / (double)disjoint.Frequency;
+        g_bloom.timingTotalMs += milliseconds;
+        if (milliseconds > g_bloom.timingMaxMs) g_bloom.timingMaxMs = milliseconds;
+        if (++g_bloom.timingSamples >= 120) {
+            tq::hdr::log("Enhanced bloom GPU: mean=%.3fms max=%.3fms samples=%u\r\n",
+                         g_bloom.timingTotalMs / g_bloom.timingSamples,
+                         g_bloom.timingMaxMs, g_bloom.timingSamples);
+            g_bloom.timingSamples = 0;
+            g_bloom.timingTotalMs = g_bloom.timingMaxMs = 0.0;
+        }
+    }
+}
+
+BloomTiming* beginBloomTiming(ID3D11DeviceContext* context) {
+    pollBloomTimings(context);
+    if (!tq::hdr::runtime().settings.debug) return nullptr;
+    BloomTiming& timing = g_bloom.timing[g_bloom.timingCursor++ % kBloomTimingSlots];
+    if (timing.pending || !timing.disjoint || !timing.begin || !timing.end)
+        return nullptr;
+    context->Begin(timing.disjoint);
+    context->End(timing.begin);
+    return &timing;
+}
+
+void endBloomTiming(ID3D11DeviceContext* context, BloomTiming* timing) {
+    if (!context || !timing) return;
+    context->End(timing->end);
+    context->End(timing->disjoint);
+    timing->pending = true;
+}
+
+void updateBloomConstants(ID3D11DeviceContext* context, BloomConstants& constants,
+                          UINT sourceWidth, UINT sourceHeight) {
+    constants.sourceTexel[0] = 1.0f / sourceWidth;
+    constants.sourceTexel[1] = 1.0f / sourceHeight;
+    context->UpdateSubresource(g_bloom.constants, 0, nullptr, &constants, 0, 0);
+}
+
+void setBloomViewport(ID3D11DeviceContext* context, UINT width, UINT height) {
+    D3D11_VIEWPORT viewport = {0, 0, (FLOAT)width, (FLOAT)height, 0, 1};
+    context->RSSetViewports(1, &viewport);
+}
+
+bool enhancedBloomSelected() {
+    if (!g_globalBloomEnabled) return false;
+    if (!g_options.bloomToggle) return true;
+    bool chord = (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+              && (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+              && (GetAsyncKeyState('B') & 0x8000);
+    if (chord && !g_bloomToggleKeyDown) {
+        g_bloomEnhancedRuntime = !g_bloomEnhancedRuntime;
+        // Restore native bloom immediately when comparing it.  Enabling the
+        // replacement suppresses native bloom only after the global pass has
+        // actually rendered successfully, preserving failure fallback.
+        if (!g_bloomEnhancedRuntime) tq::bloomhook::setSuppression(false);
+        tq::hdr::log("Bloom toggle: path=%s\r\n",
+                     g_bloomEnhancedRuntime ? "enhanced" : "original");
+    }
+    g_bloomToggleKeyDown = chord;
+    return g_bloomEnhancedRuntime;
+}
+
+bool renderEnhancedBloom() {
+    const tq::hdr::Runtime& runtime = tq::hdr::runtime();
+    if (!enhancedBloomSelected() || !runtime.fp16Active) {
+        tq::bloomhook::setSuppression(false);
+        return false;
+    }
+    // Treat a configured zero as a true no-op without spending GPU time, while
+    // still suppressing the native pass exactly as bloom=off would.
+    if (g_options.bloomStrength == 0.0f) {
+        g_bloom.freshForPresent = true;
+        tq::bloomhook::setSuppression(true);
+        return true;
+    }
+    if (InterlockedCompareExchange(&g_programState, 2, 2) != 2
+        || !g_context || !g_device || !g_hdr.fullscreenVS
+        || !g_bloom.extractPS || !g_bloom.downsamplePS
+        || !g_bloom.upsamplePS || !g_bloom.compositePS) {
+        tq::bloomhook::setSuppression(false);
+        return false;
+    }
+
+    SavedState old;
+    saveState(g_context, old);
+    ID3D11Resource* activeOutput = nullptr;
+    if (old.rtvs[0]) old.rtvs[0]->GetResource(&activeOutput);
+    bool outputMatches = activeOutput
+                      && identityOf(activeOutput) == g_backBufferIdentity;
+    release(activeOutput);
+    bool fullViewport = old.viewportCount == 1 && old.viewports[0].TopLeftX == 0
+                     && old.viewports[0].TopLeftY == 0
+                     && old.viewports[0].Width == (FLOAT)g_hdr.width
+                     && old.viewports[0].Height == (FLOAT)g_hdr.height;
+    bool valid = g_hdr.backBufferSRV && g_hdr.backBufferRTV && outputMatches
+              && g_hdr.width == g_backBufferWidth
+              && g_hdr.height == g_backBufferHeight
+              && g_hdr.width && g_hdr.height
+              && fullViewport
+              && prepareBloom(g_device, g_hdr.width, g_hdr.height);
+    if (!valid) {
+        if (runtime.settings.debug && !g_bloom.rejectionLogged) {
+            tq::hdr::log("Enhanced bloom rejected source: view=%u size=%ux%u "
+                         "viewport=%u output=%u\r\n",
+                         g_hdr.backBufferSRV ? 1u : 0u,
+                         g_hdr.width, g_hdr.height, fullViewport ? 1u : 0u,
+                         outputMatches ? 1u : 0u);
+            g_bloom.rejectionLogged = true;
+        }
+        restoreState(g_context, old);
+        tq::bloomhook::setSuppression(false);
+        return false;
+    }
+
+    // Fixed display-independent profile.  It is intentionally not derived
+    // from Titan Quest's sparsely used regional bloom records: the enhanced
+    // pass runs globally and the selected display mapper owns the final look.
+    const float threshold = 1.0f;
+    const float knee = 0.25f;
+    const float strength = g_options.bloomStrength;
+    const float saturation = 1.0f;
+    BloomConstants constants = {};
+    constants.threshold = threshold;
+    constants.knee = knee;
+    constants.invRange = 1.0f;
+    constants.saturation = saturation;
+    constants.strength = strength;
+    constants.scatter = 0.65f;
+
+    bool wasInside = g_inside;
+    g_inside = true;
+    BloomTiming* timing = beginBloomTiming(g_context);
+    ID3D11ShaderResourceView* nullViews[3] = {};
+    g_psSetShaderResources(g_context, 0, 3, nullViews);
+    g_omSetRenderTargets(g_context, 0, nullptr, nullptr);
+    g_context->IASetInputLayout(nullptr);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->VSSetShader(g_hdr.fullscreenVS, nullptr, 0);
+    g_context->GSSetShader(nullptr, nullptr, 0);
+    g_context->HSSetShader(nullptr, nullptr, 0);
+    g_context->DSSetShader(nullptr, nullptr, 0);
+    g_context->PSSetConstantBuffers(0, 1, &g_bloom.constants);
+    g_context->PSSetSamplers(0, 1, &g_bloom.sampler);
+    g_context->OMSetDepthStencilState(g_bloom.depth, 0);
+    g_context->RSSetState(g_bloom.raster);
+    g_context->OMSetBlendState(g_bloom.opaqueBlend, nullptr, 0xffffffff);
+
+    updateBloomConstants(g_context, constants, g_hdr.width, g_hdr.height);
+    setBloomViewport(g_context, g_bloom.width, g_bloom.height);
+    g_omSetRenderTargets(g_context, 1, &g_bloom.downRTV[0], nullptr);
+    g_psSetShaderResources(g_context, 0, 1, &g_hdr.backBufferSRV);
+    g_psSetShader(g_context, g_bloom.extractPS, nullptr, 0);
+    g_draw(g_context, 3, 0);
+
+    for (UINT level = 1; level < g_bloom.levels; ++level) {
+        g_psSetShaderResources(g_context, 0, 3, nullViews);
+        UINT sourceWidth = bloomMipSize(g_bloom.width, level - 1);
+        UINT sourceHeight = bloomMipSize(g_bloom.height, level - 1);
+        updateBloomConstants(g_context, constants, sourceWidth, sourceHeight);
+        setBloomViewport(g_context, bloomMipSize(g_bloom.width, level),
+                         bloomMipSize(g_bloom.height, level));
+        g_omSetRenderTargets(g_context, 1, &g_bloom.downRTV[level], nullptr);
+        g_psSetShaderResources(g_context, 0, 1, &g_bloom.downSRV[level - 1]);
+        g_psSetShader(g_context, g_bloom.downsamplePS, nullptr, 0);
+        g_draw(g_context, 3, 0);
+    }
+
+    for (int level = (int)g_bloom.levels - 2; level >= 0; --level) {
+        g_psSetShaderResources(g_context, 0, 3, nullViews);
+        UINT lowerWidth = bloomMipSize(g_bloom.width, level + 1);
+        UINT lowerHeight = bloomMipSize(g_bloom.height, level + 1);
+        updateBloomConstants(g_context, constants, lowerWidth, lowerHeight);
+        setBloomViewport(g_context, bloomMipSize(g_bloom.width, level),
+                         bloomMipSize(g_bloom.height, level));
+        g_omSetRenderTargets(g_context, 1, &g_bloom.upRTV[level], nullptr);
+        ID3D11ShaderResourceView* inputs[2] = {
+            level == (int)g_bloom.levels - 2
+                ? g_bloom.downSRV[level + 1] : g_bloom.upSRV[level + 1],
+            g_bloom.downSRV[level]
+        };
+        g_psSetShaderResources(g_context, 0, 2, inputs);
+        g_psSetShader(g_context, g_bloom.upsamplePS, nullptr, 0);
+        g_draw(g_context, 3, 0);
+    }
+
+    g_psSetShaderResources(g_context, 0, 3, nullViews);
+    updateBloomConstants(g_context, constants, g_bloom.width, g_bloom.height);
+    setBloomViewport(g_context, g_hdr.width, g_hdr.height);
+    g_omSetRenderTargets(g_context, 1, &g_hdr.backBufferRTV, nullptr);
+    g_context->OMSetBlendState(g_bloom.additiveBlend, nullptr, 0xffffffff);
+    ID3D11ShaderResourceView* finalBloom = g_bloom.levels > 1
+                                        ? g_bloom.upSRV[0] : g_bloom.downSRV[0];
+    g_psSetShaderResources(g_context, 0, 1, &finalBloom);
+    g_psSetShader(g_context, g_bloom.compositePS, nullptr, 0);
+    g_draw(g_context, 3, 0);
+    g_psSetShaderResources(g_context, 0, 3, nullViews);
+
+    endBloomTiming(g_context, timing);
+    restoreState(g_context, old);
+    g_inside = wasInside;
+
+    ++g_bloom.calls;
+    g_bloom.freshForPresent = true;
+    tq::bloomhook::setSuppression(true);
+    if (runtime.settings.debug
+        && (g_bloom.calls <= 3 || !(g_bloom.calls % 300)))
+        tq::hdr::log("Enhanced bloom draw: call=%u target=%u threshold=%.3f "
+                     "knee=%.3f strength=%.3f levels=%u\r\n",
+                     g_bloom.calls, 1000u, threshold, knee, strength,
+                     g_bloom.levels);
+    return true;
 }
 
 void releaseFlipOutputTargets() {
@@ -1697,6 +2222,15 @@ bool prepareHdrPresentation(IDXGISwapChain* swapChain) {
                 g_device, g_hdr.presentCopy, nullptr, &g_hdr.presentCopySRV))
            && SUCCEEDED(g_createRenderTargetView(
                 g_device, backBuffer, nullptr, &g_hdr.backBufferRTV));
+    if (ok && g_options.bloom == BloomEnhanced) {
+        HRESULT bloomSource = g_createShaderResourceView(
+            g_device, backBuffer, nullptr, &g_hdr.backBufferSRV);
+        if (FAILED(bloomSource)) {
+            release(g_hdr.backBufferSRV);
+            tq::hdr::log("Enhanced bloom back-buffer view unavailable: hr=0x%08x\r\n",
+                         (unsigned)bloomSource);
+        }
+    }
     if (ok) { g_hdr.width = desc.Width; g_hdr.height = desc.Height; }
     else releaseHdrSizeResources();
     tq::hdr::log("FP16 presentation resources: %ux%u format=%u ready=%u\r\n",
@@ -1810,6 +2344,7 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
         return false;
     SavedState old;
     saveState(g_context, old);
+    g_bloom.freshForPresent = false;
     rememberFlipOutputTargets(old, backBuffer);
     ID3D11RenderTargetView* noTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     ID3D11ShaderResourceView* noSrvs[3] = {};
@@ -1852,8 +2387,8 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     g_context->PSSetSamplers(0, 1, &g_hdr.sampler);
     g_context->PSSetShaderResources(0, 1, &g_hdr.presentCopySRV);
     g_draw(g_context, 3, 0);
-    g_inside = false;
     g_context->PSSetShaderResources(0, 3, noSrvs);
+    g_inside = false;
 #ifdef TQ_DIAGNOSTIC
     if (probe) {
         g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
@@ -2054,11 +2589,14 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
         g_inside = true; bool done = runSmaa(context, false, count, start, 0); g_inside = false;
         if (done) return;
     }
+    bool bloomAfterDraw = !g_inside && context == g_context && g_gammaBound
+                       && g_globalBloomEnabled && !g_bloom.freshForPresent;
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
     g_draw(context, count, start);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
+    if (bloomAfterDraw) renderEnhancedBloom();
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
@@ -2076,11 +2614,14 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         g_inside = true; bool done = runSmaa(context, true, count, start, base); g_inside = false;
         if (done) return;
     }
+    bool bloomAfterDraw = !g_inside && context == g_context && g_gammaBound
+                       && g_globalBloomEnabled && !g_bloom.freshForPresent;
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
     g_drawIndexed(context, count, start, base);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
+    if (bloomAfterDraw) renderEnhancedBloom();
 }
 
 }  // namespace
@@ -2096,9 +2637,18 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         return;
     }
     readOptions();
-    tq::hdr::log("Visual options: smaa=%u shadows=%u streaming=%u anisotropy=%u\r\n",
+    g_bloomToggleKeyDown = false;
+    g_bloomEnhancedRuntime = true;
+    const char* bloomName = g_options.bloom == BloomOriginal ? "original"
+                          : g_options.bloom == BloomOff ? "off" : "enhanced";
+    tq::hdr::log("Visual options: smaa=%u shadows=%u streaming=%u bloom=%s "
+                 "bloomStrength=%.3f bloomToggle=%u "
+                 "anisotropy=%u\r\n",
                  g_options.smaa ? 1u : 0u, g_options.shadows ? 1u : 0u,
-                 g_options.streaming ? 1u : 0u, g_options.anisotropy);
+                 g_options.streaming ? 1u : 0u, bloomName,
+                 g_options.bloomStrength,
+                 g_options.bloomToggle ? 1u : 0u,
+                 g_options.anisotropy);
     if (!context) device->GetImmediateContext(&context); else context->AddRef();
     if (!context) {
         tq::hdr::log("Visual install failed: no immediate context\r\n");
@@ -2107,6 +2657,11 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     }
     const tq::hdr::Runtime& hdrRuntime = tq::hdr::runtime();
     bool toneEnabled = hdrRuntime.settings.toneMap != tq::hdr::ToneOriginal;
+    bool enhancedBloomCapable = g_options.bloom == BloomEnhanced
+                             && toneEnabled && hdrRuntime.fp16Active;
+    bool nativeBloomControl = g_options.bloom == BloomOff
+                           || enhancedBloomCapable;
+    g_globalBloomEnabled = enhancedBloomCapable;
     tq::hdr::log("Visual install: tone=%u hdrRequested=%u fp16=%u hdr=%u\r\n",
                  (unsigned)hdrRuntime.settings.toneMap,
                  hdrRuntime.settings.requestHdr ? 1u : 0u,
@@ -2167,10 +2722,15 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&dv[9], (void*)&hookCreateRenderTargetView,
                         (void**)&g_createRenderTargetView);
     else g_createRenderTargetView = (CreateRenderTargetViewFn)dv[9];
-    if (g_options.smaa || toneEnabled) {
+    if (g_options.smaa || toneEnabled)
         ok &= patchSlot(&cv[9], (void*)&hookPSSetShader, (void**)&g_psSetShader);
+    else g_psSetShader = (PSSetShaderFn)cv[9];
+    if (g_options.smaa || toneEnabled || nativeBloomControl) {
         ok &= patchSlot(&cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
         ok &= patchSlot(&cv[13], (void*)&hookDraw, (void**)&g_draw);
+    } else {
+        g_drawIndexed = (DrawIndexedFn)cv[12];
+        g_draw = (DrawFn)cv[13];
     }
     if (g_options.streaming)
         ok &= patchSlot(&cv[8], (void*)&hookPSSetShaderResources,
@@ -2201,11 +2761,34 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
 #endif
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
+    if (ok && nativeBloomControl) {
+        HMODULE engine = GetModuleHandleW(L"Engine.dll");
+        tq::bloomhook::HotBlurFn original = engine
+            ? (tq::bloomhook::HotBlurFn)(void*)GetProcAddress(
+                engine, "?HotBlurFrameBuffer@GraphicsCanvas@GAME@@QAEXIIMMM@Z")
+            : nullptr;
+        bool bloomHook = tq::bloomhook::install(engine, original);
+        bool suppress = false;
+        if (bloomHook) {
+            // Enhanced mode proves that its GPU path can render before it
+            // suppresses native bloom.  bloom=off is the only immediate no-op.
+            suppress = g_options.bloom == BloomOff;
+            tq::bloomhook::setSuppression(suppress);
+        } else {
+            g_globalBloomEnabled = false;
+        }
+        tq::hdr::log("Native bloom control: ready=%u engine=%p original=%p "
+                     "suppressed=%u global=%u\r\n",
+                     bloomHook ? 1u : 0u, engine, (void*)original,
+                     suppress ? 1u : 0u, g_globalBloomEnabled ? 1u : 0u);
+    }
     if (ok && (g_options.smaa || toneEnabled)) {
         startProgramBuild(device);
         tq::hdr::log("Shader program build requested\r\n");
     }
     if (!ok) {
+        tq::bloomhook::shutdown();
+        g_globalBloomEnabled = false;
         restoreSlots();
         g_context->Release();
         g_context = nullptr;
@@ -2293,6 +2876,10 @@ void shutdown() {
     tq::streaming::setPostPresentCallback(nullptr);
     tq::streaming::setPreResizeCallback(nullptr);
     tq::streaming::setResizeCallback(nullptr);
+    tq::bloomhook::shutdown();
+    g_globalBloomEnabled = false;
+    g_bloomToggleKeyDown = false;
+    g_bloomEnhancedRuntime = true;
     restoreSlots();
     if (g_uploadLockReady) {
         EnterCriticalSection(&g_uploadLock);
