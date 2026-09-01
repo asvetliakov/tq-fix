@@ -30,11 +30,16 @@ bool enhanceShadowPcf(const void* bytecode, SIZE_T bytecodeSize, PatchResult* ou
 // projection softens edges in world space regardless of map resolution. Pass
 // the inverse coverage ratio to hold softness constant.
 //
+// `biasScale` scales the receiver's depth bias, which is normalised to the
+// fitted depth range and so grows in world units as the split widens,
+// detaching shadows from their casters.
+//
 // `corners` moves the taps from the native axis cross onto the corners of a
 // 3x3 footprint, covering an area rather than a cross for the same four
 // texture instructions.
 bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
-                              float factor, bool corners, PatchResult* out);
+                              float factor, float biasScale, bool corners,
+                              PatchResult* out);
 void release(PatchResult* result);
 
 }  // namespace dxbc

@@ -1086,15 +1086,16 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
     // placement plus an offset scale that keeps world-space softness constant
     // as the shadow split widens.
     if (!enhanced && g_options.shadows) {
-        if (tq::dxbc::tuneDeferredShadowFilter(bytecode, size,
-                                               tq::shadow::blurCompensation(),
-                                               tq::shadow::cornerFilterEnabled(),
-                                               &patch)) {
+        const float offsets = tq::shadow::blurCompensation();
+        const float bias = tq::shadow::biasCompensation();
+        const bool corners = tq::shadow::cornerFilterEnabled();
+        if (tq::dxbc::tuneDeferredShadowFilter(bytecode, size, offsets, bias,
+                                               corners, &patch)) {
             enhanced = true;
-            tq::hdr::log("Deferred shadow filter: taps=%s offsetScale=%.3f\r\n",
-                         tq::shadow::cornerFilterEnabled() ? "3x3 corners"
-                                                           : "native cross",
-                         tq::shadow::blurCompensation());
+            tq::hdr::log("Deferred shadow filter: taps=%s offsetScale=%.3f"
+                         " biasScale=%.3f\r\n",
+                         corners ? "3x3 corners" : "native cross",
+                         offsets, bias);
         }
     }
     HRESULT hr = g_createPixelShader(device, enhanced ? patch.data : bytecode,

@@ -33,6 +33,8 @@ const uint32_t kTempDestAll = 0x001000f2u;
 const uint32_t kTempSourceXyzw = 0x00100e46u;
 const uint32_t kInputSourceXyzw = 0x00101e46u;
 const uint32_t kImmediate32Vector = 0x00004002u;
+const uint32_t kImmediate32Scalar = 0x00004001u;
+const uint32_t kOpcodeAdd = 0u;
 
 uint32_t read32(const BYTE* p) {
     uint32_t v;
@@ -333,9 +335,11 @@ bool enhanceShadowPcf(const void* bytecode, SIZE_T bytecodeSize, PatchResult* ou
 }
 
 bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
-                              float factor, bool corners, PatchResult* out) {
+                              float factor, float biasScale, bool corners,
+                              PatchResult* out) {
     if (out) memset(out, 0, sizeof(*out));
-    if (!out || !bytecode || bytecodeSize < 36 || !(factor > 0.0f) || factor > 1.0f)
+    if (!out || !bytecode || bytecodeSize < 36 || !(factor > 0.0f) || factor > 1.0f
+        || !(biasScale > 0.0f) || biasScale > 1.0f)
         return false;
     const BYTE* src = (const BYTE*)bytecode;
     if (read32(src) != kDxbc || read32(src + 24) != bytecodeSize) return false;
@@ -362,10 +366,19 @@ bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
     // The four taps come from two MADs whose immediate vectors hold only 0 and
     // +/-0.5 and whose first source is the bluriness constant's W component.
     unsigned horizontal = ~0u, vertical = ~0u, found = 0;
+    unsigned biasAt = ~0u, biasCount = 0;
     for (unsigned at = 2; at < words;) {
         unsigned count = instructionLength(code + at, words - at);
         if (!count) return false;
         const uint32_t* p = code + at;
+        // The receiver depth bias: the only ADD of a small negative scalar.
+        // The other immediates in this shader are +/-1, +/-0.5 or vectors.
+        if ((p[0] & kOpcodeMask) == kOpcodeAdd && count == 7
+            && p[5] == kImmediate32Scalar) {
+            float value = 0.0f;
+            memcpy(&value, &p[6], sizeof(value));
+            if (value < 0.0f && value > -0.05f) { biasAt = at; ++biasCount; }
+        }
         if ((p[0] & kOpcodeMask) == kOpcodeMad && count == 13
             && (p[3] & kOperandTypeMask) == kOperandConstantBuffer
             && p[6] == kImmediate32Vector) {
@@ -386,7 +399,7 @@ bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
     }
     // The same tap shape appears in the legacy per-material receivers and in
     // the point-light one, whose projection was not widened and must not move.
-    if (found != 2 || horizontal == ~0u || vertical == ~0u
+    if (found != 2 || horizontal == ~0u || vertical == ~0u || biasCount != 1
         || !isDeferredShadowReceiver(code, words))
         return false;
 
@@ -404,6 +417,12 @@ bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
             memcpy(&bits, &value, sizeof(bits));
             patched[target[i] + 7 + c] = bits;
         }
+    // Scaling the bias with the fitted depth range keeps shadows attached to
+    // their casters; a wider split otherwise pushes them off in world units.
+    float bias = 0.0f;
+    memcpy(&bias, &patched[biasAt + 6], sizeof(bias));
+    bias *= biasScale;
+    memcpy(&patched[biasAt + 6], &bias, sizeof(bias));
     memset(dst + 4, 0, 16);
     out->data = dst; out->size = bytecodeSize;
     return true;

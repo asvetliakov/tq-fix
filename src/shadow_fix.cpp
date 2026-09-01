@@ -19,7 +19,12 @@ const DWORD kNativeCropRva = 0x002f9550u;
 // shadow map is enlarged to match. Coverage scales as split^1.90.
 const float kNativeSplit = 0.325f;
 const float kDefaultSplit = 0.45f;
+// Both fitted from the same two measured projections (0.325 and 1.05). The
+// box does not grow uniformly: horizontally it scales as split^1.90 while its
+// depth range scales as split^1.12. Two points is a fit, not a law -- both
+// factors are overridable.
 const float kCoverageExponent = 1.90f;
+const float kDepthExponent = 1.12f;
 
 struct CropReference {
     DWORD rva;
@@ -196,9 +201,23 @@ void install(HMODULE engineModule) {
 }
 
 float blurCompensation() {
-    float split = configuredSplit();
-    float automatic = powf(kNativeSplit / split, kCoverageExponent);
+    float automatic = powf(kNativeSplit / configuredSplit(), kCoverageExponent);
+    // Corner taps sit at (+/-r, +/-r), so they reach sqrt(2) further from the
+    // centre than the native cross at the same offset. Pull them in to keep
+    // the filter footprint the same size whichever placement is used.
+    if (cornerFilterEnabled()) automatic /= 1.41421356f;
     float configured = readFloat(L"shadow_blur_scale", automatic, 0.05f, 1.0f);
+    if (!_finite(configured) || configured <= 0.0f) return 1.0f;
+    return configured > 1.0f ? 1.0f : configured;
+}
+
+float biasCompensation() {
+    // The receiver's depth bias is normalised to the fitted depth range, so a
+    // wider split scales it up in world units and shadows detach from their
+    // casters. The depth axis grows more slowly than the horizontal one --
+    // measured at split^1.12 against split^1.90 -- so it needs its own factor.
+    float automatic = powf(kNativeSplit / configuredSplit(), kDepthExponent);
+    float configured = readFloat(L"shadow_bias_scale", automatic, 0.05f, 1.0f);
     if (!_finite(configured) || configured <= 0.0f) return 1.0f;
     return configured > 1.0f ? 1.0f : configured;
 }

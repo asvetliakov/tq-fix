@@ -851,7 +851,7 @@ int main(int argc, char** argv) {
               "read the captured deferred shadow receiver");
         tq::dxbc::PatchResult tuned = {};
         bool retuned = deferredBytes && tq::dxbc::tuneDeferredShadowFilter(
-            deferredBytes, (SIZE_T)deferredSize, 0.40f, true, &tuned);
+            deferredBytes, (SIZE_T)deferredSize, 0.38f, 0.695f, true, &tuned);
         check(retuned && tuned.size == (SIZE_T)deferredSize,
               "retune the deferred receiver's PCF taps in place");
         if (retuned && device) {
@@ -866,13 +866,18 @@ int main(int argc, char** argv) {
 
         tq::dxbc::PatchResult widened = {};
         check(deferredBytes && !tq::dxbc::tuneDeferredShadowFilter(
-                  deferredBytes, (SIZE_T)deferredSize, 1.5f, true, &widened),
+                  deferredBytes, (SIZE_T)deferredSize, 1.5f, 1.0f, true, &widened),
               "refuse an offset scale that would widen the blur");
+        tq::dxbc::PatchResult loosened = {};
+        check(deferredBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  deferredBytes, (SIZE_T)deferredSize, 0.38f, 1.5f, true, &loosened),
+              "refuse a bias scale that would loosen the depth test");
+        tq::dxbc::release(&loosened);
         tq::dxbc::release(&widened);
 
         tq::dxbc::PatchResult legacyTuned = {};
         check(shadowBytes && !tq::dxbc::tuneDeferredShadowFilter(
-                  shadowBytes, (SIZE_T)shadowSize, 0.40f, true, &legacyTuned),
+                  shadowBytes, (SIZE_T)shadowSize, 0.38f, 0.695f, true, &legacyTuned),
               "leave a per-material receiver's taps untouched");
         tq::dxbc::release(&legacyTuned);
         free(deferredBytes);

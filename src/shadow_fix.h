@@ -27,6 +27,11 @@ void shutdown();
 // change. Reads configuration directly and is safe to call before install().
 float blurCompensation();
 
+// The receiver's depth bias is normalised to the fitted depth range, so a
+// wider split scales it up in world units and detaches shadows from their
+// casters. Returns the factor that holds the bias at its native world size.
+float biasCompensation();
+
 // Whether the receiver's four taps should sit on the corners of a 3x3
 // footprint instead of the native axis cross, covering an area rather than a
 // cross for the same four texture instructions.
