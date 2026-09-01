@@ -12,9 +12,8 @@ typedef HRESULT (__thiscall* RendererPresentFn)(void*, void*);
 typedef HRESULT (WINAPI* ResizeBuffersFn)(IDXGISwapChain*, UINT, UINT, UINT,
                                           DXGI_FORMAT, UINT);
 
-// Verified against the Steam and GOG 2022 renderer. Both distributions carry
-// the same PE timestamp, image size, wrapper bytes, and renderer vtable slot.
-const DWORD kRendererTimestamp = 0x62da9e96;
+// Verified against the Steam and GOG 2022 renderer. Validate the executable
+// layout and exact wrapper instructions, not linker timestamp metadata.
 const DWORD kRendererImageSize = 0x192000;
 const DWORD kRendererPresentRva = 0x61190;
 const DWORD kRendererPresentSlotRva = 0x8625c;
@@ -113,7 +112,7 @@ bool installRenderer(HMODULE renderer) {
         nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
     bool identity = nt && readable(nt) && nt->Signature == IMAGE_NT_SIGNATURE
                  && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_I386
-                 && nt->FileHeader.TimeDateStamp == kRendererTimestamp
+                 && nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC
                  && nt->OptionalHeader.SizeOfImage == kRendererImageSize;
     BYTE* original = identity ? base + kRendererPresentRva : nullptr;
     void** slot = identity ? (void**)(base + kRendererPresentSlotRva) : nullptr;

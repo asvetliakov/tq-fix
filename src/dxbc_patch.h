@@ -19,6 +19,22 @@ bool clampBoneIndices(const void* bytecode, SIZE_T bytecodeSize, PatchResult* ou
 // 3x3 PCF footprint. The comparison-linear sampler supplies the interpolated
 // sub-taps, so this widens coverage without adding five texture instructions.
 bool enhanceShadowPcf(const void* bytecode, SIZE_T bytecodeSize, PatchResult* out);
+
+// Retunes the four PCF taps of the deferred screen-space shadow receiver, and
+// only that shader. Titan Quest applies directional shadows in one such pass
+// rather than per material; the per-material receivers above and the
+// point-light receiver share the same tap shape but must not be touched.
+//
+// `factor` scales the tap offsets. An offset is a UV distance, so the blur it
+// produces measures 0.5 * bluriness * world coverage -- widening the shadow
+// projection softens edges in world space regardless of map resolution. Pass
+// the inverse coverage ratio to hold softness constant.
+//
+// `corners` moves the taps from the native axis cross onto the corners of a
+// 3x3 footprint, covering an area rather than a cross for the same four
+// texture instructions.
+bool tuneDeferredShadowFilter(const void* bytecode, SIZE_T bytecodeSize,
+                              float factor, bool corners, PatchResult* out);
 void release(PatchResult* result);
 
 }  // namespace dxbc

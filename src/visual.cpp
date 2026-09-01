@@ -2,6 +2,7 @@
 #include "bloom_hook.h"
 #include "dxbc_patch.h"
 #include "hdr.h"
+#include "shadow_fix.h"
 #include "streaming.h"
 
 #include <d3dcompiler.h>
@@ -25,8 +26,9 @@ struct Options {
     BloomMode bloom;
     float bloomStrength;
     UINT anisotropy;
+    UINT shadowMapScale;
 };
-Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16};
+Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16, 4};
 bool g_bloomToggleKeyDown;
 bool g_bloomEnhancedRuntime = true;
 bool g_globalBloomEnabled;
@@ -186,10 +188,12 @@ bool upgradedIdentity(void* identity);
 struct ShadowTexture {
     void* identity;
     UINT originalWidth, originalHeight;
+    UINT scale;
 };
 ShadowTexture g_shadowTextures[16];
 unsigned g_shadowTextureCount;
 bool g_shadowBound;
+UINT g_shadowScale = 1;
 D3D11_VIEWPORT g_gameViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
 UINT g_gameViewportCount;
 D3D11_RECT g_gameScissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
@@ -349,6 +353,13 @@ void readOptions() {
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
+    // A wider shadow split spreads the map over more world, so the map has to
+    // grow with it to keep texel density. Powers of two only; the scale
+    // multiplies the square size the game asks for.
+    int shadowScale = GetPrivateProfileIntW(L"graphics", L"shadow_map_scale", 4, path);
+    g_options.shadowMapScale = shadowScale == 1 ? 1
+                             : shadowScale == 2 ? 2
+                             : shadowScale == 8 ? 8 : 4;
 }
 
 bool contains(const BYTE* bytes, SIZE_T size, const char* text) {
@@ -451,6 +462,15 @@ bool isShadowIdentity(void* identity) {
     for (unsigned i = 0; i < g_shadowTextureCount; ++i)
         if (g_shadowTextures[i].identity == identity) return true;
     return false;
+}
+
+// The game sizes its viewport and scissor for the map it asked for, so both
+// must be multiplied by whatever scale that texture was actually created at.
+UINT shadowScaleForIdentity(void* identity) {
+    for (unsigned i = 0; i < g_shadowTextureCount; ++i)
+        if (g_shadowTextures[i].identity == identity)
+            return g_shadowTextures[i].scale;
+    return 1;
 }
 
 bool shadowDepthDesc(const D3D11_TEXTURE2D_DESC* d) {
@@ -1028,17 +1048,30 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     if (progressivelyHandled) return progressive;
     if (!g_options.shadows || !shadowDepthDesc(desc) || initial)
         return createOriginalTexture(device, desc, initial, texture, caller);
+    // 8192 is the largest square this path allocates; a failed allocation
+    // steps down a scale rather than dropping to the unscaled map, since the
+    // largest sizes are a real amount of memory.
     D3D11_TEXTURE2D_DESC scaled = *desc;
-    if (scaled.Width <= 8192 / 2) { scaled.Width *= 2; scaled.Height *= 2; }
-    HRESULT hr = g_createTexture2D(device, &scaled, initial, texture);
+    UINT scale = g_options.shadowMapScale;
+    while (scale > 1 && desc->Width * scale > 8192) scale /= 2;
+    HRESULT hr = E_FAIL;
+    for (;; scale /= 2) {
+        scaled.Width = desc->Width * scale;
+        scaled.Height = desc->Height * scale;
+        hr = g_createTexture2D(device, &scaled, initial, texture);
+        if ((SUCCEEDED(hr) && texture && *texture) || scale == 1) break;
+    }
     if (FAILED(hr) || !texture || !*texture) {
         return createOriginalTexture(device, desc, initial, texture, caller);
     }
+    tq::hdr::log("Shadow map: %ux%u requested, %ux%u created (scale %u)\r\n",
+                 desc->Width, desc->Height, scaled.Width, scaled.Height, scale);
     if (g_shadowTextureCount < sizeof(g_shadowTextures) / sizeof(g_shadowTextures[0])) {
         ShadowTexture& s = g_shadowTextures[g_shadowTextureCount++];
         s.identity = identityOf(*texture);
         s.originalWidth = desc->Width;
         s.originalHeight = desc->Height;
+        s.scale = scale;
     }
     return hr;
 }
@@ -1047,6 +1080,23 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
                                      ID3D11ClassLinkage* linkage, ID3D11PixelShader** shader) {
     tq::dxbc::PatchResult patch = {};
     bool enhanced = g_options.shadows && tq::dxbc::enhanceShadowPcf(bytecode, size, &patch);
+    // enhanceShadowPcf matches the per-material receivers, which this renderer
+    // does not use for directional light. The deferred screen-space receiver
+    // carries the PCF that actually runs, and its taps need the same 3x3
+    // placement plus an offset scale that keeps world-space softness constant
+    // as the shadow split widens.
+    if (!enhanced && g_options.shadows) {
+        if (tq::dxbc::tuneDeferredShadowFilter(bytecode, size,
+                                               tq::shadow::blurCompensation(),
+                                               tq::shadow::cornerFilterEnabled(),
+                                               &patch)) {
+            enhanced = true;
+            tq::hdr::log("Deferred shadow filter: taps=%s offsetScale=%.3f\r\n",
+                         tq::shadow::cornerFilterEnabled() ? "3x3 corners"
+                                                           : "native cross",
+                         tq::shadow::blurCompensation());
+        }
+    }
     HRESULT hr = g_createPixelShader(device, enhanced ? patch.data : bytecode,
                                      enhanced ? patch.size : size, linkage, shader);
     if (enhanced && FAILED(hr)) hr = g_createPixelShader(device, bytecode, size, linkage, shader);
@@ -1160,9 +1210,12 @@ void applyViewports(ID3D11DeviceContext* context) {
     if (!g_gameViewportCount) return;
     D3D11_VIEWPORT v[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     memcpy(v, g_gameViewports, g_gameViewportCount * sizeof(*v));
-    if (g_shadowBound) for (UINT i = 0; i < g_gameViewportCount; ++i) {
-        v[i].TopLeftX *= 2.0f; v[i].TopLeftY *= 2.0f;
-        v[i].Width *= 2.0f; v[i].Height *= 2.0f;
+    if (g_shadowBound && g_shadowScale > 1) {
+        const float scale = (float)g_shadowScale;
+        for (UINT i = 0; i < g_gameViewportCount; ++i) {
+            v[i].TopLeftX *= scale; v[i].TopLeftY *= scale;
+            v[i].Width *= scale; v[i].Height *= scale;
+        }
     }
     g_rsSetViewports(context, g_gameViewportCount, v);
 }
@@ -1171,8 +1224,9 @@ void applyScissors(ID3D11DeviceContext* context) {
     if (!g_gameScissorCount) return;
     D3D11_RECT r[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     memcpy(r, g_gameScissors, g_gameScissorCount * sizeof(*r));
-    if (g_shadowBound) for (UINT i = 0; i < g_gameScissorCount; ++i) {
-        r[i].left *= 2; r[i].top *= 2; r[i].right *= 2; r[i].bottom *= 2;
+    if (g_shadowBound && g_shadowScale > 1) for (UINT i = 0; i < g_gameScissorCount; ++i) {
+        r[i].left *= (LONG)g_shadowScale; r[i].top *= (LONG)g_shadowScale;
+        r[i].right *= (LONG)g_shadowScale; r[i].bottom *= (LONG)g_shadowScale;
     }
     g_rsSetScissors(context, g_gameScissorCount, r);
 }
@@ -1190,6 +1244,14 @@ void WINAPI hookOMSetRenderTargets(ID3D11DeviceContext* context, UINT count,
     // resembling the shadow map. Its DSV is paired with a color target; the
     // actual shadow-map pass is depth-only. Never scale reflection viewports.
     g_shadowBound = g_options.shadows && !hasColorTarget && dsvIsShadow(dsv);
+    if (g_shadowBound) {
+        ID3D11Resource* resource = nullptr;
+        dsv->GetResource(&resource);
+        g_shadowScale = shadowScaleForIdentity(identityOf(resource));
+        release(resource);
+    } else {
+        g_shadowScale = 1;
+    }
     g_omSetRenderTargets(context, count, rtvs, dsv);
     if (was != g_shadowBound) { applyViewports(context); applyScissors(context); }
 }

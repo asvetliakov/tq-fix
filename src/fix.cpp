@@ -6,6 +6,7 @@
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
 #include "hdr.h"
+#include "shadow_fix.h"
 #include "streaming.h"
 #include "visual.h"
 
@@ -200,6 +201,9 @@ void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
     tq::hdr::log("Installing hooks: device=%p context=%p swapChain=%p\r\n",
                  device, context, swapChain);
     patchDevice(device);
+    // The directional shadow split is an Engine.dll constant redirect, so it
+    // is installed once the module is loaded and is independent of the device.
+    tq::shadow::install(GetModuleHandleW(L"Engine.dll"));
     if (device) tq::visual::install(device, context, swapChain);
     if (swapChain) tq::streaming::installSwapChain(swapChain);
     tq::hdr::log("Hook installation returned\r\n");
@@ -358,6 +362,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         if (g_stop) SetEvent(g_stop);
         if (g_done) WaitForSingleObject(g_done, 2000);
         tq::frustum::shutdown();
+        tq::shadow::shutdown();
         tq::visual::shutdown();
         restorePatches();
         tq::streaming::shutdown();

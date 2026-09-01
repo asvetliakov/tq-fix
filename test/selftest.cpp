@@ -5,16 +5,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "dxbc_patch.h"
 #include "bloom_hook.h"
 #include "frustum_fix.h"
 #include "hdr.h"
+#include "shadow_fix.h"
 #include "streaming.h"
 #include "visual.h"
 #include "bloom_shaders.inc"
 
 namespace {
+
+// Default shadow map scale; the tests exercise the shipped default.
+const UINT kShadowScale = 4;
 
 FILE* g_report;
 int   g_failures;
@@ -61,7 +66,10 @@ void testRendererPresentHook() {
     IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
     nt->Signature = IMAGE_NT_SIGNATURE;
     nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
-    nt->FileHeader.TimeDateStamp = 0x62da9e96;
+    // Timestamp is deliberately arbitrary: identical renderer code repackaged
+    // with different linker metadata must still be accepted.
+    nt->FileHeader.TimeDateStamp = 0xdeadbeefu;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
     nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
     static const BYTE presentCode[] = {
         0x8b, 0x51, 0x34, 0x33, 0xc0, 0x38, 0x81, 0xdb,
@@ -201,6 +209,68 @@ void testBloomShaders() {
     if (compiler) FreeLibrary(compiler);
 }
 
+void testShadowSplitRedirect() {
+    const SIZE_T imageSize = 0x0044b000u;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                      MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE);
+    check(image != nullptr, "allocate a synthetic Engine image");
+    if (!image) return;
+    memset(image, 0, imageSize);
+
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    // Timestamp is deliberately arbitrary: identical code repackaged with
+    // different linker metadata must still be accepted.
+    nt->FileHeader.TimeDateStamp = 0xdeadbeefu;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+
+    const struct { DWORD rva; BYTE reg, opcode; } references[] = {
+        {0x0018e40du, 0x15, 0x59}, {0x0018e42eu, 0x0d, 0x59},
+        {0x0018e446u, 0x05, 0x59}, {0x0018e503u, 0x15, 0x59},
+        {0x0018e51bu, 0x0d, 0x59}, {0x0018e533u, 0x05, 0x59},
+        {0x0018e5ddu, 0x15, 0x59}, {0x0018e609u, 0x0d, 0x59},
+        {0x0018e618u, 0x05, 0x59}, {0x0018e6fcu, 0x05, 0x10},
+        {0x0018f556u, 0x0d, 0x10},
+    };
+    const unsigned count = sizeof(references) / sizeof(references[0]);
+    uint32_t cropAddress = (uint32_t)(uintptr_t)(image + 0x002f9550u);
+    for (unsigned i = 0; i < count; ++i) {
+        BYTE* instruction = image + references[i].rva;
+        instruction[0] = 0xf3; instruction[1] = 0x0f;
+        instruction[2] = references[i].opcode;
+        instruction[3] = references[i].reg;
+        memcpy(instruction + 4, &cropAddress, sizeof(cropAddress));
+    }
+
+    check(tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "accept the audited Engine layout with a different PE timestamp");
+    check(tq::shadow::redirectCropRoundTripForTest((HMODULE)image),
+          "redirect and restore all eleven crop operands exactly");
+
+    image[references[6].rva + 3] ^= 1;
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject a near-match crop instruction");
+    image[references[6].rva + 3] ^= 1;
+
+    uint32_t wrong = cropAddress + 4;
+    memcpy(image + references[10].rva + 4, &wrong, sizeof(wrong));
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject a crop read pointing at an unexpected constant");
+    memcpy(image + references[10].rva + 4, &cropAddress, sizeof(cropAddress));
+
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize + 0x1000;
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject an Engine image of unexpected size");
+
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
 void* readFile(const char* path, long* size) {
     *size = 0;
     FILE* file = fopen(path, "rb");
@@ -237,6 +307,7 @@ int main(int argc, char** argv) {
     testBloomHook();
     testBloomExtraction();
     testBloomShaders();
+    testShadowSplitRedirect();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
     check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal
@@ -513,12 +584,15 @@ int main(int argc, char** argv) {
             textureResult = device->CreateTexture2D(&shadow, nullptr, &texture);
             memset(&actual, 0, sizeof(actual));
             if (texture) texture->GetDesc(&actual);
+            UINT expected = shadowSizes[i] * kShadowScale;
+            while (expected > 8192) expected /= 2;
             allShadowSizes &= SUCCEEDED(textureResult) && texture
-                           && actual.Width == shadowSizes[i] * 2
-                           && actual.Height == shadowSizes[i] * 2;
+                           && actual.Width == expected
+                           && actual.Height == expected;
             if (texture) texture->Release();
         }
-        check(allShadowSizes, "enhanced shadows double Low/Medium/High map dimensions");
+        check(allShadowSizes,
+              "enhanced shadows scale Low/Medium/High map dimensions");
 
         shadow.Width = shadow.Height = 512;
         shadow.Format = DXGI_FORMAT_R24G8_TYPELESS;
@@ -576,7 +650,9 @@ int main(int argc, char** argv) {
             context->OMSetRenderTargets(0, nullptr, passDSV);
             viewportCount = 1;
             context->RSGetViewports(&viewportCount, &observed);
-            check(viewportCount == 1 && observed.Width == 1024 && observed.Height == 1024,
+            check(viewportCount == 1
+                      && observed.Width == 512.0f * kShadowScale
+                      && observed.Height == 512.0f * kShadowScale,
                   "depth-only shadow passes receive the scaled viewport");
             context->OMSetRenderTargets(0, nullptr, nullptr);
         } else {
@@ -763,6 +839,43 @@ int main(int argc, char** argv) {
             if (receiver) receiver->Release();
         }
         tq::dxbc::release(&shadowPatch);
+
+        // The deferred screen-space receiver is the shader Titan Quest
+        // actually uses to apply directional shadows. Its taps must be
+        // retuned, and no other shader's may be: the per-material receivers
+        // and the point-light one share the tap shape but were not widened.
+        long deferredSize = 0;
+        void* deferredBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-deferred-shadow.dxbc", &deferredSize);
+        check(deferredBytes && deferredSize > 0,
+              "read the captured deferred shadow receiver");
+        tq::dxbc::PatchResult tuned = {};
+        bool retuned = deferredBytes && tq::dxbc::tuneDeferredShadowFilter(
+            deferredBytes, (SIZE_T)deferredSize, 0.40f, true, &tuned);
+        check(retuned && tuned.size == (SIZE_T)deferredSize,
+              "retune the deferred receiver's PCF taps in place");
+        if (retuned && device) {
+            ID3D11PixelShader* shader = nullptr;
+            HRESULT hr = device->CreatePixelShader(tuned.data, tuned.size,
+                                                   nullptr, &shader);
+            check(SUCCEEDED(hr) && shader,
+                  "DXMT accepts the retuned deferred receiver");
+            if (shader) shader->Release();
+        }
+        tq::dxbc::release(&tuned);
+
+        tq::dxbc::PatchResult widened = {};
+        check(deferredBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  deferredBytes, (SIZE_T)deferredSize, 1.5f, true, &widened),
+              "refuse an offset scale that would widen the blur");
+        tq::dxbc::release(&widened);
+
+        tq::dxbc::PatchResult legacyTuned = {};
+        check(shadowBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  shadowBytes, (SIZE_T)shadowSize, 0.40f, true, &legacyTuned),
+              "leave a per-material receiver's taps untouched");
+        tq::dxbc::release(&legacyTuned);
+        free(deferredBytes);
         free(shadowBytes);
     }
 
