@@ -1,0 +1,36 @@
+# RenderDirectional re-entrancy: measured near-cascade fit
+
+One run, alternating whether a second RenderDirectional pass ran before the
+near one. Same camera, same 0.325 crop, same native fit routine. Extracted
+from the runtime log; see findings.md.
+
+near fit: call=60 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=120 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=180 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=240 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=300 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=360 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=420 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=480 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=540 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=600 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=660 farPassRan=0 crop=0.3250 span=23.7 x 17.7
+near fit: call=720 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=780 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=840 farPassRan=1 crop=0.3250 span=8.4 x 16.0
+near fit: call=900 farPassRan=1 crop=0.3250 span=46.9 x 66.4
+near fit: call=960 farPassRan=0 crop=0.3250 span=128.2 x 77.8
+near fit: call=1020 farPassRan=0 crop=0.3250 span=128.2 x 77.7
+near fit: call=1080 farPassRan=0 crop=0.3250 span=127.6 x 78.2
+near fit: call=1140 farPassRan=0 crop=0.3250 span=126.9 x 78.5
+near fit: call=1200 farPassRan=1 crop=0.3250 span=47.8 x 63.2
+near fit: call=1260 farPassRan=1 crop=0.3250 span=47.8 x 63.1
+near fit: call=1320 farPassRan=1 crop=0.3250 span=47.8 x 63.0
+near fit: call=1380 farPassRan=1 crop=0.3250 span=47.8 x 63.0
+near fit: call=1440 farPassRan=0 crop=0.3250 span=126.7 x 78.4
+near fit: call=1500 farPassRan=0 crop=0.3250 span=126.7 x 78.4
+near fit: call=1560 farPassRan=0 crop=0.3250 span=126.7 x 78.3
+near fit: call=1620 farPassRan=0 crop=0.3250 span=126.8 x 78.3
+near fit: call=1680 farPassRan=1 crop=0.3250 span=47.7 x 63.0
+near fit: call=1740 farPassRan=1 crop=0.3250 span=47.7 x 62.9
+near fit: call=1800 farPassRan=1 crop=0.3250 span=47.7 x 62.9

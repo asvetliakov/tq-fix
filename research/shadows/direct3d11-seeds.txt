@@ -1,0 +1,18 @@
+# Entry points and distinctive renderer-backend names used to seed the
+# Direct3D11.dll call-graph closure.
+CreateRenderDevice
+DestroyRenderDevice
+CreateTextureFromDDS
+
+# Concrete RenderDevice vtable slots used directly by the native shadow pass:
+# render-target binding, size queries, viewport state, clears, and GPU markers.
+@0x10061600
+@0x100617c0
+@0x100613e0
+@0x100613d0
+@0x100610e0
+@0x10060fd0
+@0x10060fb0
+@0x10060f10
+@0x1005e700
+@0x1005e6d0
