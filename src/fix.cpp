@@ -5,6 +5,7 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "grass.h"
 #include "hdr.h"
 #include "shadow_fix.h"
 #include "streaming.h"
@@ -203,7 +204,12 @@ void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
     patchDevice(device);
     // The directional shadow split is an Engine.dll constant redirect, so it
     // is installed once the module is loaded and is independent of the device.
-    tq::shadow::install(GetModuleHandleW(L"Engine.dll"));
+    HMODULE engine = GetModuleHandleW(L"Engine.dll");
+    tq::shadow::install(engine);
+    // Terrain grass lives entirely in Engine.dll and never reaches the device,
+    // so it installs from the same handle. The detour is what lets a draw hook
+    // tell a grass draw from every other draw in the frame.
+    tq::grass::installFromModule(engine);
     if (device) tq::visual::install(device, context, swapChain);
     if (swapChain) tq::streaming::installSwapChain(swapChain);
     tq::hdr::log("Hook installation returned\r\n");
@@ -363,6 +369,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         if (g_done) WaitForSingleObject(g_done, 2000);
         tq::frustum::shutdown();
         tq::shadow::shutdown();
+        tq::grass::shutdown();
         tq::visual::shutdown();
         restorePatches();
         tq::streaming::shutdown();

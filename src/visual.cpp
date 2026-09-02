@@ -1,5 +1,6 @@
 #include "visual.h"
 #include "bloom_hook.h"
+#include "grass.h"
 #include "dxbc_patch.h"
 #include "hdr.h"
 #include "shadow_fix.h"
@@ -48,6 +49,11 @@ typedef HRESULT(WINAPI* CreateTexture2DFn)(ID3D11Device*, const D3D11_TEXTURE2D_
                                            const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
 typedef HRESULT(WINAPI* CreatePixelShaderFn)(ID3D11Device*, const void*, SIZE_T,
                                              ID3D11ClassLinkage*, ID3D11PixelShader**);
+typedef HRESULT(WINAPI* CreateBufferFn)(ID3D11Device*, const D3D11_BUFFER_DESC*,
+                                        const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
+typedef HRESULT(WINAPI* MapFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
+                               D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
+typedef void (WINAPI* UnmapFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 typedef HRESULT(WINAPI* CreateSamplerStateFn)(ID3D11Device*, const D3D11_SAMPLER_DESC*,
                                               ID3D11SamplerState**);
 typedef HRESULT(WINAPI* CreateShaderResourceViewFn)(ID3D11Device*, ID3D11Resource*,
@@ -83,6 +89,10 @@ typedef void(WINAPI* ResolveSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*
 CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
 CreateSamplerStateFn g_createSamplerState;
+CreateBufferFn       g_createBuffer;
+bool                 g_grassEnhanced;
+MapFn                g_map;
+UnmapFn              g_unmap;
 CreateShaderResourceViewFn g_createShaderResourceView;
 CreateRenderTargetViewFn g_createRenderTargetView;
 PSSetShaderFn g_psSetShader;
@@ -2680,6 +2690,59 @@ void WINAPI hookResolveSubresource(
 }
 #endif
 
+// Grass vertex streams are dynamic and refilled as terrain blocks stream in,
+// so the only place their contents exist on the CPU is between the game's own
+// Map and Unmap. Creation is watched to know which buffers those are.
+HRESULT WINAPI hookCreateBuffer(ID3D11Device* device, const D3D11_BUFFER_DESC* desc,
+                                const D3D11_SUBRESOURCE_DATA* initial,
+                                ID3D11Buffer** buffer) {
+    HRESULT result = g_createBuffer(device, desc, initial, buffer);
+    if (SUCCEEDED(result) && buffer && *buffer)
+        tq::grass::noteBufferCreated(*buffer, desc);
+    return result;
+}
+
+HRESULT WINAPI hookMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
+                       UINT subresource, D3D11_MAP type, UINT flags,
+                       D3D11_MAPPED_SUBRESOURCE* mapped) {
+    HRESULT result = g_map(context, resource, subresource, type, flags, mapped);
+    if (SUCCEEDED(result) && mapped)
+        tq::grass::noteMap(resource, subresource, mapped);
+    return result;
+}
+
+void WINAPI hookUnmap(ID3D11DeviceContext* context, ID3D11Resource* resource,
+                      UINT subresource) {
+    // Before the commit, so the driver receives the edited vertices rather
+    // than a second write to memory it has already taken.
+    tq::grass::noteUnmap(resource, subresource);
+    g_unmap(context, resource, subresource);
+    // And after it, so the rotated copy is uploaded by an ordinary device call
+    // of ours instead of from inside the driver's own unmap.
+    tq::grass::afterUnmap(context);
+}
+
+// The crossing card. Same index range, same everything, over a stream holding
+// the block's cards turned a quarter turn about their own centres -- so every
+// blade keeps its place and gains a second card through it.
+void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    ID3D11Buffer* bound = nullptr;
+    UINT stride = 0;
+    UINT offset = 0;
+    context->IAGetVertexBuffers(0, 1, &bound, &stride, &offset);
+    ID3D11Buffer* crossed = tq::grass::crossedBuffer(bound);
+    // No twin yet: this stream was adopted after the game filled it, so the
+    // contents have to be read back rather than waited for.
+    if (!crossed) tq::grass::seedFromDraw(context, bound);
+    if (crossed) {
+        context->IASetVertexBuffers(0, 1, &crossed, &stride, &offset);
+        // The original entry point: the hook has already run for this draw.
+        g_drawIndexed(context, count, start, base);
+        context->IASetVertexBuffers(0, 1, &bound, &stride, &offset);
+    }
+    release(bound);
+}
+
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
     if (!g_inside) tracePostProcessBinding(context);
 #ifdef TQ_DIAGNOSTIC
@@ -2726,6 +2789,8 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
     g_drawIndexed(context, count, start, base);
+    if (!g_inside && g_grassEnhanced && tq::grass::rendering())
+        drawGrassCross(context, count, start, base);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -2767,6 +2832,10 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
                              && toneEnabled && hdrRuntime.fp16Active;
     bool nativeBloomControl = g_options.bloom == BloomOff
                            || enhancedBloomCapable;
+    // Prepares the buffer table before the hooks that feed it are patched in.
+    tq::grass::installBuffers();
+    bool grassBufferHooks = tq::grass::enabled();
+    g_grassEnhanced = tq::grass::enabled();
     g_globalBloomEnabled = enhancedBloomCapable;
     tq::hdr::log("Visual install: tone=%u hdrRequested=%u fp16=%u hdr=%u\r\n",
                  (unsigned)hdrRuntime.settings.toneMap,
@@ -2814,6 +2883,11 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (g_options.anisotropy > 1)
         ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
     else g_createSamplerState = (CreateSamplerStateFn)dv[23];
+    if (grassBufferHooks) {
+        ok &= patchSlot(&dv[3], (void*)&hookCreateBuffer, (void**)&g_createBuffer);
+        ok &= patchSlot(&cv[14], (void*)&hookMap, (void**)&g_map);
+        ok &= patchSlot(&cv[15], (void*)&hookUnmap, (void**)&g_unmap);
+    }
     if (g_options.shadows || g_options.streaming || toneEnabled)
         ok &= patchSlot(&dv[5], (void*)&hookCreateTexture2D, (void**)&g_createTexture2D);
     else g_createTexture2D = (CreateTexture2DFn)dv[5];
@@ -2914,6 +2988,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
 }
 
 void onPresent(IDXGISwapChain* swapChain) {
+    tq::grass::onPresent(g_context);
     if (!InterlockedCompareExchange(&g_firstPresentLogged, 1, 0))
         tq::hdr::log("First Present reached: swapChain=%p fp16=%u hdr=%u\r\n",
                      swapChain, tq::hdr::runtime().fp16Active ? 1u : 0u,

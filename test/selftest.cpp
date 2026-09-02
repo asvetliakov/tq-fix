@@ -11,6 +11,7 @@
 #include "dxbc_patch.h"
 #include "bloom_hook.h"
 #include "frustum_fix.h"
+#include "grass.h"
 #include "hdr.h"
 #include "shadow_fix.h"
 #include "streaming.h"
@@ -165,6 +166,265 @@ void testBloomHook() {
     VirtualFree(image, 0, MEM_RELEASE);
 }
 
+// The grass probe writes into Engine.dll's own code, so the parts worth
+// testing without the game are the ones that can corrupt it: that the exact
+// prologue is required, that the trampoline still reaches the body, that
+// suppression is the only thing that stops it, and that every byte comes back.
+LONG g_grassRenderBody;
+
+void emitAbsoluteIncrement(BYTE* code, const void* counter) {
+    code[0] = 0xff;  // inc dword ptr [imm32]
+    code[1] = 0x05;
+    uint32_t address = (uint32_t)(uintptr_t)counter;
+    memcpy(code + 2, &address, sizeof(address));
+}
+
+void testGrassProbe() {
+    const SIZE_T imageSize = 0x400000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                      MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest Engine image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    memcpy(section->Name, ".text", 5);
+    section->VirtualAddress = 0x1000;
+    section->Misc.VirtualSize = 0x2aa69c;
+
+    // void __thiscall RenderGrass(Name&, Canvas&, SceneRenderer&, Pass&)
+    BYTE* render = image + 0x23afc0;
+    BYTE renderBody[] = {
+        0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,  // validated prologue
+        0xff, 0x05, 0, 0, 0, 0,              // inc [g_grassRenderBody]
+        0x8b, 0xe5, 0x5d, 0xc2, 0x10, 0x00   // mov esp,ebp; pop ebp; ret 0x10
+    };
+    emitAbsoluteIncrement(renderBody + 6, &g_grassRenderBody);
+    memcpy(render, renderBody, sizeof(renderBody));
+
+    tq::grass::Exports exports = {};
+    exports.renderGrassRT = render;
+    bool hooked = tq::grass::install((HMODULE)image, exports);
+    check(hooked && tq::grass::installed()
+          && render[0] == 0x68 && render[5] == 0xc3,
+          "detour the exported grass render entry with one absolute branch");
+
+    typedef void (__fastcall* RenderFn)(void*, void*, const void*, void*,
+                                        const void*, const void*);
+    RenderFn callRender = (RenderFn)(void*)render;
+
+    // The detour exists to report that a grass draw is on the stack, and it
+    // must still reach the body: this is the game's own rendering, not ours.
+    g_grassRenderBody = 0;
+    check(!tq::grass::rendering(), "report no grass draw outside RenderGrass");
+    callRender(image, nullptr, image, image, image, image);
+    check(g_grassRenderBody == 1,
+          "reach the grass render body through the trampoline");
+    check(!tq::grass::rendering(), "stop reporting once RenderGrass returns");
+
+    tq::grass::shutdown();
+    check(!tq::grass::installed()
+          && !memcmp(render, renderBody, sizeof(renderBody)),
+          "restore the grass render entry during shutdown");
+
+    render[0] ^= 1;
+    tq::grass::Exports broken = {};
+    broken.renderGrassRT = render;
+    check(!tq::grass::install((HMODULE)image, broken) && !tq::grass::installed(),
+          "reject a near-match grass prologue without patching it");
+    tq::grass::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+// The captured first grass plane, verbatim from the bound stream during a
+// live draw: position, normal, uv per vertex, wound top-left, top-right,
+// bottom-right, bottom-left. Using the real bytes means the fingerprint is
+// tested against what the game actually writes rather than against an idea of
+// it.
+const uint32_t kCapturedPlane[32] = {
+    0x43139465, 0x41c0d49a, 0x41fa311f, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x00000000, 0x00000000,
+    0x431489d5, 0x41c0d49a, 0x42000629, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x3f000000, 0x00000000,
+    0x431489d5, 0x41b7315d, 0x42000629, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x3f000000, 0x3f800000,
+    0x43139465, 0x41b7315d, 0x41fa311f, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x00000000, 0x3f800000
+};
+
+void loadPlane(float plane[32]) {
+    memcpy(plane, kCapturedPlane, sizeof(kCapturedPlane));
+}
+
+float kCapturedPlaneFloat(unsigned index) {
+    float value;
+    memcpy(&value, kCapturedPlane + index, sizeof(value));
+    return value;
+}
+
+void testGrassCrossed() {
+    float plane[32];
+    loadPlane(plane);
+
+    // The fingerprint, against bytes captured from the running game rather
+    // than against an idea of what a card looks like. Everything else here
+    // depends on this recognising a real card and nothing else.
+    check(tq::grass::isGrassPlane(plane),
+          "recognise a captured grass card by its exact shape");
+    check(!memcmp(plane + 3, plane + 11, 3 * sizeof(float))
+          && !memcmp(plane + 3, plane + 19, 3 * sizeof(float))
+          && !memcmp(plane + 3, plane + 27, 3 * sizeof(float)),
+          "confirm the captured card shares one normal across four vertices");
+
+    const float* v0 = plane;
+    const float* v1 = plane + 8;
+    const float* v2 = plane + 16;
+    const float* v3 = plane + 24;
+
+    const double cx = ((double)v0[0] + v1[0]) * 0.5;
+    const double cz = ((double)v0[2] + v1[2]) * 0.5;
+    const double wx = (double)v1[0] - v0[0];
+    const double wz = (double)v1[2] - v0[2];
+    const double width = sqrt(wx * wx + wz * wz);
+    const double top = v0[1];
+    const double bottom = v2[1];
+
+    check(tq::grass::rotatePlane(plane), "turn a captured card a quarter turn");
+
+    // A crossing card is only a crossing card if it still stands where the
+    // original stood: same centre, same size, same height.
+    const double cx2 = ((double)v0[0] + v1[0]) * 0.5;
+    const double cz2 = ((double)v0[2] + v1[2]) * 0.5;
+    check(fabs(cx2 - cx) < 1e-4 && fabs(cz2 - cz) < 1e-4,
+          "keep the turned card on the original card's centre");
+
+    const double wx2 = (double)v1[0] - v0[0];
+    const double wz2 = (double)v1[2] - v0[2];
+    const double width2 = sqrt(wx2 * wx2 + wz2 * wz2);
+    check(fabs(width2 - width) < 1e-3, "keep the turned card's width");
+    check(v0[1] == top && v1[1] == top && v2[1] == bottom && v3[1] == bottom,
+          "keep the turned card's height untouched");
+
+    // Perpendicular is the whole point: a card turned by anything less would
+    // still vanish edge-on at the same angle the original does.
+    const double along = (wx * wx2 + wz * wz2) / (width * width2);
+    check(fabs(along) < 1e-4, "turn the card perpendicular to the original");
+
+    check(tq::grass::isGrassPlane(plane),
+          "leave the turned card recognisable as a grass card");
+
+    // Untouched apart from position: the copy shares the original's texture
+    // column and its normal, so only the geometry differs.
+    check(!memcmp(plane + 3, kCapturedPlane + 3, 3 * sizeof(float))
+          && !memcmp(plane + 6, kCapturedPlane + 6, 2 * sizeof(float))
+          && !memcmp(plane + 30, kCapturedPlane + 30, 2 * sizeof(float)),
+          "leave the turned card's normal and uv exactly as they were");
+
+    // Two quarter turns are a half turn, which is the same card seen from the
+    // other side -- so the operation cannot drift the geometry.
+    check(tq::grass::rotatePlane(plane), "turn a card that has already turned");
+    check(fabs((double)v0[0] - kCapturedPlaneFloat(8)) < 1e-3
+          && fabs((double)v1[0] - kCapturedPlaneFloat(0)) < 1e-3,
+          "return a twice-turned card to the original corners, swapped");
+
+    float zero[32];
+    memset(zero, 0, sizeof(zero));
+    check(!tq::grass::rotatePlane(zero), "leave an unwritten buffer slot unturned");
+}
+
+// Counted but not printed: a batch check would otherwise report sixty-four
+// identical lines.
+void check_quiet(bool passed) {
+    if (!passed) ++g_failures;
+}
+
+void testGrassPointerIndex() {
+    static tq::grass::PointerIndex index;
+    tq::grass::indexReset(index);
+
+    void* a = (void*)0x10004000;
+    void* b = (void*)0x10008000;
+    unsigned value = 0;
+    check(!tq::grass::indexLookup(index, a, &value), "miss on an empty index");
+    check(tq::grass::indexInsert(index, a, 7)
+          && tq::grass::indexLookup(index, a, &value) && value == 7,
+          "find a key that was inserted");
+    check(!tq::grass::indexLookup(index, b, &value), "miss a key never inserted");
+    check(tq::grass::indexInsert(index, a, 9)
+          && tq::grass::indexLookup(index, a, &value) && value == 9,
+          "replace the value of an existing key");
+    check(tq::grass::indexRemove(index, a) && !tq::grass::indexLookup(index, a, &value),
+          "miss a key after it is removed");
+
+    // Removal leaves a tombstone precisely so a key that probed past the
+    // removed one is still reachable. Buffers are recycled constantly, so this
+    // is the ordinary case, not an edge case.
+    tq::grass::indexReset(index);
+    void* keys[64];
+    for (unsigned i = 0; i < 64; ++i) {
+        keys[i] = (void*)(uintptr_t)(0x20000000 + i * 0x100);
+        check_quiet(tq::grass::indexInsert(index, keys[i], i));
+    }
+    bool all = true;
+    for (unsigned i = 0; i < 64; ++i)
+        all = all && tq::grass::indexLookup(index, keys[i], &value) && value == i;
+    check(all, "find all of a batch of realistic buffer addresses");
+
+    for (unsigned i = 0; i < 64; i += 2) tq::grass::indexRemove(index, keys[i]);
+    bool survivors = true;
+    for (unsigned i = 1; i < 64; i += 2)
+        survivors = survivors && tq::grass::indexLookup(index, keys[i], &value)
+                 && value == i;
+    check(survivors, "keep the rest reachable after removing every other key");
+    bool gone = true;
+    for (unsigned i = 0; i < 64; i += 2)
+        gone = gone && !tq::grass::indexLookup(index, keys[i], &value);
+    check(gone, "leave no removed key findable");
+
+    // A tombstone has to be reusable or a long session of streaming blocks
+    // would fill the table with them and stop tracking anything.
+    check(tq::grass::indexInsert(index, keys[0], 111)
+          && tq::grass::indexLookup(index, keys[0], &value) && value == 111,
+          "reuse a tombstoned slot for a later key");
+
+    check(!tq::grass::indexInsert(index, nullptr, 1)
+          && !tq::grass::indexLookup(index, nullptr, &value),
+          "refuse a null key rather than storing one");
+
+    // Insertion is allowed to fail, and the caller treats that as untracked.
+    // What it must never do is report success without storing the key.
+    tq::grass::indexReset(index);
+    unsigned stored = 0;
+    for (unsigned i = 0; i < 4096; ++i) {
+        void* key = (void*)(uintptr_t)(0x30000000 + i * 0x40);
+        if (tq::grass::indexInsert(index, key, i)) ++stored;
+    }
+    bool honest = true;
+    unsigned found = 0;
+    for (unsigned i = 0; i < 4096; ++i) {
+        void* key = (void*)(uintptr_t)(0x30000000 + i * 0x40);
+        if (tq::grass::indexLookup(index, key, &value)) {
+            ++found;
+            honest = honest && value == i;
+        }
+    }
+    check(found == stored && honest,
+          "store exactly the keys whose insertion was reported successful");
+}
+
+// Crossing and bending are independent settings that can both be on, so the
+// order they compose in matters: a bent card must still be turnable, and a
+// turned card must still be bendable.
 void testBloomExtraction() {
     bool monotonic = true;
     float previous = -1.0f;
@@ -453,6 +713,9 @@ int main(int argc, char** argv) {
           "streaming=original restores synchronous uploads");
     testRendererPresentHook();
     testBloomHook();
+    testGrassProbe();
+    testGrassPointerIndex();
+    testGrassCrossed();
     testBloomExtraction();
     testBloomShaders();
     testShadowSplitRedirect();
