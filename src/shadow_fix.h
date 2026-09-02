@@ -20,6 +20,14 @@ namespace shadow {
 void install(HMODULE engineModule);
 void shutdown();
 
+// Reported by the texture-creation hook for every shadow map it creates. The
+// fit stabiliser snaps the projection centre onto the map's texel grid, so it
+// needs a real texel count rather than the size the game asked for, and it
+// keeps the smallest it is told about: every size involved is a power of two,
+// so a coarser grid still aligns the texels exactly while a finer one would
+// snap to half-texel positions and stabilise nothing.
+void noteShadowMapSize(unsigned texels);
+
 // PCF tap offsets are UV distances, so the blur they produce measures
 // 0.5 * bluriness * world coverage: widening the projection softens shadow
 // edges in world space no matter how large the map is. Returns the factor that
@@ -40,6 +48,12 @@ bool cornerFilterEnabled();
 #ifdef TQ_SELFTEST
 bool validateSupportedImageForTest(HMODULE engineModule);
 bool redirectCropRoundTripForTest(HMODULE engineModule);
+bool validateFitCameraCallForTest(HMODULE engineModule);
+bool retargetFitCameraCallRoundTripForTest(HMODULE engineModule);
+bool validateBasisCallForTest(HMODULE engineModule);
+const float* chooseReferenceUpForTest(const float* direction,
+                                      const float* fallback);
+void stabilizeFitForTest(void* camera, unsigned texels, unsigned steps);
 #endif
 
 }  // namespace shadow

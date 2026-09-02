@@ -15,9 +15,15 @@ it:
   pattern weights, and neighborhood blending) at the same pre-UI point;
 - upgrades the game's trilinear wrapped material samplers to 16x anisotropic
   filtering for clearer terrain and surface textures at oblique angles;
-- doubles eligible square shadow depth maps and their viewport/scissor;
+- widens the directional shadow projection, which the engine fits to a fixed
+  fraction of the camera frustum, and enlarges the shadow depth maps and their
+  viewport/scissor to match;
+- stabilizes that projection, which the engine otherwise rebuilds from scratch
+  every frame around a light-space basis that follows the camera, so shadow
+  edges stop crawling while the camera zooms, pans, or rotates;
 - changes TQ's four cardinal bilinear shadow taps into the corners of an
-  optimized 3x3 PCF footprint.
+  optimized 3x3 PCF footprint, scaled to hold edge softness constant as the
+  projection widens.
 - progressively uploads large streamed terrain textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
 - can keep the final scene/post-process chain in FP16 and apply either a
@@ -49,6 +55,11 @@ them or select individual original game paths, create `tqflicker.ini` beside
 aa=smaa
 anisotropy=16
 shadows=enhanced
+shadow_split=0.45
+shadow_map_scale=4
+shadow_point_map_scale=2
+shadow_filter=corners
+shadow_stabilize=on
 edge_updates=expanded
 bloom=enhanced
 bloom_strength=0.85
@@ -63,9 +74,24 @@ streaming=optimized
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
-`shadows=original`. The in-game AA toggle remains authoritative: SMAA replaces
-the FXAA draw only while the game has AA enabled. Shadow Quality should remain
-High for the intended result.
+`shadows=original`, which restores every shadow path at once. The in-game AA
+toggle remains authoritative: SMAA replaces the FXAA draw only while the game
+has AA enabled. Shadow Quality should remain High for the intended result.
+
+`shadow_split` sets how far the directional map reaches; coverage scales as
+`split^1.90`, so a wider split costs texel density and `shadow_map_scale`
+(directional) and `shadow_point_map_scale` (point and spot) pay it back. At the
+defaults the shadow maps occupy about 384 MB. `shadow_filter=cross` restores
+the game's tap placement.
+
+`shadow_stabilize=off` restores the game's frame-by-frame refit. Stabilization
+has two halves and each can be disabled on its own:
+`shadow_stabilize_basis=off` lets the light-space basis follow the camera
+again, and `shadow_stabilize_steps` (1-64, default 8) sets how finely the
+fitted extent is quantized -- fewer steps hold the extent for longer at the
+cost of covering more world than the camera needs. Pinning the basis is the
+half that matters; snapping without it stabilizes nothing.
+
 Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
@@ -147,10 +173,11 @@ condition falls back to the game's original synchronous upload. Use
 resource thread or move D3D11 immediate-context work onto an unsafe worker
 thread.
 
-The shadow enhancement deliberately does not quantize per-object matrices. No
-safely isolated global light-projection upload has been established, so the
-resolution and PCF changes address shimmer without risking geometry stepping or
-deformation.
+The shadow enhancement does not quantize per-object matrices. Shimmer is
+addressed at its source instead: the directional light projection is quantized
+and snapped onto the shadow map's texel grid once per frame, before the engine
+derives either the caster projection or the receiver's world-to-shadow matrix
+from it, so the two cannot disagree and object geometry is never touched.
 
 ## Build and install
 

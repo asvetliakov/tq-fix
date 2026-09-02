@@ -29,6 +29,8 @@ evidence from a local installation.
   actually receives directional shadows, why RenderDirectional cannot be
   invoked twice, and how coverage and blur scale with the split.
 - `logs/` keeps the runtime evidence behind those conclusions.
+- `screen-space-plan.md` is the worked plan for optional contact shadows,
+  including the constraints that must not be relearned.
 
 Generated output is evidence, not source code.  Addresses are virtual
 addresses using Engine.dll's preferred image base (`0x10000000`) unless a file

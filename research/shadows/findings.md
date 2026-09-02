@@ -104,3 +104,97 @@ invisible to every algebraic check.
 than recomputing it. `D3DDisassemble` rejects such a container, so transformed
 shaders cannot be disassembled directly; this is expected and not a defect.
 Zeroing a native shader's checksum reproduces it exactly.
+
+## The fit is rebuilt every frame with no texel snapping
+
+`RenderDirectional` refits the directional projection from scratch each frame
+around the camera-frustum corners at `t = 0 .. split`. Nothing quantizes the
+result, so the shadow map's texel grid sits at a different sub-texel phase
+every frame and shadow edges crawl for as long as the camera keeps changing.
+This is original game behaviour, not something the split widening introduced.
+
+Zoom is the worst case because it changes the box *extents* as well as its
+position, and texel snapping alone cannot repair a texel size that changes
+every frame. Titan Quest's zoom is smooth-damped, which is why the crawl lasts
+a second or two after the input stops.
+
+### The fit lands in one struct, and everything downstream reads it
+
+After the eight-point min/max loop ends at `0x1018e9c4`, the routine builds a
+single stack-resident orthographic camera at `esp+0x12c` and passes it to the
+Camera setup routine by `call 0x10123e30` at `0x1018ec69`, with `ecx` holding
+the struct.
+
+| Offset | Contents |
+| --- | --- |
+| `+0x00` | camera type; `1` is the orthographic fit |
+| `+0x04`, `+0x10`, `+0x1c` | light-basis rows, world space, orthonormal |
+| `+0x28` | world position: box centre pushed back along the light direction |
+| `+0x38` | full extent measured along basis row 0 |
+| `+0x3c` | full extent measured along basis row 1 |
+| `+0x40` | near depth, always `0.0` |
+| `+0x44` | far depth, the fitted depth extent times `1.5` |
+
+The five stack arguments and the `push %ecx` at `0x1018ec16` are the compiler's
+stack-reservation idiom, not a real `ecx` use; the last argument is the far
+depth passed by value.
+
+What makes this the right seam is that both consumers derive from these same
+fields, after the call: the receiver's projection is rebuilt from `+0x38`,
+`+0x3c` and `+0x44` at `0x1018f00c`, and its view matrix by inverting `+0x04`
+at `0x1018f089`. Adjusting the struct once, before `0x1018ec69`, therefore
+cannot desynchronise what is rasterised from what is sampled. Adjusting the
+projection anywhere later would.
+
+The mod retargets that one relative call to a thunk that preserves `ecx`,
+passes a copy to a stabiliser, and tail-jumps to `0x10123e30` with the stack
+exactly as it found it. `eax`/`ecx`/`edx` are dead at the site and only `xmm0`
+is live across the call, which the ABI already treats as volatile.
+
+The stabiliser rounds each lateral extent up to the next eighth of an octave
+and snaps the centre onto the resulting texel grid, projecting the position
+onto the basis rows in double precision because world coordinates are large
+enough to lose a useful fraction of a texel in float. The quantised extent
+carries 1% slack so the snapped box still covers what the tight fit enclosed.
+
+Camera *rotation* is not fully solved by this: the tight box's extents change
+as the camera turns, so rotation crosses quantization thresholds more often
+than zoom does. The complete cure is a rotation-invariant bounding sphere,
+which needs the eight light-space points rather than the finished box.
+
+## The real cause of shadow trembling: the basis rotates with the camera
+
+Measured, not inferred. A 240-frame trace across a zoom, with the fit
+stabiliser already installed:
+
+- the quantised extent held at a single value for the whole capture, and the
+  snap offset moved smoothly through `[-1, 0]` texels and wrapped -- the
+  snapping worked exactly as designed;
+- the tight extents varied by under 1% and the depth range by under 4%;
+- **basis row 0 rotated 3 degrees, at up to 0.88 degrees per frame.**
+
+At the edge of a ~180-unit box that slides the texel grid 1.38 world units per
+frame: about 15 texels on a 2048 map and 62 on an 8192 one. The grid is
+completely re-quantized every frame at any resolution, which is why neither
+texel snapping nor a four-times-larger map changed the symptom at all.
+
+The source is the look-at helper at `0x10283df0`, called from the fit at
+`0x1018e7fa` (cdecl; the caller cleans its two stack arguments at
+`0x1018e815`). It normalizes the light direction into row 2, then crosses it
+with a **caller-supplied reference vector** to build rows 0 and 1. That
+reference tracks the camera, and Titan Quest pitches the camera as it zooms, so
+the light-space frame spins about the light axis.
+
+The mod retargets that call to a thunk that rewrites only the reference
+argument in place, to the world axis the light is least aligned with. The
+engine still derives the light axis itself. The basis becomes a function of the
+light alone, which is the precondition for snapping to mean anything.
+
+The cost is a looser box: a world-aligned basis cannot hug a rotated camera
+frustum the way a camera-aligned one does. That is the standard price of a
+stable shadow map and is paid for by the enlarged directional map.
+
+**The order that matters:** a stable shadow map needs a fixed orientation, a
+quantized extent, and a snapped centre, and the first is the dominant term. Two
+of the three on their own are worth nothing, which is precisely what the first
+in-game test of the stabiliser showed.

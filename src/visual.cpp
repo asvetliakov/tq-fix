@@ -1090,6 +1090,13 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     if (FAILED(hr) || !texture || !*texture) {
         return createOriginalTexture(device, desc, initial, texture, caller);
     }
+    // The fit stabiliser snaps the directional projection onto the shadow map
+    // texel grid, so it has to know a size that was actually created. Every
+    // map is reported, not just the directional one: at the lowest shadow
+    // quality the directional request can fall below the classification
+    // threshold, and the stabiliser wants a size it can trust over one that
+    // depends on this guess being right.
+    tq::shadow::noteShadowMapSize(scaled.Width);
     tq::hdr::log("Shadow map: %ux%u requested, %ux%u created (%s, scale %u,"
                  " %u MiB)\r\n",
                  desc->Width, desc->Height, scaled.Width, scaled.Height,

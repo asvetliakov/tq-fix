@@ -2,6 +2,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -255,6 +256,30 @@ void testShadowSplitRedirect() {
     check(tq::shadow::redirectCropRoundTripForTest((HMODULE)image),
           "redirect and restore all eleven crop operands exactly");
 
+    // The fit stabiliser retargets one relative call rather than rewriting an
+    // immediate, so the site is identified by its five literal bytes: a
+    // relative displacement does not depend on where the image is loaded.
+    const DWORD fitCallRva = 0x0018ec69u;
+    const BYTE fitCall[5] = {0xe8, 0xc2, 0x51, 0xf9, 0xff};
+    memcpy(image + fitCallRva, fitCall, sizeof(fitCall));
+    const DWORD basisCallRva = 0x0018e7fau;
+    const BYTE basisCall[5] = {0xe8, 0xf1, 0x55, 0x0f, 0x00};
+    memcpy(image + basisCallRva, basisCall, sizeof(basisCall));
+    check(tq::shadow::validateFitCameraCallForTest((HMODULE)image),
+          "accept the audited Camera setup call site");
+    check(tq::shadow::validateBasisCallForTest((HMODULE)image),
+          "accept the audited light-basis call site");
+    check(tq::shadow::retargetFitCameraCallRoundTripForTest((HMODULE)image),
+          "retarget the Camera setup call to the thunk and restore it exactly");
+    image[fitCallRva + 1] ^= 1;
+    check(!tq::shadow::validateFitCameraCallForTest((HMODULE)image),
+          "reject a Camera setup call with an unexpected target");
+    image[fitCallRva + 1] ^= 1;
+    image[basisCallRva + 1] ^= 1;
+    check(!tq::shadow::validateBasisCallForTest((HMODULE)image),
+          "reject a light-basis call with an unexpected target");
+    image[basisCallRva + 1] ^= 1;
+
     image[references[6].rva + 3] ^= 1;
     check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
           "reject a near-match crop instruction");
@@ -293,6 +318,127 @@ void* readFile(const char* path, long* size) {
 
 }  // namespace
 
+// The fitted light camera as RenderDirectional lays it out on its stack. The
+// offsets are the contract between this test and shadow_fix.cpp; keeping them
+// spelled out here means a layout mistake fails the build rather than the game.
+struct FitCameraImage {
+    int32_t type;       // +0x00
+    float basis[9];     // +0x04
+    float position[3];  // +0x28
+    float reserved;     // +0x34
+    float extentRow0;   // +0x38
+    float extentRow1;   // +0x3c
+    float nearDepth;    // +0x40
+    float farDepth;     // +0x44
+};
+
+FitCameraImage makeFit(float x, float y, float z, float e0, float e1) {
+    FitCameraImage fit = {};
+    fit.type = 1;
+    fit.basis[0] = 1.0f; fit.basis[4] = 1.0f; fit.basis[8] = 1.0f;
+    fit.position[0] = x; fit.position[1] = y; fit.position[2] = z;
+    fit.extentRow0 = e0;
+    fit.extentRow1 = e1;
+    fit.farDepth = 300.0f;
+    return fit;
+}
+
+void testShadowBasisReference() {
+    const float fallback[3] = {9.0f, 9.0f, 9.0f};
+
+    // A light mostly along -Y must be crossed with a world axis it is least
+    // aligned with, or the cross product degenerates and the basis collapses.
+    const float steep[3] = {0.10f, -0.98f, 0.17f};
+    const float* up = tq::shadow::chooseReferenceUpForTest(steep, fallback);
+    check(up && up[0] == 1.0f && up[1] == 0.0f && up[2] == 0.0f,
+          "the pinned reference picks the axis the light is least aligned with");
+
+    const float acrossX[3] = {0.97f, -0.20f, 0.14f};
+    up = tq::shadow::chooseReferenceUpForTest(acrossX, fallback);
+    check(up && up[1] == 0.0f && up[2] == 1.0f && up[0] == 0.0f,
+          "a light along X is crossed with a different axis");
+
+    // Determinism is the whole point: the same light must produce the same
+    // basis every frame or nothing downstream can be snapped to it.
+    const float* again = tq::shadow::chooseReferenceUpForTest(steep, fallback);
+    check(again && again[0] == 1.0f && again[1] == 0.0f && again[2] == 0.0f,
+          "the pinned reference is a function of the light alone");
+
+    const float zero[3] = {0.0f, 0.0f, 0.0f};
+    check(tq::shadow::chooseReferenceUpForTest(zero, fallback) == fallback,
+          "a degenerate light direction keeps the engine's own reference");
+    check(tq::shadow::chooseReferenceUpForTest(nullptr, fallback) == fallback,
+          "a missing light direction keeps the engine's own reference");
+}
+
+void testShadowFitStabilizer() {
+    const unsigned texels = 1024;
+    const unsigned steps = 8;
+
+    FitCameraImage fit = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    const FitCameraImage original = fit;
+    tq::shadow::stabilizeFitForTest(&fit, texels, steps);
+
+    check(fit.extentRow0 >= original.extentRow0
+              && fit.extentRow1 >= original.extentRow1,
+          "quantising the fit never shrinks the box below the tight fit");
+
+    const double t0 = (double)fit.extentRow0 / texels;
+    const double t1 = (double)fit.extentRow1 / texels;
+    const double p0 = fit.position[0] / t0;
+    const double p1 = fit.position[1] / t1;
+    check(fabs(p0 - floor(p0 + 0.5)) < 1.0e-3
+              && fabs(p1 - floor(p1 + 0.5)) < 1.0e-3,
+          "the stabilised centre lands on the shadow map texel grid");
+
+    // Snapping moves the box, so the quantised extent has to carry at least
+    // that much slack or the fit would stop covering what it enclosed.
+    check(fit.extentRow0 >= original.extentRow0 + 2.0 * t0
+              && fit.extentRow1 >= original.extentRow1 + 2.0 * t1,
+          "the quantised box still covers the tight fit after snapping");
+    check(fabs(fit.position[0] - original.position[0]) <= t0 + 1.0e-4
+              && fabs(fit.position[1] - original.position[1]) <= t1 + 1.0e-4,
+          "snapping moves the centre by less than one texel");
+    check(fit.position[2] == original.position[2],
+          "snapping leaves the depth axis alone");
+
+    // The point of the exercise: a camera that has crept a fraction of a texel
+    // must produce the same grid, which is what stops shadow edges crawling.
+    FitCameraImage crept = makeFit(123.456f + (float)(t0 * 0.3),
+                                   77.75f + (float)(t1 * 0.4), 5.0f,
+                                   100.0f, 60.0f);
+    tq::shadow::stabilizeFitForTest(&crept, texels, steps);
+    check(crept.extentRow0 == fit.extentRow0 && crept.extentRow1 == fit.extentRow1,
+          "a sub-texel camera creep does not change the fitted extents");
+    const double shift0 = (crept.position[0] - fit.position[0]) / t0;
+    const double shift1 = (crept.position[1] - fit.position[1]) / t1;
+    check(fabs(shift0 - floor(shift0 + 0.5)) < 1.0e-3
+              && fabs(shift1 - floor(shift1 + 0.5)) < 1.0e-3,
+          "a sub-texel camera creep moves the grid by whole texels only");
+
+    // A basis the projection would not read as light-space axes is left alone
+    // rather than moved onto a grid that is not where the texels are.
+    FitCameraImage skewed = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    skewed.basis[0] = 2.0f;
+    const FitCameraImage skewedBefore = skewed;
+    tq::shadow::stabilizeFitForTest(&skewed, texels, steps);
+    check(!memcmp(&skewed, &skewedBefore, sizeof(skewed)),
+          "a non-orthonormal light basis is left untouched");
+
+    FitCameraImage perspective = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    perspective.type = 0;
+    const FitCameraImage perspectiveBefore = perspective;
+    tq::shadow::stabilizeFitForTest(&perspective, texels, steps);
+    check(!memcmp(&perspective, &perspectiveBefore, sizeof(perspective)),
+          "a camera that is not the orthographic fit is left untouched");
+
+    FitCameraImage degenerate = makeFit(1.0f, 2.0f, 3.0f, 0.0f, 60.0f);
+    const FitCameraImage degenerateBefore = degenerate;
+    tq::shadow::stabilizeFitForTest(&degenerate, texels, steps);
+    check(!memcmp(&degenerate, &degenerateBefore, sizeof(degenerate)),
+          "a degenerate fit extent is left untouched");
+}
+
 int main(int argc, char** argv) {
     const char* dll = argc > 1 ? argv[1] : "winmm.dll";
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
@@ -310,6 +456,8 @@ int main(int argc, char** argv) {
     testBloomExtraction();
     testBloomShaders();
     testShadowSplitRedirect();
+    testShadowFitStabilizer();
+    testShadowBasisReference();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
     check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal
