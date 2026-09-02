@@ -102,7 +102,18 @@ float readFloat(const wchar_t* key, float fallback, float low, float high) {
     return parsed;
 }
 
+bool shadowsEnabled() {
+    wchar_t path[MAX_PATH];
+    iniPath(path);
+    if (!path[0]) return true;
+    wchar_t value[32];
+    GetPrivateProfileStringW(L"graphics", L"shadows", L"enhanced",
+                             value, 32, path);
+    return _wcsicmp(value, L"original") != 0;
+}
+
 float configuredSplit() {
+    if (!shadowsEnabled()) return kNativeSplit;
     return readFloat(L"shadow_split", kDefaultSplit, 0.15f, 0.95f);
 }
 
@@ -178,6 +189,10 @@ void restoreCropPatches() {
 void install(HMODULE engineModule) {
     if (!engineModule || InterlockedCompareExchange(&g_installAttempted, 1, 0))
         return;
+    if (!shadowsEnabled()) {
+        tq::hdr::log("Directional shadows left original by configuration\r\n");
+        return;
+    }
     float split = configuredSplit();
     if (fabsf(split - kNativeSplit) < 1.0e-4f) {
         tq::hdr::log("Directional shadow split left at the native %.3f\r\n",
@@ -201,6 +216,7 @@ void install(HMODULE engineModule) {
 }
 
 float blurCompensation() {
+    if (!shadowsEnabled()) return 1.0f;
     float automatic = powf(kNativeSplit / configuredSplit(), kCoverageExponent);
     // Corner taps sit at (+/-r, +/-r), so they reach sqrt(2) further from the
     // centre than the native cross at the same offset. Pull them in to keep
@@ -212,6 +228,7 @@ float blurCompensation() {
 }
 
 float biasCompensation() {
+    if (!shadowsEnabled()) return 1.0f;
     // The receiver's depth bias is normalised to the fitted depth range, so a
     // wider split scales it up in world units and shadows detach from their
     // casters. The depth axis grows more slowly than the horizontal one --
