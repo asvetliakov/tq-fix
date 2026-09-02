@@ -1,21 +1,695 @@
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
 
 #include "dxbc_patch.h"
+#include "bloom_hook.h"
+#include "frame_overlay.h"
 #include "frustum_fix.h"
+#include "grass.h"
+#include "hdr.h"
+#include "shadow_fix.h"
 #include "streaming.h"
+#include "visual.h"
+#include "bloom_shaders.inc"
 
 namespace {
 
+// Default shadow map scale; the tests exercise the shipped default.
+const UINT kShadowScale = 4;
+// Point and spot maps scale separately; the split does not touch them.
+const UINT kPointShadowScale = 2;
+
 FILE* g_report;
 int   g_failures;
+int   g_presentOrder;
+bool  g_presentOrderValid;
+IDXGISwapChain* g_presentSwapChain;
 
 void check(bool passed, const char* description) {
     fprintf(g_report, "%s  %s\n", passed ? "ok  " : "FAIL", description);
     if (!passed) ++g_failures;
+}
+
+void onTestPrePresent(IDXGISwapChain* swapChain) {
+    g_presentOrderValid &= g_presentOrder == 0;
+    g_presentOrder = 1;
+    g_presentSwapChain = swapChain;
+}
+
+void onTestPostPresent(IDXGISwapChain* swapChain) {
+    g_presentOrderValid &= g_presentOrder == 2 && swapChain == g_presentSwapChain;
+    g_presentOrder = 3;
+}
+
+HRESULT WINAPI testOriginalPresent(IDXGISwapChain* swapChain, UINT interval,
+                                   UINT flags) {
+    g_presentOrderValid &= g_presentOrder == 1 && swapChain == g_presentSwapChain
+                        && interval == 0 && flags == 0;
+    g_presentOrder = 2;
+    return S_OK;
+}
+
+void testRendererPresentHook() {
+    const SIZE_T imageSize = 0x192000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                     MEM_RESERVE | MEM_COMMIT,
+                                     PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest renderer image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    // Timestamp is deliberately arbitrary: identical renderer code repackaged
+    // with different linker metadata must still be accepted.
+    nt->FileHeader.TimeDateStamp = 0xdeadbeefu;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    static const BYTE presentCode[] = {
+        0x8b, 0x51, 0x34, 0x33, 0xc0, 0x38, 0x81, 0xdb,
+        0x05, 0x00, 0x00, 0x56, 0x8b, 0x32, 0x0f, 0x95,
+        0xc0, 0x6a, 0x00, 0x50, 0x52, 0xff, 0x56, 0x20,
+        0x5e, 0xc2, 0x04, 0x00
+    };
+    memcpy(image + 0x61190, presentCode, sizeof(presentCode));
+    void** rendererPresentSlot = (void**)(image + 0x8625c);
+    *rendererPresentSlot = image + 0x61190;
+
+    void* swapVtable[14] = {};
+    swapVtable[8] = (void*)&testOriginalPresent;
+    struct FakeSwapChain { void** vtable; } swapChain = {swapVtable};
+    BYTE renderer[0x600] = {};
+    *(IDXGISwapChain**)(renderer + 0x34) = (IDXGISwapChain*)&swapChain;
+
+    tq::streaming::setPresentCallback(&onTestPrePresent);
+    tq::streaming::setPostPresentCallback(&onTestPostPresent);
+    bool installed = tq::streaming::installRenderer((HMODULE)image);
+    typedef HRESULT (__thiscall* RendererPresentFn)(void*, void*);
+    RendererPresentFn present = (RendererPresentFn)*rendererPresentSlot;
+    g_presentOrder = 0;
+    g_presentOrderValid = true;
+    g_presentSwapChain = (IDXGISwapChain*)&swapChain;
+    HRESULT result = installed ? present(renderer, nullptr) : E_FAIL;
+    check(installed && tq::streaming::presentHookInstalled(),
+          "install the signature-gated renderer-level Present hook");
+    check(SUCCEEDED(result) && g_presentOrderValid && g_presentOrder == 3,
+          "run pre-Present, Steam-safe original Present, and post-Present in order");
+    check(swapVtable[8] == (void*)&testOriginalPresent,
+          "leave the shared IDXGISwapChain Present slot untouched");
+
+    tq::streaming::shutdown();
+    check(*rendererPresentSlot == image + 0x61190
+          && !tq::streaming::presentHookInstalled(),
+          "restore the renderer hook cleanly during shutdown");
+    image[0x61190] ^= 1;
+    check(!tq::streaming::installRenderer((HMODULE)image)
+          && *rendererPresentSlot == image + 0x61190,
+          "reject a near-match renderer without changing its vtable");
+    tq::streaming::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+void testBloomHook() {
+    const SIZE_T imageSize = 0x300000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                     MEM_RESERVE | MEM_COMMIT,
+                                     PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest Engine image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    memcpy(section->Name, ".text", 5);
+    section->VirtualAddress = 0x1000;
+    section->Misc.VirtualSize = 0x2aa69c;
+
+    static const BYTE body[] = {
+        0x55,0x8b,0xec,0x83,0xe4,0xf8, // validated prologue
+        0x8b,0xe5,0x5d,0xc2,0x14,0x00  // synthetic epilogue
+    };
+    BYTE* original = image + 0x15d7f0;
+    memcpy(original, body, sizeof(body));
+    bool hooked = tq::bloomhook::install(
+        (HMODULE)image, (tq::bloomhook::HotBlurFn)(void*)original);
+    check(hooked && tq::bloomhook::installed()
+          && original[0] == 0x68 && original[5] == 0xc3,
+          "detour the exact Engine bloom export with one absolute branch");
+    tq::bloomhook::shutdown();
+    check(!tq::bloomhook::installed()
+          && !memcmp(original, body, sizeof(body)),
+          "restore the Engine bloom function entry during shutdown");
+    original[0] ^= 1;
+    check(!tq::bloomhook::install(
+              (HMODULE)image, (tq::bloomhook::HotBlurFn)(void*)original)
+          && !tq::bloomhook::installed(),
+          "reject a near-match bloom prologue without patching it");
+    tq::bloomhook::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+// The grass probe writes into Engine.dll's own code, so the parts worth
+// testing without the game are the ones that can corrupt it: that the exact
+// prologue is required, that the trampoline still reaches the body, that
+// suppression is the only thing that stops it, and that every byte comes back.
+LONG g_grassRenderBody;
+
+void emitAbsoluteIncrement(BYTE* code, const void* counter) {
+    code[0] = 0xff;  // inc dword ptr [imm32]
+    code[1] = 0x05;
+    uint32_t address = (uint32_t)(uintptr_t)counter;
+    memcpy(code + 2, &address, sizeof(address));
+}
+
+void testGrassProbe() {
+    const SIZE_T imageSize = 0x400000;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                      MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!image) {
+        check(false, "allocate a synthetic Titan Quest Engine image");
+        return;
+    }
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    memcpy(section->Name, ".text", 5);
+    section->VirtualAddress = 0x1000;
+    section->Misc.VirtualSize = 0x2aa69c;
+
+    // void __thiscall RenderGrass(Name&, Canvas&, SceneRenderer&, Pass&)
+    BYTE* render = image + 0x23afc0;
+    BYTE renderBody[] = {
+        0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,  // validated prologue
+        0xff, 0x05, 0, 0, 0, 0,              // inc [g_grassRenderBody]
+        0x8b, 0xe5, 0x5d, 0xc2, 0x10, 0x00   // mov esp,ebp; pop ebp; ret 0x10
+    };
+    emitAbsoluteIncrement(renderBody + 6, &g_grassRenderBody);
+    memcpy(render, renderBody, sizeof(renderBody));
+
+    tq::grass::Exports exports = {};
+    exports.renderGrassRT = render;
+    bool hooked = tq::grass::install((HMODULE)image, exports);
+    check(hooked && tq::grass::installed()
+          && render[0] == 0x68 && render[5] == 0xc3,
+          "detour the exported grass render entry with one absolute branch");
+
+    typedef void (__fastcall* RenderFn)(void*, void*, const void*, void*,
+                                        const void*, const void*);
+    RenderFn callRender = (RenderFn)(void*)render;
+
+    // The detour exists to report that a grass draw is on the stack, and it
+    // must still reach the body: this is the game's own rendering, not ours.
+    g_grassRenderBody = 0;
+    check(!tq::grass::rendering(), "report no grass draw outside RenderGrass");
+    callRender(image, nullptr, image, image, image, image);
+    check(g_grassRenderBody == 1,
+          "reach the grass render body through the trampoline");
+    check(!tq::grass::rendering(), "stop reporting once RenderGrass returns");
+
+    tq::grass::shutdown();
+    check(!tq::grass::installed()
+          && !memcmp(render, renderBody, sizeof(renderBody)),
+          "restore the grass render entry during shutdown");
+
+    render[0] ^= 1;
+    tq::grass::Exports broken = {};
+    broken.renderGrassRT = render;
+    check(!tq::grass::install((HMODULE)image, broken) && !tq::grass::installed(),
+          "reject a near-match grass prologue without patching it");
+    tq::grass::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+// The captured first grass plane, verbatim from the bound stream during a
+// live draw: position, normal, uv per vertex, wound top-left, top-right,
+// bottom-right, bottom-left. Using the real bytes means the fingerprint is
+// tested against what the game actually writes rather than against an idea of
+// it.
+const uint32_t kCapturedPlane[32] = {
+    0x43139465, 0x41c0d49a, 0x41fa311f, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x00000000, 0x00000000,
+    0x431489d5, 0x41c0d49a, 0x42000629, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x3f000000, 0x00000000,
+    0x431489d5, 0x41b7315d, 0x42000629, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x3f000000, 0x3f800000,
+    0x43139465, 0x41b7315d, 0x41fa311f, 0xbe3b9187, 0x3f7b44d5, 0x3d62e2d8,
+        0x00000000, 0x3f800000
+};
+
+void loadPlane(float plane[32]) {
+    memcpy(plane, kCapturedPlane, sizeof(kCapturedPlane));
+}
+
+float kCapturedPlaneFloat(unsigned index) {
+    float value;
+    memcpy(&value, kCapturedPlane + index, sizeof(value));
+    return value;
+}
+
+void testGrassCrossed() {
+    float plane[32];
+    loadPlane(plane);
+
+    // The fingerprint, against bytes captured from the running game rather
+    // than against an idea of what a card looks like. Everything else here
+    // depends on this recognising a real card and nothing else.
+    check(tq::grass::isGrassPlane(plane),
+          "recognise a captured grass card by its exact shape");
+    check(!memcmp(plane + 3, plane + 11, 3 * sizeof(float))
+          && !memcmp(plane + 3, plane + 19, 3 * sizeof(float))
+          && !memcmp(plane + 3, plane + 27, 3 * sizeof(float)),
+          "confirm the captured card shares one normal across four vertices");
+
+    const float* v0 = plane;
+    const float* v1 = plane + 8;
+    const float* v2 = plane + 16;
+    const float* v3 = plane + 24;
+
+    const double cx = ((double)v0[0] + v1[0]) * 0.5;
+    const double cz = ((double)v0[2] + v1[2]) * 0.5;
+    const double wx = (double)v1[0] - v0[0];
+    const double wz = (double)v1[2] - v0[2];
+    const double width = sqrt(wx * wx + wz * wz);
+    const double top = v0[1];
+    const double bottom = v2[1];
+
+    check(tq::grass::rotatePlane(plane), "turn a captured card a quarter turn");
+
+    // A crossing card is only a crossing card if it still stands where the
+    // original stood: same centre, same size, same height.
+    const double cx2 = ((double)v0[0] + v1[0]) * 0.5;
+    const double cz2 = ((double)v0[2] + v1[2]) * 0.5;
+    check(fabs(cx2 - cx) < 1e-4 && fabs(cz2 - cz) < 1e-4,
+          "keep the turned card on the original card's centre");
+
+    const double wx2 = (double)v1[0] - v0[0];
+    const double wz2 = (double)v1[2] - v0[2];
+    const double width2 = sqrt(wx2 * wx2 + wz2 * wz2);
+    check(fabs(width2 - width) < 1e-3, "keep the turned card's width");
+    check(v0[1] == top && v1[1] == top && v2[1] == bottom && v3[1] == bottom,
+          "keep the turned card's height untouched");
+
+    // Perpendicular is the whole point: a card turned by anything less would
+    // still vanish edge-on at the same angle the original does.
+    const double along = (wx * wx2 + wz * wz2) / (width * width2);
+    check(fabs(along) < 1e-4, "turn the card perpendicular to the original");
+
+    check(tq::grass::isGrassPlane(plane),
+          "leave the turned card recognisable as a grass card");
+
+    // Untouched apart from position: the copy shares the original's texture
+    // column and its normal, so only the geometry differs.
+    check(!memcmp(plane + 3, kCapturedPlane + 3, 3 * sizeof(float))
+          && !memcmp(plane + 6, kCapturedPlane + 6, 2 * sizeof(float))
+          && !memcmp(plane + 30, kCapturedPlane + 30, 2 * sizeof(float)),
+          "leave the turned card's normal and uv exactly as they were");
+
+    // Two quarter turns are a half turn, which is the same card seen from the
+    // other side -- so the operation cannot drift the geometry.
+    check(tq::grass::rotatePlane(plane), "turn a card that has already turned");
+    check(fabs((double)v0[0] - kCapturedPlaneFloat(8)) < 1e-3
+          && fabs((double)v1[0] - kCapturedPlaneFloat(0)) < 1e-3,
+          "return a twice-turned card to the original corners, swapped");
+
+    float zero[32];
+    memset(zero, 0, sizeof(zero));
+    check(!tq::grass::rotatePlane(zero), "leave an unwritten buffer slot unturned");
+}
+
+// Counted but not printed: a batch check would otherwise report sixty-four
+// identical lines.
+void check_quiet(bool passed) {
+    if (!passed) ++g_failures;
+}
+
+void testGrassPointerIndex() {
+    static tq::grass::PointerIndex index;
+    tq::grass::indexReset(index);
+
+    void* a = (void*)0x10004000;
+    void* b = (void*)0x10008000;
+    unsigned value = 0;
+    check(!tq::grass::indexLookup(index, a, &value), "miss on an empty index");
+    check(tq::grass::indexInsert(index, a, 7)
+          && tq::grass::indexLookup(index, a, &value) && value == 7,
+          "find a key that was inserted");
+    check(!tq::grass::indexLookup(index, b, &value), "miss a key never inserted");
+    check(tq::grass::indexInsert(index, a, 9)
+          && tq::grass::indexLookup(index, a, &value) && value == 9,
+          "replace the value of an existing key");
+    check(tq::grass::indexRemove(index, a) && !tq::grass::indexLookup(index, a, &value),
+          "miss a key after it is removed");
+
+    // Removal leaves a tombstone precisely so a key that probed past the
+    // removed one is still reachable. Buffers are recycled constantly, so this
+    // is the ordinary case, not an edge case.
+    tq::grass::indexReset(index);
+    void* keys[64];
+    for (unsigned i = 0; i < 64; ++i) {
+        keys[i] = (void*)(uintptr_t)(0x20000000 + i * 0x100);
+        check_quiet(tq::grass::indexInsert(index, keys[i], i));
+    }
+    bool all = true;
+    for (unsigned i = 0; i < 64; ++i)
+        all = all && tq::grass::indexLookup(index, keys[i], &value) && value == i;
+    check(all, "find all of a batch of realistic buffer addresses");
+
+    for (unsigned i = 0; i < 64; i += 2) tq::grass::indexRemove(index, keys[i]);
+    bool survivors = true;
+    for (unsigned i = 1; i < 64; i += 2)
+        survivors = survivors && tq::grass::indexLookup(index, keys[i], &value)
+                 && value == i;
+    check(survivors, "keep the rest reachable after removing every other key");
+    bool gone = true;
+    for (unsigned i = 0; i < 64; i += 2)
+        gone = gone && !tq::grass::indexLookup(index, keys[i], &value);
+    check(gone, "leave no removed key findable");
+
+    // A tombstone has to be reusable or a long session of streaming blocks
+    // would fill the table with them and stop tracking anything.
+    check(tq::grass::indexInsert(index, keys[0], 111)
+          && tq::grass::indexLookup(index, keys[0], &value) && value == 111,
+          "reuse a tombstoned slot for a later key");
+
+    check(!tq::grass::indexInsert(index, nullptr, 1)
+          && !tq::grass::indexLookup(index, nullptr, &value),
+          "refuse a null key rather than storing one");
+
+    // Insertion is allowed to fail, and the caller treats that as untracked.
+    // What it must never do is report success without storing the key.
+    tq::grass::indexReset(index);
+    unsigned stored = 0;
+    for (unsigned i = 0; i < 4096; ++i) {
+        void* key = (void*)(uintptr_t)(0x30000000 + i * 0x40);
+        if (tq::grass::indexInsert(index, key, i)) ++stored;
+    }
+    bool honest = true;
+    unsigned found = 0;
+    for (unsigned i = 0; i < 4096; ++i) {
+        void* key = (void*)(uintptr_t)(0x30000000 + i * 0x40);
+        if (tq::grass::indexLookup(index, key, &value)) {
+            ++found;
+            honest = honest && value == i;
+        }
+    }
+    check(found == stored && honest,
+          "store exactly the keys whose insertion was reported successful");
+}
+
+// Crossing and bending are independent settings that can both be on, so the
+// order they compose in matters: a bent card must still be turnable, and a
+// turned card must still be bendable.
+void testBloomExtraction() {
+    bool monotonic = true;
+    float previous = -1.0f;
+    for (unsigned i = 0; i <= 2048; ++i) {
+        float input = i * (8.0f / 2048.0f);
+        float output = tq::bloomhook::extractBrightness(input, 1.0f, 0.25f);
+        monotonic &= output == output && output >= 0.0f
+                  && output + 0.00001f >= previous;
+        previous = output;
+    }
+    float dark = tq::bloomhook::extractBrightness(0.5f, 1.0f, 0.25f);
+    float shoulder = tq::bloomhook::extractBrightness(0.9f, 1.0f, 0.25f);
+    float white = tq::bloomhook::extractBrightness(1.0f, 1.0f, 0.25f);
+    float highlight = tq::bloomhook::extractBrightness(2.0f, 1.0f, 0.25f);
+    check(monotonic && dark == 0.0f && shoulder > 0.0f && shoulder < 0.1f
+          && white > shoulder && white < 0.1f
+          && highlight > 0.999f && highlight < 1.001f,
+          "global HDR bloom extraction is soft, monotonic, and unclipped");
+}
+
+bool overlayCompile(const char* source, const char* target, ID3DBlob** result) {
+    static HMODULE compiler;
+    if (!compiler) compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!compiler) compiler = LoadLibraryW(L"d3dcompiler_43.dll");
+    typedef HRESULT(WINAPI* CompileFn)(
+        LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+        LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+    CompileFn compile = compiler
+        ? (CompileFn)(void*)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    if (!compile) return false;
+    ID3DBlob* errors = nullptr;
+    HRESULT hr = compile(source, strlen(source), "overlay-selftest", nullptr,
+                         nullptr, "main", target, D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                         0, result, &errors);
+    if (errors) errors->Release();
+    return SUCCEEDED(hr) && result && *result;
+}
+
+HRESULT WINAPI overlayCreateTexture2D(ID3D11Device* device,
+                                      const D3D11_TEXTURE2D_DESC* desc,
+                                      const D3D11_SUBRESOURCE_DATA* initial,
+                                      ID3D11Texture2D** out) {
+    return device->CreateTexture2D(desc, initial, out);
+}
+
+HRESULT WINAPI overlayCreateShaderResourceView(
+    ID3D11Device* device, ID3D11Resource* resource,
+    const D3D11_SHADER_RESOURCE_VIEW_DESC* desc, ID3D11ShaderResourceView** out) {
+    return device->CreateShaderResourceView(resource, desc, out);
+}
+
+HRESULT WINAPI overlayCreateSamplerState(ID3D11Device* device,
+                                         const D3D11_SAMPLER_DESC* desc,
+                                         ID3D11SamplerState** out) {
+    return device->CreateSamplerState(desc, out);
+}
+
+HRESULT WINAPI overlayCreatePixelShader(ID3D11Device* device, const void* bytes,
+                                        SIZE_T size, ID3D11ClassLinkage* linkage,
+                                        ID3D11PixelShader** out) {
+    return device->CreatePixelShader(bytes, size, linkage, out);
+}
+
+// The overlay is a debug instrument, so what matters most is that a shipped
+// configuration never reaches it: with the setting absent or 0 it must not
+// measure, allocate, build, or draw. The rest of the test proves it still
+// works when it is asked for.
+void testFrameOverlay(ID3D11Device* device, ID3D11DeviceContext* context) {
+    wchar_t ini[MAX_PATH];
+    if (!GetFullPathNameW(L"tqflicker-overlay-selftest.ini", MAX_PATH, ini, nullptr))
+        return;
+    DeleteFileW(ini);
+
+    tq::frameoverlay::DeviceCalls calls = {};
+    calls.createTexture2D = nullptr;
+    calls.compile = &overlayCompile;
+
+    tq::frameoverlay::readOptions(ini);
+    check(!tq::frameoverlay::enabled(),
+          "frame overlay stays off when the INI has no setting");
+    tq::frameoverlay::recordFrame();
+    check(!tq::frameoverlay::createResources(device, calls),
+          "frame overlay builds nothing while it is off");
+    tq::frameoverlay::draw(device, context, nullptr, 1920);
+
+    WritePrivateProfileStringW(L"performance", L"frame_overlay", L"0", ini);
+    tq::frameoverlay::readOptions(ini);
+    check(!tq::frameoverlay::enabled(), "frame_overlay=0 leaves the overlay off");
+
+    WritePrivateProfileStringW(L"performance", L"frame_overlay", L"1", ini);
+    tq::frameoverlay::readOptions(ini);
+    check(tq::frameoverlay::enabled(), "frame_overlay=1 turns the overlay on");
+
+    if (device && context) {
+        calls.createTexture2D = &overlayCreateTexture2D;
+        calls.createShaderResourceView = &overlayCreateShaderResourceView;
+        calls.createSamplerState = &overlayCreateSamplerState;
+        calls.createPixelShader = &overlayCreatePixelShader;
+        check(tq::frameoverlay::createResources(device, calls),
+              "build the overlay's shaders and panels on the live device");
+
+        for (unsigned i = 0; i < 8; ++i) { tq::frameoverlay::recordFrame(); Sleep(16); }
+
+        D3D11_TEXTURE2D_DESC targetDesc = {};
+        targetDesc.Width = 960; targetDesc.Height = 540;
+        targetDesc.MipLevels = targetDesc.ArraySize = 1;
+        targetDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        targetDesc.SampleDesc.Count = 1;
+        targetDesc.Usage = D3D11_USAGE_DEFAULT;
+        targetDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        D3D11_TEXTURE2D_DESC stagingDesc = targetDesc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ID3D11Texture2D* surface = nullptr;
+        ID3D11Texture2D* staging = nullptr;
+        ID3D11RenderTargetView* rtv = nullptr;
+        bool ready = SUCCEEDED(device->CreateTexture2D(&targetDesc, nullptr, &surface))
+                  && SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, &staging))
+                  && SUCCEEDED(device->CreateRenderTargetView(surface, nullptr, &rtv));
+        check(ready, "allocate a scratch surface for the overlay draw");
+        if (ready) {
+            const FLOAT clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            context->ClearRenderTargetView(rtv, clear);
+            tq::frameoverlay::draw(device, context, rtv, targetDesc.Width);
+            context->CopyResource(staging, surface);
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            bool mappedOk = SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped));
+            bool panelDrawn = false, graphDrawn = false, outsideClean = true;
+            if (mappedOk) {
+                const BYTE* rows = (const BYTE*)mapped.pData;
+                panelDrawn = *(const uint32_t*)(rows + 40 * mapped.RowPitch + 40 * 4) != 0;
+                graphDrawn = *(const uint32_t*)(rows + 150 * mapped.RowPitch + 40 * 4) != 0;
+                outsideClean = *(const uint32_t*)(rows + 400 * mapped.RowPitch + 400 * 4) == 0;
+                context->Unmap(staging, 0);
+            }
+            check(mappedOk && panelDrawn, "the overlay writes its statistics panel");
+            check(mappedOk && graphDrawn, "the overlay writes its pacing graph");
+            check(mappedOk && outsideClean,
+                  "the overlay leaves the rest of the frame untouched");
+        }
+        if (rtv) rtv->Release();
+        if (staging) staging->Release();
+        if (surface) surface->Release();
+        tq::frameoverlay::releaseResources();
+    }
+
+    tq::frameoverlay::reset();
+    tq::frameoverlay::readOptions(nullptr);
+    check(!tq::frameoverlay::enabled(), "frame overlay stays off without an INI path");
+    DeleteFileW(ini);
+}
+
+void testBloomShaders() {
+    HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!compiler) compiler = LoadLibraryW(L"d3dcompiler_43.dll");
+    typedef HRESULT(WINAPI* CompileFn)(
+        LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+        LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+    CompileFn compile = compiler
+        ? (CompileFn)(void*)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    const char* sources[] = {
+        kBloomExtractSource, kBloomDownsampleSource,
+        kBloomUpsampleSource, kBloomCompositeSource
+    };
+    bool accepted = compile != nullptr;
+    for (unsigned i = 0; accepted && i < sizeof(sources) / sizeof(sources[0]); ++i) {
+        ID3DBlob *shader = nullptr, *errors = nullptr;
+        HRESULT hr = compile(sources[i], strlen(sources[i]), "bloom-selftest",
+                             nullptr, nullptr, "main", "ps_5_0",
+                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                             &shader, &errors);
+        accepted &= SUCCEEDED(hr) && shader && shader->GetBufferSize() > 0;
+        if (shader) shader->Release();
+        if (errors) errors->Release();
+    }
+    check(accepted, "compile all HDR bloom shaders with the runtime compiler");
+    if (compiler) FreeLibrary(compiler);
+}
+
+void testShadowSplitRedirect() {
+    const SIZE_T imageSize = 0x0044b000u;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                      MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE);
+    check(image != nullptr, "allocate a synthetic Engine image");
+    if (!image) return;
+    memset(image, 0, imageSize);
+
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    // Timestamp is deliberately arbitrary: identical code repackaged with
+    // different linker metadata must still be accepted.
+    nt->FileHeader.TimeDateStamp = 0xdeadbeefu;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+
+    const struct { DWORD rva; BYTE reg, opcode; } references[] = {
+        {0x0018e40du, 0x15, 0x59}, {0x0018e42eu, 0x0d, 0x59},
+        {0x0018e446u, 0x05, 0x59}, {0x0018e503u, 0x15, 0x59},
+        {0x0018e51bu, 0x0d, 0x59}, {0x0018e533u, 0x05, 0x59},
+        {0x0018e5ddu, 0x15, 0x59}, {0x0018e609u, 0x0d, 0x59},
+        {0x0018e618u, 0x05, 0x59}, {0x0018e6fcu, 0x05, 0x10},
+        {0x0018f556u, 0x0d, 0x10},
+    };
+    const unsigned count = sizeof(references) / sizeof(references[0]);
+    uint32_t cropAddress = (uint32_t)(uintptr_t)(image + 0x002f9550u);
+    for (unsigned i = 0; i < count; ++i) {
+        BYTE* instruction = image + references[i].rva;
+        instruction[0] = 0xf3; instruction[1] = 0x0f;
+        instruction[2] = references[i].opcode;
+        instruction[3] = references[i].reg;
+        memcpy(instruction + 4, &cropAddress, sizeof(cropAddress));
+    }
+
+    check(tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "accept the audited Engine layout with a different PE timestamp");
+    check(tq::shadow::redirectCropRoundTripForTest((HMODULE)image),
+          "redirect and restore all eleven crop operands exactly");
+
+    // The fit stabiliser retargets one relative call rather than rewriting an
+    // immediate, so the site is identified by its five literal bytes: a
+    // relative displacement does not depend on where the image is loaded.
+    const DWORD fitCallRva = 0x0018ec69u;
+    const BYTE fitCall[5] = {0xe8, 0xc2, 0x51, 0xf9, 0xff};
+    memcpy(image + fitCallRva, fitCall, sizeof(fitCall));
+    const DWORD basisCallRva = 0x0018e7fau;
+    const BYTE basisCall[5] = {0xe8, 0xf1, 0x55, 0x0f, 0x00};
+    memcpy(image + basisCallRva, basisCall, sizeof(basisCall));
+    check(tq::shadow::validateFitCameraCallForTest((HMODULE)image),
+          "accept the audited Camera setup call site");
+    check(tq::shadow::validateBasisCallForTest((HMODULE)image),
+          "accept the audited light-basis call site");
+    check(tq::shadow::retargetFitCameraCallRoundTripForTest((HMODULE)image),
+          "retarget the Camera setup call to the thunk and restore it exactly");
+    image[fitCallRva + 1] ^= 1;
+    check(!tq::shadow::validateFitCameraCallForTest((HMODULE)image),
+          "reject a Camera setup call with an unexpected target");
+    image[fitCallRva + 1] ^= 1;
+    image[basisCallRva + 1] ^= 1;
+    check(!tq::shadow::validateBasisCallForTest((HMODULE)image),
+          "reject a light-basis call with an unexpected target");
+    image[basisCallRva + 1] ^= 1;
+
+    image[references[6].rva + 3] ^= 1;
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject a near-match crop instruction");
+    image[references[6].rva + 3] ^= 1;
+
+    uint32_t wrong = cropAddress + 4;
+    memcpy(image + references[10].rva + 4, &wrong, sizeof(wrong));
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject a crop read pointing at an unexpected constant");
+    memcpy(image + references[10].rva + 4, &cropAddress, sizeof(cropAddress));
+
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize + 0x1000;
+    check(!tq::shadow::validateSupportedImageForTest((HMODULE)image),
+          "reject an Engine image of unexpected size");
+
+    VirtualFree(image, 0, MEM_RELEASE);
 }
 
 void* readFile(const char* path, long* size) {
@@ -38,6 +712,127 @@ void* readFile(const char* path, long* size) {
 
 }  // namespace
 
+// The fitted light camera as RenderDirectional lays it out on its stack. The
+// offsets are the contract between this test and shadow_fix.cpp; keeping them
+// spelled out here means a layout mistake fails the build rather than the game.
+struct FitCameraImage {
+    int32_t type;       // +0x00
+    float basis[9];     // +0x04
+    float position[3];  // +0x28
+    float reserved;     // +0x34
+    float extentRow0;   // +0x38
+    float extentRow1;   // +0x3c
+    float nearDepth;    // +0x40
+    float farDepth;     // +0x44
+};
+
+FitCameraImage makeFit(float x, float y, float z, float e0, float e1) {
+    FitCameraImage fit = {};
+    fit.type = 1;
+    fit.basis[0] = 1.0f; fit.basis[4] = 1.0f; fit.basis[8] = 1.0f;
+    fit.position[0] = x; fit.position[1] = y; fit.position[2] = z;
+    fit.extentRow0 = e0;
+    fit.extentRow1 = e1;
+    fit.farDepth = 300.0f;
+    return fit;
+}
+
+void testShadowBasisReference() {
+    const float fallback[3] = {9.0f, 9.0f, 9.0f};
+
+    // A light mostly along -Y must be crossed with a world axis it is least
+    // aligned with, or the cross product degenerates and the basis collapses.
+    const float steep[3] = {0.10f, -0.98f, 0.17f};
+    const float* up = tq::shadow::chooseReferenceUpForTest(steep, fallback);
+    check(up && up[0] == 1.0f && up[1] == 0.0f && up[2] == 0.0f,
+          "the pinned reference picks the axis the light is least aligned with");
+
+    const float acrossX[3] = {0.97f, -0.20f, 0.14f};
+    up = tq::shadow::chooseReferenceUpForTest(acrossX, fallback);
+    check(up && up[1] == 0.0f && up[2] == 1.0f && up[0] == 0.0f,
+          "a light along X is crossed with a different axis");
+
+    // Determinism is the whole point: the same light must produce the same
+    // basis every frame or nothing downstream can be snapped to it.
+    const float* again = tq::shadow::chooseReferenceUpForTest(steep, fallback);
+    check(again && again[0] == 1.0f && again[1] == 0.0f && again[2] == 0.0f,
+          "the pinned reference is a function of the light alone");
+
+    const float zero[3] = {0.0f, 0.0f, 0.0f};
+    check(tq::shadow::chooseReferenceUpForTest(zero, fallback) == fallback,
+          "a degenerate light direction keeps the engine's own reference");
+    check(tq::shadow::chooseReferenceUpForTest(nullptr, fallback) == fallback,
+          "a missing light direction keeps the engine's own reference");
+}
+
+void testShadowFitStabilizer() {
+    const unsigned texels = 1024;
+    const unsigned steps = 8;
+
+    FitCameraImage fit = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    const FitCameraImage original = fit;
+    tq::shadow::stabilizeFitForTest(&fit, texels, steps);
+
+    check(fit.extentRow0 >= original.extentRow0
+              && fit.extentRow1 >= original.extentRow1,
+          "quantising the fit never shrinks the box below the tight fit");
+
+    const double t0 = (double)fit.extentRow0 / texels;
+    const double t1 = (double)fit.extentRow1 / texels;
+    const double p0 = fit.position[0] / t0;
+    const double p1 = fit.position[1] / t1;
+    check(fabs(p0 - floor(p0 + 0.5)) < 1.0e-3
+              && fabs(p1 - floor(p1 + 0.5)) < 1.0e-3,
+          "the stabilised centre lands on the shadow map texel grid");
+
+    // Snapping moves the box, so the quantised extent has to carry at least
+    // that much slack or the fit would stop covering what it enclosed.
+    check(fit.extentRow0 >= original.extentRow0 + 2.0 * t0
+              && fit.extentRow1 >= original.extentRow1 + 2.0 * t1,
+          "the quantised box still covers the tight fit after snapping");
+    check(fabs(fit.position[0] - original.position[0]) <= t0 + 1.0e-4
+              && fabs(fit.position[1] - original.position[1]) <= t1 + 1.0e-4,
+          "snapping moves the centre by less than one texel");
+    check(fit.position[2] == original.position[2],
+          "snapping leaves the depth axis alone");
+
+    // The point of the exercise: a camera that has crept a fraction of a texel
+    // must produce the same grid, which is what stops shadow edges crawling.
+    FitCameraImage crept = makeFit(123.456f + (float)(t0 * 0.3),
+                                   77.75f + (float)(t1 * 0.4), 5.0f,
+                                   100.0f, 60.0f);
+    tq::shadow::stabilizeFitForTest(&crept, texels, steps);
+    check(crept.extentRow0 == fit.extentRow0 && crept.extentRow1 == fit.extentRow1,
+          "a sub-texel camera creep does not change the fitted extents");
+    const double shift0 = (crept.position[0] - fit.position[0]) / t0;
+    const double shift1 = (crept.position[1] - fit.position[1]) / t1;
+    check(fabs(shift0 - floor(shift0 + 0.5)) < 1.0e-3
+              && fabs(shift1 - floor(shift1 + 0.5)) < 1.0e-3,
+          "a sub-texel camera creep moves the grid by whole texels only");
+
+    // A basis the projection would not read as light-space axes is left alone
+    // rather than moved onto a grid that is not where the texels are.
+    FitCameraImage skewed = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    skewed.basis[0] = 2.0f;
+    const FitCameraImage skewedBefore = skewed;
+    tq::shadow::stabilizeFitForTest(&skewed, texels, steps);
+    check(!memcmp(&skewed, &skewedBefore, sizeof(skewed)),
+          "a non-orthonormal light basis is left untouched");
+
+    FitCameraImage perspective = makeFit(123.456f, 77.75f, 5.0f, 100.0f, 60.0f);
+    perspective.type = 0;
+    const FitCameraImage perspectiveBefore = perspective;
+    tq::shadow::stabilizeFitForTest(&perspective, texels, steps);
+    check(!memcmp(&perspective, &perspectiveBefore, sizeof(perspective)),
+          "a camera that is not the orthographic fit is left untouched");
+
+    FitCameraImage degenerate = makeFit(1.0f, 2.0f, 3.0f, 0.0f, 60.0f);
+    const FitCameraImage degenerateBefore = degenerate;
+    tq::shadow::stabilizeFitForTest(&degenerate, texels, steps);
+    check(!memcmp(&degenerate, &degenerateBefore, sizeof(degenerate)),
+          "a degenerate fit extent is left untouched");
+}
+
 int main(int argc, char** argv) {
     const char* dll = argc > 1 ? argv[1] : "winmm.dll";
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
@@ -50,6 +845,101 @@ int main(int argc, char** argv) {
           "streaming=optimized enables progressive uploads");
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
+    testRendererPresentHook();
+    testBloomHook();
+    testGrassProbe();
+    testGrassPointerIndex();
+    testGrassCrossed();
+    testBloomExtraction();
+    testBloomShaders();
+    testShadowSplitRedirect();
+    testShadowFitStabilizer();
+    testShadowBasisReference();
+
+    tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
+    check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal
+          && defaultHdr.paperWhiteNits == 203.0f
+          && defaultHdr.peakNitsOverride == 0.0f
+          && !defaultHdr.debug && !defaultHdr.trace,
+          "HDR defaults to off/original/203 nits with diagnostics disabled");
+
+    const tq::hdr::ToneMap outputModes[] = {
+        tq::hdr::ToneAgx, tq::hdr::ToneFrostbite
+    };
+    bool sdrCurvesValid = true;
+    bool hdrCurvesValid = true;
+    for (unsigned mode = 0; mode < sizeof(outputModes) / sizeof(outputModes[0]); ++mode) {
+        float previousSdr = -1.0f;
+        float previousHdr = -1.0f;
+        for (unsigned i = 0; i <= 1024; ++i) {
+            float input = i * (32.0f / 1024.0f);
+            float sdr = tq::hdr::toneMapLuminance(outputModes[mode], input, 1.0f);
+            float hdr = tq::hdr::toneMapLuminance(outputModes[mode], input, 4.926108f);
+            sdrCurvesValid &= sdr == sdr && sdr >= 0.0f && sdr <= 1.00001f
+                           && sdr + 0.00001f >= previousSdr;
+            hdrCurvesValid &= hdr == hdr && hdr >= 0.0f && hdr <= 4.92612f
+                           && hdr + 0.00001f >= previousHdr;
+            previousSdr = sdr;
+            previousHdr = hdr;
+        }
+    }
+    float agxWhite = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 1.0f, 1.0f);
+    float agxHighlight = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 1.0f);
+    float frostbiteMid = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 0.5f, 1.0f);
+    float frostbiteWhite = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 1.0f, 1.0f);
+    float frostbiteHighlight = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 4.0f, 1.0f);
+    check(sdrCurvesValid && agxWhite > 0.4f && agxWhite < 0.9f
+          && frostbiteMid == 0.5f
+          && frostbiteWhite > 0.90f && frostbiteWhite < 0.92f
+          && agxHighlight > agxWhite && agxHighlight < 1.0f
+          && frostbiteHighlight > frostbiteWhite && frostbiteHighlight < 1.0f,
+          "all output curves monotonically roll extended highlights into SDR");
+    float agxHdr = tq::hdr::toneMapLuminance(tq::hdr::ToneAgx, 4.0f, 4.926108f);
+    float frostbiteHdrWhite = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 1.0f, 4.926108f);
+    float frostbiteHdr = tq::hdr::toneMapLuminance(
+        tq::hdr::ToneFrostbite, 4.0f, 4.926108f);
+    check(hdrCurvesValid && agxHdr > 1.0f && agxHdr < 4.926108f
+          && frostbiteHdrWhite == 1.0f
+          && frostbiteHdr > 3.9f && frostbiteHdr < 4.0f,
+          "all output curves preserve extended luminance for HDR output");
+    check(frostbiteWhite != agxWhite && frostbiteHighlight != agxHighlight,
+          "AgX and Frostbite select different curves");
+
+    unsigned char colorGrade[1288] = {};
+    const unsigned char colorChecksum[16] = {
+        0x15,0x07,0x85,0xe4,0xfb,0xb5,0xca,0x43,
+        0x79,0xfc,0x92,0xf9,0x64,0x2c,0x0c,0x9b
+    };
+    memcpy(colorGrade, "DXBC", 4);
+    memcpy(colorGrade + 4, colorChecksum, sizeof(colorChecksum));
+    *(uint32_t*)(colorGrade + 24) = sizeof(colorGrade);
+    memcpy(colorGrade + 64, "SceneColor", 11);
+    memcpy(colorGrade + 96, "ColorLut", 9);
+    check(tq::hdr::isColorGradingShader(colorGrade, sizeof(colorGrade)),
+          "recognize the exact Titan Quest color-grading shader signature");
+    colorGrade[4] ^= 1;
+    check(!tq::hdr::isColorGradingShader(colorGrade, sizeof(colorGrade)),
+          "reject a near-match color-grading shader signature");
+
+    unsigned char gamma[1108] = {};
+    const unsigned char gammaChecksum[16] = {
+        0xa2,0x0f,0xf7,0xb0,0xe5,0x78,0x2f,0x87,
+        0x20,0x5c,0x22,0x36,0xb1,0xf7,0xe2,0x05
+    };
+    memcpy(gamma, "DXBC", 4);
+    memcpy(gamma + 4, gammaChecksum, sizeof(gammaChecksum));
+    *(uint32_t*)(gamma + 24) = sizeof(gamma);
+    memcpy(gamma + 64, "screenSampler", 14);
+    memcpy(gamma + 96, "gammaSampler", 13);
+    check(tq::hdr::isGammaShader(gamma, sizeof(gamma)),
+          "recognize the exact Titan Quest gamma shader signature");
+    gamma[24] ^= 1;
+    check(!tq::hdr::isGammaShader(gamma, sizeof(gamma)),
+          "reject a malformed gamma shader container");
 
     const uintptr_t viewportSlot = 0x12345678u;
     const uintptr_t frustumSlot = 0x23456789u;
@@ -114,11 +1004,23 @@ int main(int argc, char** argv) {
     check(!invalid && selectedWidth == 1024 && selectedHeight == 768,
           "reject invalid live display dimensions");
 
+    check(tq::visual::isFp16SceneTargetOrdinal(5)
+          && tq::visual::isFp16SceneTargetOrdinal(7)
+          && tq::visual::isFp16SceneTargetOrdinal(9)
+          && tq::visual::isFp16SceneTargetOrdinal(11)
+          && tq::visual::isFp16SceneTargetOrdinal(12)
+          && tq::visual::isFp16SceneTargetOrdinal(13)
+          && !tq::visual::isFp16SceneTargetOrdinal(4)
+          && !tq::visual::isFp16SceneTargetOrdinal(6)
+          && !tq::visual::isFp16SceneTargetOrdinal(10)
+          && !tq::visual::isFp16SceneTargetOrdinal(14),
+          "keep every confirmed scene/post target, including the alternate gamma snapshot, in FP16");
+
     HMODULE proxy = LoadLibraryA(dll);
     check(proxy != nullptr, "load the winmm proxy");
     if (proxy) {
         static const char* const names[] = {
-#define TQ_WINMM_NAME(name) name,
+#define TQ_WINMM_NAME(name, required) name,
 #include "winmm_names.inc"
 #undef TQ_WINMM_NAME
         };
@@ -229,12 +1131,16 @@ int main(int argc, char** argv) {
             textureResult = device->CreateTexture2D(&shadow, nullptr, &texture);
             memset(&actual, 0, sizeof(actual));
             if (texture) texture->GetDesc(&actual);
+            UINT scale = shadowSizes[i] >= 2048 ? kShadowScale : kPointShadowScale;
+            UINT expected = shadowSizes[i] * scale;
+            while (expected > 8192) expected /= 2;
             allShadowSizes &= SUCCEEDED(textureResult) && texture
-                           && actual.Width == shadowSizes[i] * 2
-                           && actual.Height == shadowSizes[i] * 2;
+                           && actual.Width == expected
+                           && actual.Height == expected;
             if (texture) texture->Release();
         }
-        check(allShadowSizes, "enhanced shadows double Low/Medium/High map dimensions");
+        check(allShadowSizes,
+              "enhanced shadows scale Low/Medium/High map dimensions");
 
         shadow.Width = shadow.Height = 512;
         shadow.Format = DXGI_FORMAT_R24G8_TYPELESS;
@@ -292,7 +1198,9 @@ int main(int argc, char** argv) {
             context->OMSetRenderTargets(0, nullptr, passDSV);
             viewportCount = 1;
             context->RSGetViewports(&viewportCount, &observed);
-            check(viewportCount == 1 && observed.Width == 1024 && observed.Height == 1024,
+            check(viewportCount == 1
+                      && observed.Width == 512.0f * kPointShadowScale
+                      && observed.Height == 512.0f * kPointShadowScale,
                   "depth-only shadow passes receive the scaled viewport");
             context->OMSetRenderTargets(0, nullptr, nullptr);
         } else {
@@ -405,6 +1313,40 @@ int main(int argc, char** argv) {
             free(vsBytes);
         }
         if (fxaa) fxaa->Release();
+
+        long gradeSize = 0, gammaSize = 0;
+        void* gradeBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-colorgrading.dxbc", &gradeSize);
+        void* gammaBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-gamma.dxbc", &gammaSize);
+        ID3D11PixelShader *gradeShader = nullptr, *gammaShader = nullptr;
+        bool postShaders = gradeBytes && gammaBytes
+            && SUCCEEDED(device->CreatePixelShader(gradeBytes, gradeSize, nullptr, &gradeShader))
+            && SUCCEEDED(device->CreatePixelShader(gammaBytes, gammaSize, nullptr, &gammaShader));
+        check(postShaders && gradeShader && gammaShader,
+              "the exact color-grading and gamma shaders pass validation");
+        if (postShaders && context) {
+            Sleep(3000);
+            context->PSSetShader(gradeShader, nullptr, 0);
+            ID3D11PixelShader* reboundGrade = nullptr;
+            context->PSGetShader(&reboundGrade, nullptr, nullptr);
+            check(reboundGrade == gradeShader,
+                  "the original color-grading pass remains active by default");
+            if (reboundGrade) reboundGrade->Release();
+            context->PSSetShader(gammaShader, nullptr, 0);
+            ID3D11PixelShader* reboundGamma = nullptr;
+            context->PSGetShader(&reboundGamma, nullptr, nullptr);
+            check(reboundGamma == gammaShader,
+                  "the original gamma pass remains active by default");
+            if (reboundGamma) reboundGamma->Release();
+        } else {
+            check(false, "retain the exact color-grading pass");
+            check(false, "retain the exact gamma pass");
+        }
+        if (gradeShader) gradeShader->Release();
+        if (gammaShader) gammaShader->Release();
+        free(gradeBytes); free(gammaBytes);
+
         tq::dxbc::PatchResult notShadow = {};
         check(!tq::dxbc::enhanceShadowPcf(fxaaBytes, (SIZE_T)fxaaSize, &notShadow),
               "the shadow transformer rejects the FXAA shader");
@@ -445,8 +1387,52 @@ int main(int argc, char** argv) {
             if (receiver) receiver->Release();
         }
         tq::dxbc::release(&shadowPatch);
+
+        // The deferred screen-space receiver is the shader Titan Quest
+        // actually uses to apply directional shadows. Its taps must be
+        // retuned, and no other shader's may be: the per-material receivers
+        // and the point-light one share the tap shape but were not widened.
+        long deferredSize = 0;
+        void* deferredBytes = readFile(
+            "C:\\tqflicker-selftest\\tq-dxbc-PS-deferred-shadow.dxbc", &deferredSize);
+        check(deferredBytes && deferredSize > 0,
+              "read the captured deferred shadow receiver");
+        tq::dxbc::PatchResult tuned = {};
+        bool retuned = deferredBytes && tq::dxbc::tuneDeferredShadowFilter(
+            deferredBytes, (SIZE_T)deferredSize, 0.38f, 0.695f, true, &tuned);
+        check(retuned && tuned.size == (SIZE_T)deferredSize,
+              "retune the deferred receiver's PCF taps in place");
+        if (retuned && device) {
+            ID3D11PixelShader* shader = nullptr;
+            HRESULT hr = device->CreatePixelShader(tuned.data, tuned.size,
+                                                   nullptr, &shader);
+            check(SUCCEEDED(hr) && shader,
+                  "DXMT accepts the retuned deferred receiver");
+            if (shader) shader->Release();
+        }
+        tq::dxbc::release(&tuned);
+
+        tq::dxbc::PatchResult widened = {};
+        check(deferredBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  deferredBytes, (SIZE_T)deferredSize, 1.5f, 1.0f, true, &widened),
+              "refuse an offset scale that would widen the blur");
+        tq::dxbc::PatchResult loosened = {};
+        check(deferredBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  deferredBytes, (SIZE_T)deferredSize, 0.38f, 1.5f, true, &loosened),
+              "refuse a bias scale that would loosen the depth test");
+        tq::dxbc::release(&loosened);
+        tq::dxbc::release(&widened);
+
+        tq::dxbc::PatchResult legacyTuned = {};
+        check(shadowBytes && !tq::dxbc::tuneDeferredShadowFilter(
+                  shadowBytes, (SIZE_T)shadowSize, 0.38f, 0.695f, true, &legacyTuned),
+              "leave a per-material receiver's taps untouched");
+        tq::dxbc::release(&legacyTuned);
+        free(deferredBytes);
         free(shadowBytes);
     }
+
+    testFrameOverlay(device, context);
 
     int transformed = 0;
     if (device) {
@@ -480,6 +1466,10 @@ int main(int argc, char** argv) {
     if (proxy) FreeLibrary(proxy);
     if (host) FreeLibrary(host);
 
+    check(GetFileAttributesA("tqflicker-hdr.log") == INVALID_FILE_ATTRIBUTES,
+          "HDR logging creates no file when hdr_debug is absent");
+    check(GetFileAttributesA("tqflicker-debug.log") == INVALID_FILE_ATTRIBUTES,
+          "startup tracing creates no file when trace is absent");
     fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
     fclose(g_report);
     return g_failures ? 1 : 0;

@@ -5,6 +5,9 @@
 
 #include "dxbc_patch.h"
 #include "frustum_fix.h"
+#include "grass.h"
+#include "hdr.h"
+#include "shadow_fix.h"
 #include "streaming.h"
 #include "visual.h"
 
@@ -12,8 +15,13 @@ extern "C" void* tq_winmm_targets[];
 
 namespace {
 
-const char* const kWinmmNames[] = {
-#define TQ_WINMM_NAME(name) name,
+struct WinmmExport {
+    const char* name;
+    bool required;
+};
+
+const WinmmExport kWinmmExports[] = {
+#define TQ_WINMM_NAME(name, required) {name, required},
 #include "winmm_names.inc"
 #undef TQ_WINMM_NAME
 };
@@ -44,6 +52,8 @@ LONG   g_devicePatched;
 HANDLE g_stop;
 HANDLE g_done;
 HANDLE g_thread;
+int    g_winmmResolved;
+int    g_winmmOptionalMissing;
 
 bool readable(const void* address) {
     MEMORY_BASIC_INFORMATION info;
@@ -133,11 +143,19 @@ bool resolveWinmm(HINSTANCE self) {
     HMODULE real = LoadLibraryW(path);
     if (!real || real == (HMODULE)self) return false;
 
-    const int count = (int)(sizeof(kWinmmNames) / sizeof(kWinmmNames[0]));
+    const int count = (int)(sizeof(kWinmmExports) / sizeof(kWinmmExports[0]));
+    g_winmmResolved = 0;
+    g_winmmOptionalMissing = 0;
     for (int i = 0; i < count; ++i) {
-        FARPROC target = GetProcAddress(real, kWinmmNames[i]);
-        if (!target || belongsTo((HMODULE)self, (const void*)target)) return false;
+        const WinmmExport& entry = kWinmmExports[i];
+        FARPROC target = GetProcAddress(real, entry.name);
+        if (!target || belongsTo((HMODULE)self, (const void*)target)) {
+            if (entry.required) return false;
+            ++g_winmmOptionalMissing;
+            continue;
+        }
         tq_winmm_targets[i] = (void*)target;
+        ++g_winmmResolved;
     }
     return true;
 }
@@ -161,6 +179,8 @@ void patchDevice(ID3D11Device* device) {
     void** vtable = *(void***)device;
     void** slot = &vtable[12];  // ID3D11Device::CreateVertexShader
     if (!readable(slot) || !readable(*slot)) {
+        tq::hdr::log("Device vertex-shader slot is unreadable: device=%p slot=%p\r\n",
+                     device, slot);
         InterlockedExchange(&g_devicePatched, 0);
         return;
     }
@@ -168,16 +188,38 @@ void patchDevice(ID3D11Device* device) {
     // thread through the shared DXMT vtable.
     g_createVertexShader = (CreateVertexShaderFn)*slot;
     if (!rememberPatch(slot, (void*)&hookCreateVertexShader)) {
+        tq::hdr::log("Device vertex-shader hook failed: slot=%p target=%p\r\n",
+                     slot, *slot);
         g_createVertexShader = nullptr;
         InterlockedExchange(&g_devicePatched, 0);
+    } else {
+        tq::hdr::log("Device vertex-shader hook installed: device=%p\r\n", device);
     }
 }
 
 void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
                   IDXGISwapChain* swapChain = nullptr) {
+    tq::hdr::log("Installing hooks: device=%p context=%p swapChain=%p\r\n",
+                 device, context, swapChain);
     patchDevice(device);
-    if (device) tq::visual::install(device, context);
+    // The directional shadow split is an Engine.dll constant redirect, so it
+    // is installed once the module is loaded and is independent of the device.
+    HMODULE engine = GetModuleHandleW(L"Engine.dll");
+    tq::shadow::install(engine);
+    // Terrain grass lives entirely in Engine.dll and never reaches the device,
+    // so it installs from the same handle. The detour is what lets a draw hook
+    // tell a grass draw from every other draw in the frame.
+    tq::grass::installFromModule(engine);
+    if (device) tq::visual::install(device, context, swapChain);
     if (swapChain) tq::streaming::installSwapChain(swapChain);
+    tq::hdr::log("Hook installation returned\r\n");
+}
+
+void releaseCreation(IDXGISwapChain** swapChain, ID3D11Device** device,
+                     ID3D11DeviceContext** context) {
+    if (context && *context) { (*context)->Release(); *context = nullptr; }
+    if (device && *device) { (*device)->Release(); *device = nullptr; }
+    if (swapChain && *swapChain) { (*swapChain)->Release(); *swapChain = nullptr; }
 }
 
 HRESULT WINAPI hookCreateDevice(
@@ -185,8 +227,13 @@ HRESULT WINAPI hookCreateDevice(
     const D3D_FEATURE_LEVEL* levels, UINT levelCount, UINT sdkVersion,
     ID3D11Device** device, D3D_FEATURE_LEVEL* selectedLevel,
     ID3D11DeviceContext** context) {
+    tq::hdr::log("D3D11CreateDevice entered: flags=0x%x levels=%u\r\n",
+                 flags, levelCount);
     HRESULT result = g_createDevice(adapter, driverType, software, flags, levels,
                                     levelCount, sdkVersion, device, selectedLevel, context);
+    tq::hdr::log("D3D11CreateDevice returned: hr=0x%08lx device=%p context=%p\r\n",
+                 (unsigned long)result, device ? *device : nullptr,
+                 context ? *context : nullptr);
     if (SUCCEEDED(result) && device)
         installHooks(*device, context ? *context : nullptr);
     return result;
@@ -198,9 +245,34 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
     const DXGI_SWAP_CHAIN_DESC* description, IDXGISwapChain** swapChain,
     ID3D11Device** device, D3D_FEATURE_LEVEL* selectedLevel,
     ID3D11DeviceContext** context) {
+    if (description)
+        tq::hdr::log("D3D11CreateDeviceAndSwapChain entered: %ux%u format=%u buffers=%u effect=%u flags=0x%x\r\n",
+                     description->BufferDesc.Width, description->BufferDesc.Height,
+                     (unsigned)description->BufferDesc.Format, description->BufferCount,
+                     (unsigned)description->SwapEffect, flags);
+    else
+        tq::hdr::log("D3D11CreateDeviceAndSwapChain entered without a description\r\n");
+    DXGI_SWAP_CHAIN_DESC candidate = {};
+    bool tryFloatOutput = tq::streaming::presentHookInstalled() && description
+                       && tq::hdr::makeSwapChainCandidate(*description, &candidate);
     HRESULT result = g_createDeviceAndSwapChain(
         adapter, driverType, software, flags, levels, levelCount, sdkVersion,
-        description, swapChain, device, selectedLevel, context);
+        tryFloatOutput ? &candidate : description, swapChain, device, selectedLevel, context);
+    tq::hdr::log("D3D11CreateDeviceAndSwapChain returned: candidate=%u hr=0x%08lx swapChain=%p device=%p context=%p\r\n",
+                 tryFloatOutput ? 1u : 0u, (unsigned long)result,
+                 swapChain ? *swapChain : nullptr, device ? *device : nullptr,
+                 context ? *context : nullptr);
+    if (tryFloatOutput && (FAILED(result) || !swapChain || !*swapChain
+                           || !tq::hdr::activateSwapChain(*swapChain))) {
+        tq::hdr::log("FP16 swap-chain attempt failed; retrying original description\r\n");
+        releaseCreation(swapChain, device, context);
+        result = g_createDeviceAndSwapChain(
+            adapter, driverType, software, flags, levels, levelCount, sdkVersion,
+            description, swapChain, device, selectedLevel, context);
+        tq::hdr::log("Original swap-chain retry returned: hr=0x%08lx swapChain=%p device=%p context=%p\r\n",
+                     (unsigned long)result, swapChain ? *swapChain : nullptr,
+                     device ? *device : nullptr, context ? *context : nullptr);
+    }
     if (SUCCEEDED(result) && device)
         installHooks(*device, context ? *context : nullptr,
                      swapChain ? *swapChain : nullptr);
@@ -208,10 +280,13 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
 }
 
 bool installDeviceHook(HMODULE renderer) {
+    tq::streaming::installRenderer(renderer);
     void** slot = importSlot(renderer, "d3d11.dll", "D3D11CreateDeviceAndSwapChain");
     if (slot && readable(*slot)) {
         g_createDeviceAndSwapChain = (CreateDeviceAndSwapChainFn)*slot;
         if (rememberPatch(slot, (void*)&hookCreateDeviceAndSwapChain)) {
+            tq::hdr::log("Renderer device-and-swap-chain import hooked: renderer=%p\r\n",
+                         renderer);
             return true;
         }
         g_createDeviceAndSwapChain = nullptr;
@@ -221,6 +296,7 @@ bool installDeviceHook(HMODULE renderer) {
     if (slot && readable(*slot)) {
         g_createDevice = (CreateDeviceFn)*slot;
         if (rememberPatch(slot, (void*)&hookCreateDevice)) {
+            tq::hdr::log("Renderer device import hooked: renderer=%p\r\n", renderer);
             return true;
         }
         g_createDevice = nullptr;
@@ -233,28 +309,48 @@ DWORD WINAPI installerThread(void*) {
     const DWORD timeoutMs = 180000;
     bool rendererInstalled = false;
     bool frustumAttempted = false;
+    bool rendererSeen = false;
+    bool gameSeen = false;
+    tq::hdr::log("Proxy initialized: pid=%lu winmmResolved=%d optionalMissing=%d\r\n",
+                 GetCurrentProcessId(), g_winmmResolved, g_winmmOptionalMissing);
     for (DWORD waited = 0; waited < timeoutMs; waited += stepMs) {
         if (WaitForSingleObject(g_stop, stepMs) != WAIT_TIMEOUT) break;
         if (!frustumAttempted) {
             HMODULE game = GetModuleHandleW(L"Game.dll");
             if (game) {
+                if (!gameSeen) {
+                    tq::hdr::log("Game.dll detected: module=%p\r\n", game);
+                    gameSeen = true;
+                }
                 tq::frustum::install(game);
                 frustumAttempted = true;
+                tq::hdr::log("Frustum hook attempt returned\r\n");
             }
         }
         if (!rendererInstalled) {
             HMODULE renderer = GetModuleHandleW(L"Direct3D11.dll");
+            if (renderer && !rendererSeen) {
+                tq::hdr::log("Direct3D11.dll detected: module=%p\r\n", renderer);
+                rendererSeen = true;
+            }
             rendererInstalled = renderer && installDeviceHook(renderer);
         }
         if (rendererInstalled && frustumAttempted) break;
     }
+    tq::hdr::log("Installer finished: rendererInstalled=%u presentInstalled=%u frustumAttempted=%u\r\n",
+                 rendererInstalled ? 1u : 0u,
+                 tq::streaming::presentHookInstalled() ? 1u : 0u,
+                 frustumAttempted ? 1u : 0u);
     SetEvent(g_done);
     return 0;
 }
 
 }  // namespace
 
-extern "C" unsigned long tq_winmm_unresolved(void) { return 0; }
+extern "C" __attribute__((noreturn)) void tq_winmm_unresolved(void) {
+    TerminateProcess(GetCurrentProcess(), ERROR_PROC_NOT_FOUND);
+    for (;;) {}
+}
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -272,9 +368,12 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         if (g_stop) SetEvent(g_stop);
         if (g_done) WaitForSingleObject(g_done, 2000);
         tq::frustum::shutdown();
+        tq::shadow::shutdown();
+        tq::grass::shutdown();
         tq::visual::shutdown();
         restorePatches();
         tq::streaming::shutdown();
+        tq::hdr::shutdown();
         if (g_thread) CloseHandle(g_thread);
         if (g_done) CloseHandle(g_done);
         if (g_stop) CloseHandle(g_stop);

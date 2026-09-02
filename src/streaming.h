@@ -9,10 +9,19 @@ namespace streaming {
 // unknown values retain the release default.
 bool optimizationEnabled(const wchar_t* value);
 
-// Runs the progressive-upload step immediately before Present, keeping all
-// D3D11 immediate-context work on the render thread.
+// Hooks Titan Quest's renderer-level Present wrapper. The game's wrapper then
+// calls the current swap-chain vtable normally, preserving Steam/THQN/driver
+// overlay ownership and ordering.
+bool installRenderer(HMODULE renderer);
+bool presentHookInstalled();
+
+// Retains ResizeBuffers handling only where no Steam overlay is loaded. Present
+// itself is deliberately never patched through the shared DXGI vtable.
 void installSwapChain(IDXGISwapChain* swapChain);
-void setPresentCallback(void (*callback)());
+void setPresentCallback(void (*callback)(IDXGISwapChain*));
+void setPostPresentCallback(void (*callback)(IDXGISwapChain*));
+void setPreResizeCallback(void (*callback)(IDXGISwapChain*));
+void setResizeCallback(void (*callback)(IDXGISwapChain*));
 void shutdown();
 
 }  // namespace streaming

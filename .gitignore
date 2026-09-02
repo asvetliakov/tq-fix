@@ -6,3 +6,7 @@ dist/
 *.o
 *.log
 .DS_Store
+
+# Reproducible audit output; regenerate with research/shadows/tools/run-audit.sh
+research/shadows/generated/
+research/shadows/shaders/generated/

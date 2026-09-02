@@ -1,4 +1,5 @@
 #include "frustum_fix.h"
+#include "hdr.h"
 
 #include <d3d11.h>
 #include <string.h>
@@ -220,14 +221,19 @@ bool selectViewportSize(bool enabled, bool targetCall,
 void install(HMODULE gameModule) {
     if (!gameModule || InterlockedCompareExchange(&g_installed, 1, 0)) return;
     g_enabled = readOptions();
-    if (!g_enabled) return;
+    if (!g_enabled) {
+        tq::hdr::log("Frustum hook disabled by configuration\r\n");
+        return;
+    }
 
     HMODULE engineModule = GetModuleHandleW(L"Engine.dll");
     void** viewportSlot = importSlot(gameModule, "Engine.dll", kViewportCtorName);
     void** frustumSlot = importSlot(gameModule, "Engine.dll", kWorldFrustumName);
     if (!engineModule || !viewportSlot || !frustumSlot || !readable(*viewportSlot)
-        || !belongsTo(engineModule, *viewportSlot) || !belongsTo(engineModule, *frustumSlot))
+        || !belongsTo(engineModule, *viewportSlot) || !belongsTo(engineModule, *frustumSlot)) {
+        tq::hdr::log("Frustum hook skipped: incompatible Game/Engine imports\r\n");
         return;
+    }
 
     const BYTE* code = nullptr;
     SIZE_T codeSize = 0;
@@ -236,7 +242,10 @@ void install(HMODULE gameModule) {
         ? findUpdateViewportCall(code, codeSize, (uintptr_t)viewportSlot,
                                  (uintptr_t)frustumSlot, &matches)
         : nullptr;
-    if (!target || matches != 1) return;
+    if (!target || matches != 1) {
+        tq::hdr::log("Frustum hook skipped: viewport signature matches=%u\r\n", matches);
+        return;
+    }
 
     void** engineGlobal = (void**)GetProcAddress(engineModule, kEngineGlobalName);
     GetGraphicsEngineFn getGraphicsEngine = (GetGraphicsEngineFn)(void*)
@@ -248,10 +257,16 @@ void install(HMODULE gameModule) {
     if (!belongsTo(engineModule, engineGlobal)
         || !belongsTo(engineModule, (const void*)getGraphicsEngine)
         || !belongsTo(engineModule, (const void*)getWidth)
-        || !belongsTo(engineModule, (const void*)getHeight)) return;
+        || !belongsTo(engineModule, (const void*)getHeight)) {
+        tq::hdr::log("Frustum hook skipped: incompatible Engine exports\r\n");
+        return;
+    }
 
     void* original = *viewportSlot;
-    if (!original || !belongsTo(engineModule, original)) return;
+    if (!original || !belongsTo(engineModule, original)) {
+        tq::hdr::log("Frustum hook skipped: invalid viewport constructor\r\n");
+        return;
+    }
 
     // Publish every dependency, including the call-through, before atomically
     // making the hook reachable from the game's update thread.
@@ -265,8 +280,10 @@ void install(HMODULE gameModule) {
     if (!writePointer(viewportSlot, (void*)&hookViewportCtor)) {
         g_viewportSlot = nullptr;
         g_viewportCtor = nullptr;
+        tq::hdr::log("Frustum hook failed while patching the import slot\r\n");
         return;
     }
+    tq::hdr::log("Frustum hook installed\r\n");
 }
 
 void shutdown() {
