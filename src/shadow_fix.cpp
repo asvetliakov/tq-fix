@@ -191,19 +191,69 @@ bool readSwitch(const wchar_t* key, const wchar_t* fallback, const wchar_t* off)
     return _wcsicmp(value, off) != 0;
 }
 
-bool shadowsEnabled() {
-    return readSwitch(L"shadows", L"enhanced", L"original");
+// Read once and kept. The compensations below are queried for every pixel
+// shader the game creates, which is hundreds of times across a session, and
+// each query used to reopen the file several times over. Caching also means a
+// mid-session edit cannot leave shaders patched with two different settings.
+struct Config {
+    bool shadows;
+    float split;
+    bool corners;
+    bool stabilize;
+    bool stabilizeBasis;
+    unsigned steps;
+    float blurScale;
+    float biasScale;
+};
+
+Config g_config;
+bool g_configLoaded;
+
+float clampScale(float value) {
+    if (!_finite(value) || value <= 0.0f) return 1.0f;
+    return value > 1.0f ? 1.0f : value;
 }
 
-float configuredSplit() {
-    if (!shadowsEnabled()) return kNativeSplit;
-    return readFloat(L"shadow_split", kDefaultSplit, 0.15f, 0.95f);
+const Config& config() {
+    if (g_configLoaded) return g_config;
+    g_configLoaded = true;
+    g_config.shadows = readSwitch(L"shadows", L"enhanced", L"original");
+    g_config.corners = readSwitch(L"shadow_filter", L"corners", L"cross");
+    g_config.split = g_config.shadows
+        ? readFloat(L"shadow_split", kDefaultSplit, 0.15f, 0.95f)
+        : kNativeSplit;
+    g_config.stabilize =
+        g_config.shadows && readSwitch(L"shadow_stabilize", L"on", L"off");
+    g_config.stabilizeBasis =
+        readSwitch(L"shadow_stabilize_basis", L"on", L"off");
+    g_config.steps =
+        (unsigned)readFloat(L"shadow_stabilize_steps", 8.0f, 1.0f, 64.0f);
+    if (!g_config.steps) g_config.steps = 8;
+
+    // Both compensations default to whatever holds the native look at the
+    // configured split, and both are overridable.
+    float blur = powf(kNativeSplit / g_config.split, kCoverageExponent);
+    // Corner taps sit at (+/-r, +/-r), so they reach sqrt(2) further from the
+    // centre than the native cross at the same offset. Pull them in to keep
+    // the filter footprint the same size whichever placement is used.
+    if (g_config.corners) blur /= 1.41421356f;
+    const float bias = powf(kNativeSplit / g_config.split, kDepthExponent);
+    g_config.blurScale =
+        clampScale(readFloat(L"shadow_blur_scale", blur, 0.05f, 1.0f));
+    g_config.biasScale =
+        clampScale(readFloat(L"shadow_bias_scale", bias, 0.05f, 1.0f));
+    if (!g_config.shadows) {
+        g_config.blurScale = 1.0f;
+        g_config.biasScale = 1.0f;
+    }
+    return g_config;
 }
 
-bool stabilizeEnabled() {
-    if (!shadowsEnabled()) return false;
-    return readSwitch(L"shadow_stabilize", L"on", L"off");
-}
+bool shadowsEnabled() { return config().shadows; }
+
+float configuredSplit() { return config().split; }
+
+bool stabilizeEnabled() { return config().stabilize; }
 
 bool validatePeImage(HMODULE module) {
     BYTE* base = (BYTE*)module;
@@ -504,10 +554,8 @@ void installStabilization(HMODULE module) {
         tq::hdr::log("Shadow fit stabilisation skipped: unsupported Engine.dll\r\n");
         return;
     }
-    g_stabilizeSteps = (unsigned)readFloat(L"shadow_stabilize_steps", 8.0f,
-                                           1.0f, 64.0f);
-    if (!g_stabilizeSteps) g_stabilizeSteps = 8;
-    g_stabilizeBasis = readSwitch(L"shadow_stabilize_basis", L"on", L"off");
+    g_stabilizeSteps = config().steps;
+    g_stabilizeBasis = config().stabilizeBasis;
     BYTE* thunks = buildThunk(module);
     if (!thunks || !installStabilizer(module, thunks)) {
         restoreStabilizer();
@@ -554,39 +602,22 @@ void noteShadowMapSize(unsigned texels) {
         g_mapTexels = texels;
 }
 
-float blurCompensation() {
-    if (!shadowsEnabled()) return 1.0f;
-    float automatic = powf(kNativeSplit / configuredSplit(), kCoverageExponent);
-    // Corner taps sit at (+/-r, +/-r), so they reach sqrt(2) further from the
-    // centre than the native cross at the same offset. Pull them in to keep
-    // the filter footprint the same size whichever placement is used.
-    if (cornerFilterEnabled()) automatic /= 1.41421356f;
-    float configured = readFloat(L"shadow_blur_scale", automatic, 0.05f, 1.0f);
-    if (!_finite(configured) || configured <= 0.0f) return 1.0f;
-    return configured > 1.0f ? 1.0f : configured;
-}
+float blurCompensation() { return config().blurScale; }
 
-float biasCompensation() {
-    if (!shadowsEnabled()) return 1.0f;
-    // The receiver's depth bias is normalised to the fitted depth range, so a
-    // wider split scales it up in world units and shadows detach from their
-    // casters. The depth axis grows more slowly than the horizontal one --
-    // measured at split^1.12 against split^1.90 -- so it needs its own factor.
-    float automatic = powf(kNativeSplit / configuredSplit(), kDepthExponent);
-    float configured = readFloat(L"shadow_bias_scale", automatic, 0.05f, 1.0f);
-    if (!_finite(configured) || configured <= 0.0f) return 1.0f;
-    return configured > 1.0f ? 1.0f : configured;
-}
+// The receiver's depth bias is normalised to the fitted depth range, so a
+// wider split scales it up in world units and shadows detach from their
+// casters. The depth axis grows more slowly than the horizontal one --
+// measured at split^1.12 against split^1.90 -- so it needs its own factor.
+float biasCompensation() { return config().biasScale; }
 
-bool cornerFilterEnabled() {
-    return readSwitch(L"shadow_filter", L"corners", L"cross");
-}
+bool cornerFilterEnabled() { return config().corners; }
 
 void shutdown() {
     restoreStabilizer();
     restoreCropPatches();
     g_split = kDefaultSplit;
     memset(g_referenceUp, 0, sizeof(g_referenceUp));
+    g_configLoaded = false;
     InterlockedExchange(&g_stabilizeLogged, 0);
     InterlockedExchange(&g_basisLogged, 0);
     InterlockedExchange(&g_installAttempted, 0);
