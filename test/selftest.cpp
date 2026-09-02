@@ -20,6 +20,8 @@ namespace {
 
 // Default shadow map scale; the tests exercise the shipped default.
 const UINT kShadowScale = 4;
+// Point and spot maps scale separately; the split does not touch them.
+const UINT kPointShadowScale = 2;
 
 FILE* g_report;
 int   g_failures;
@@ -584,7 +586,8 @@ int main(int argc, char** argv) {
             textureResult = device->CreateTexture2D(&shadow, nullptr, &texture);
             memset(&actual, 0, sizeof(actual));
             if (texture) texture->GetDesc(&actual);
-            UINT expected = shadowSizes[i] * kShadowScale;
+            UINT scale = shadowSizes[i] >= 2048 ? kShadowScale : kPointShadowScale;
+            UINT expected = shadowSizes[i] * scale;
             while (expected > 8192) expected /= 2;
             allShadowSizes &= SUCCEEDED(textureResult) && texture
                            && actual.Width == expected
@@ -651,8 +654,8 @@ int main(int argc, char** argv) {
             viewportCount = 1;
             context->RSGetViewports(&viewportCount, &observed);
             check(viewportCount == 1
-                      && observed.Width == 512.0f * kShadowScale
-                      && observed.Height == 512.0f * kShadowScale,
+                      && observed.Width == 512.0f * kPointShadowScale
+                      && observed.Height == 512.0f * kPointShadowScale,
                   "depth-only shadow passes receive the scaled viewport");
             context->OMSetRenderTargets(0, nullptr, nullptr);
         } else {

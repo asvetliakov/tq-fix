@@ -27,8 +27,13 @@ struct Options {
     float bloomStrength;
     UINT anisotropy;
     UINT shadowMapScale;
+    UINT pointShadowMapScale;
 };
-Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16, 4};
+Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16, 4, 2};
+
+// The smallest square the game requests for its directional shadow map. Point
+// and spot maps are requested below this.
+const UINT kDirectionalShadowSize = 2048;
 bool g_bloomToggleKeyDown;
 bool g_bloomEnhancedRuntime = true;
 bool g_globalBloomEnabled;
@@ -360,6 +365,13 @@ void readOptions() {
     g_options.shadowMapScale = shadowScale == 1 ? 1
                              : shadowScale == 2 ? 2
                              : shadowScale == 8 ? 8 : 4;
+    // Point and spot maps gain nothing from the wider directional split, so
+    // they scale separately and more modestly.
+    int pointScale = GetPrivateProfileIntW(L"graphics", L"shadow_point_map_scale",
+                                           2, path);
+    g_options.pointShadowMapScale = pointScale == 1 ? 1
+                                  : pointScale == 4 ? 4
+                                  : pointScale == 8 ? 8 : 2;
 }
 
 bool contains(const BYTE* bytes, SIZE_T size, const char* text) {
@@ -1048,11 +1060,25 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     if (progressivelyHandled) return progressive;
     if (!g_options.shadows || !shadowDepthDesc(desc) || initial)
         return createOriginalTexture(device, desc, initial, texture, caller);
+    // Only the directional map benefits from the wider split, and it is one
+    // texture among a dozen: a run allocates one large square for the
+    // directional light and many smaller ones for point and spot lights.
+    // Scaling all of them alike costs several hundred megabytes for shadows
+    // the split never touches, which matters because Titan Quest is a 32-bit
+    // process with a bounded address space.
+    //
+    // Size is the only discriminator available at creation. The directional
+    // map is the largest request the game makes, so anything at or above
+    // kDirectionalShadowSize takes the directional scale. At the lowest shadow
+    // quality that request can fall below the threshold and be treated as a
+    // point map; the split still applies, but with less density than intended.
+    const bool directional = desc->Width >= kDirectionalShadowSize;
     // 8192 is the largest square this path allocates; a failed allocation
     // steps down a scale rather than dropping to the unscaled map, since the
     // largest sizes are a real amount of memory.
     D3D11_TEXTURE2D_DESC scaled = *desc;
-    UINT scale = g_options.shadowMapScale;
+    UINT scale = directional ? g_options.shadowMapScale
+                             : g_options.pointShadowMapScale;
     while (scale > 1 && desc->Width * scale > 8192) scale /= 2;
     HRESULT hr = E_FAIL;
     for (;; scale /= 2) {
@@ -1064,8 +1090,11 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     if (FAILED(hr) || !texture || !*texture) {
         return createOriginalTexture(device, desc, initial, texture, caller);
     }
-    tq::hdr::log("Shadow map: %ux%u requested, %ux%u created (scale %u)\r\n",
-                 desc->Width, desc->Height, scaled.Width, scaled.Height, scale);
+    tq::hdr::log("Shadow map: %ux%u requested, %ux%u created (%s, scale %u,"
+                 " %u MiB)\r\n",
+                 desc->Width, desc->Height, scaled.Width, scaled.Height,
+                 directional ? "directional" : "point/spot", scale,
+                 (scaled.Width * scaled.Height * 4u) / (1024u * 1024u));
     if (g_shadowTextureCount < sizeof(g_shadowTextures) / sizeof(g_shadowTextures[0])) {
         ShadowTexture& s = g_shadowTextures[g_shadowTextureCount++];
         s.identity = identityOf(*texture);
