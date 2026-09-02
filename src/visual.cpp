@@ -4,6 +4,7 @@
 #include "dxbc_patch.h"
 #include "frame_overlay.h"
 #include "hdr.h"
+#include "probe.h"
 #include "shadow_fix.h"
 #include "streaming.h"
 
@@ -78,14 +79,6 @@ typedef void(WINAPI* RSSetViewportsFn)(ID3D11DeviceContext*, UINT, const D3D11_V
 typedef void(WINAPI* RSSetScissorsFn)(ID3D11DeviceContext*, UINT, const D3D11_RECT*);
 typedef void(WINAPI* UpdateSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
                                           const D3D11_BOX*, const void*, UINT, UINT);
-#ifdef TQ_DIAGNOSTIC
-typedef void(WINAPI* CopySubresourceRegionFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
-                                              UINT, UINT, UINT, ID3D11Resource*, UINT,
-                                              const D3D11_BOX*);
-typedef void(WINAPI* CopyResourceFn)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
-typedef void(WINAPI* ResolveSubresourceFn)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
-                                           ID3D11Resource*, UINT, DXGI_FORMAT);
-#endif
 
 CreateTexture2DFn g_createTexture2D;
 CreatePixelShaderFn g_createPixelShader;
@@ -105,20 +98,6 @@ OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
 RSSetScissorsFn g_rsSetScissors;
 UpdateSubresourceFn g_updateSubresource;
-#ifdef TQ_DIAGNOSTIC
-CopySubresourceRegionFn g_copySubresourceRegion;
-CopyResourceFn g_copyResource;
-ResolveSubresourceFn g_resolveSubresource;
-unsigned g_diagBackBufferDraws;
-unsigned g_diagBackBufferClears;
-unsigned g_diagBackBufferCopies;
-unsigned g_diagBackBufferUpdates;
-unsigned g_diagBackBufferResolves;
-unsigned g_diagRestoreAtPresent;
-LONG g_diagUploadsCreated;
-LONG g_diagUploadsCompleted;
-LONG g_diagUploadSteps;
-#endif
 
 ID3D11Device* g_device;
 ID3D11DeviceContext* g_context;
@@ -163,6 +142,28 @@ HANDLE g_programThread;
 HMODULE g_compiler;
 
 const UINT kUploadChunkBytes = 2 * 1024 * 1024;
+
+// What one progressive upload chunk is allowed to cost. At 60 FPS a frame is
+// 16.7 ms, and a background upload that takes a fifth of it is already
+// visible in the pacing graph.
+const double kUploadTargetMs = 3.0;
+const UINT kUploadFloorBytes = 256 * 1024;
+
+// Milliseconds per KiB, smoothed over recent chunks. The source is a mapped
+// archive view, so a chunk's cost depends on whether its pages are resident
+// and varies far too much to predict from size alone -- but the recent rate is
+// a much better opening guess than the ceiling.
+double g_uploadMsPerKib = 0.002;
+
+UINT chunkBytesForTargetMs() {
+    if (!(g_uploadMsPerKib > 0.0)) return kUploadFloorBytes;
+    double kib = kUploadTargetMs / g_uploadMsPerKib;
+    if (kib < 256.0) kib = 256.0;
+    if (kib > (double)kUploadChunkBytes / 1024.0)
+        kib = (double)kUploadChunkBytes / 1024.0;
+    return (UINT)(kib * 1024.0);
+}
+
 const unsigned kMaxUploadJobs = 256;
 const unsigned kMaxMappingLeases = 128;
 const unsigned kMaxTextureMips = 16;
@@ -206,8 +207,19 @@ struct ShadowTexture {
     UINT originalWidth, originalHeight;
     UINT scale;
 };
-ShadowTexture g_shadowTextures[16];
+// The engine allocates nine shadow targets per CreateRenderTargets -- one
+// directional and eight point/spot -- and calls it again on a resolution or
+// shadow-quality change. Sixteen slots overflowed on the second call, and an
+// unrecorded map is still created enlarged while its viewport is left at the
+// size the game asked for, so the pass renders into a quarter of it. The table
+// is also cleared when the renderer rebuilds its targets, which is what stops
+// stale identities accumulating.
+ShadowTexture g_shadowTextures[48];
 unsigned g_shadowTextureCount;
+LONG g_shadowTableFullLogged;
+// Which kind of shadow map is bound, so the probe charges the directional pass
+// and the point passes separately.
+bool g_shadowDirectional;
 bool g_shadowBound;
 UINT g_shadowScale = 1;
 D3D11_VIEWPORT g_gameViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
@@ -294,10 +306,6 @@ struct BloomResources {
     bool rejectionLogged;
 } g_bloom;
 
-#ifdef TQ_DIAGNOSTIC
-ID3D11Texture2D* g_fp16Probe;
-unsigned g_fp16ProbeFrame;
-#endif
 
 template <typename T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
@@ -367,12 +375,19 @@ void readOptions() {
         tq::hdr::log("Progressive streaming disabled: renderer Present hook unavailable\r\n");
     }
     tq::frameoverlay::readOptions(path);
+    tq::probe::readOptions(path);
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
     // A wider shadow split spreads the map over more world, so the map has to
     // grow with it to keep texel density. Powers of two only; the scale
     // multiplies the square size the game asks for.
+    //
+    // The default costs real GPU time and the cost is measured, not guessed:
+    // on a 5120x1440 display the directional pass takes 3.73 ms a frame at 4
+    // and 2.31 ms at 2, out of frames averaging 13.9 ms. The default stays at
+    // 4 because 2 visibly softens the shadows; `shadow_map_scale=2` is the
+    // documented way to buy the 1.4 ms back.
     int shadowScale = GetPrivateProfileIntW(L"graphics", L"shadow_map_scale", 4, path);
     g_options.shadowMapScale = shadowScale == 1 ? 1
                              : shadowScale == 2 ? 2
@@ -482,19 +497,14 @@ void tracePostProcessBinding(ID3D11DeviceContext* context) {
     release(sourceView); release(destinationView);
 }
 
-bool isShadowIdentity(void* identity) {
-    for (unsigned i = 0; i < g_shadowTextureCount; ++i)
-        if (g_shadowTextures[i].identity == identity) return true;
-    return false;
-}
-
-// The game sizes its viewport and scissor for the map it asked for, so both
-// must be multiplied by whatever scale that texture was actually created at.
-UINT shadowScaleForIdentity(void* identity) {
+// The one identity-match over the shadow table; every question about a bound
+// map (is it ours, what scale, directional or point) reads fields off the
+// entry this returns, so the matching rule cannot fork.
+const ShadowTexture* shadowTextureForIdentity(void* identity) {
     for (unsigned i = 0; i < g_shadowTextureCount; ++i)
         if (g_shadowTextures[i].identity == identity)
-            return g_shadowTextures[i].scale;
-    return 1;
+            return &g_shadowTextures[i];
+    return nullptr;
 }
 
 bool shadowDepthDesc(const D3D11_TEXTURE2D_DESC* d) {
@@ -678,9 +688,19 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
         || !g_uploadLockReady) return E_FAIL;
     TextureOwner owner = {};
     const BYTE* dds = (const BYTE*)initial[0].pSysMem - 0x80;
-    if (!findTextureOwner(dds, &owner)) return E_FAIL;
+    // Past this point the texture is one this path wanted; a decline is worth
+    // counting because it is the case the Engine audit predicts -- a texture
+    // read out of a .arc, whose owner is not the loose-file class the unmap
+    // hook matches.
+    if (!findTextureOwner(dds, &owner)) {
+        tq::probe::count(tq::probe::CounterUploadRejected);
+        return E_FAIL;
+    }
     UploadJob* job = reserveUploadJob();
-    if (!job) return E_FAIL;
+    if (!job) {
+        tq::probe::count(tq::probe::CounterUploadRejected);
+        return E_FAIL;
+    }
 
     UINT lowMip = lowMipFor(desc);
     D3D11_SUBRESOURCE_DATA staged[kMaxTextureMips] = {};
@@ -711,6 +731,9 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
         (*texture)->Release();
         *texture = nullptr;
         InterlockedExchange(&job->state, 0);
+        // The other owner-shaped decline: the unmap vtable is not the
+        // loose-file class this path knows how to lease.
+        tq::probe::count(tq::probe::CounterUploadRejected);
         return E_FAIL;
     }
 
@@ -725,18 +748,13 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
     job->blockRow = 0;
     job->maxChunkBytes = topBytes <= 4ull * 1024ull * 1024ull
                        ? 1024 * 1024 : kUploadChunkBytes;
-    job->chunkBytes = job->maxChunkBytes;
+    // Start from what the last chunks actually cost rather than from the
+    // ceiling. Opening at the maximum is what produced the 34 ms outlier: the
+    // controller could only correct after a frame had already paid for it.
+    job->chunkBytes = chunkBytesForTargetMs();
+    tq::probe::count(tq::probe::CounterUploadJobsStarted);
     ++lease->jobs;
     InterlockedExchange(&job->state, 2);
-#ifdef TQ_DIAGNOSTIC
-    LONG created = InterlockedIncrement(&g_diagUploadsCreated);
-    if (created <= 24 || !(created % 50))
-        tq::hdr::log("Progressive upload queued: total=%ld size=%ux%u format=%u "
-                     "mips=%u deferred=%u topBytes=%llu leaseJobs=%ld\r\n",
-                     created, desc->Width, desc->Height, (unsigned)desc->Format,
-                     desc->MipLevels, lowMip, (unsigned long long)topBytes,
-                     lease->jobs);
-#endif
     LeaveCriticalSection(&g_uploadLock);
 
     *handled = true;
@@ -757,18 +775,6 @@ HRESULT WINAPI hookCreateShaderResourceView(
         used = &translated;
     }
     HRESULT hr = g_createShaderResourceView(device, resource, used, view);
-#ifdef TQ_DIAGNOSTIC
-    ScreenTargetInfo* screen = screenTarget(identity);
-    if (screen) {
-        D3D11_SHADER_RESOURCE_VIEW_DESC actual = {};
-        if (SUCCEEDED(hr) && view && *view) (*view)->GetDesc(&actual);
-        tq::hdr::log("Screen SRV: id=%u requested=%u used=%u actual=%u hr=0x%08lx\r\n",
-                     screen->id,
-                     description ? (unsigned)description->Format : 0u,
-                     used ? (unsigned)used->Format : 0u,
-                     (unsigned)actual.Format, (unsigned long)hr);
-    }
-#endif
     if (FAILED(hr) || !view || !*view || !g_uploadLockReady) return hr;
 
     EnterCriticalSection(&g_uploadLock);
@@ -806,6 +812,7 @@ void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
         g_psSetShaderResources(context, start, count, views);
         return;
     }
+    tq::probe::count(tq::probe::CounterPsSetSrv);
     ID3D11ShaderResourceView* substituted[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
     memcpy(substituted, views, count * sizeof(*views));
     EnterCriticalSection(&g_uploadLock);
@@ -865,20 +872,52 @@ void advanceTextureUploadsInternal() {
         box.back = 1;
         const BYTE* source = (const BYTE*)job.source[job.mip].pSysMem
                            + (uint64_t)job.blockRow * pitch;
-        DWORD stepStartedMs = GetTickCount();
+        // QueryPerformanceCounter, not GetTickCount. The tick counter's
+        // resolution is about 15.6 ms, so a chunk that took four milliseconds
+        // measured zero and the budget ratcheted to its ceiling and stayed
+        // there, while a chunk unlucky enough to straddle a tick measured
+        // fifteen and was halved for no reason. A measured run showed the
+        // controller pinned at the ceiling while chunks really cost 3.2 ms per
+        // MiB -- up to 19 ms in a single frame.
+        //
+        // `source` points into the memory-mapped archive, so this call can also
+        // fault pages in off disk. That cost is real, is part of what the frame
+        // paid, and is inside the interval measured here.
+        static LARGE_INTEGER frequency;   // invariant for the process
+        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+        LARGE_INTEGER before, after;
+        QueryPerformanceCounter(&before);
         g_updateSubresource(g_context, job.texture, job.mip, &box,
                             source, pitch, 0);
-#ifdef TQ_DIAGNOSTIC
-        InterlockedIncrement(&g_diagUploadSteps);
-#endif
-        DWORD stepMs = GetTickCount() - stepStartedMs;
-        if (stepMs >= 6 && job.chunkBytes > 512 * 1024)
-            job.chunkBytes /= 2;
-        else if (stepMs <= 2 && job.chunkBytes < job.maxChunkBytes) {
-            job.chunkBytes += 256 * 1024;
-            if (job.chunkBytes > job.maxChunkBytes)
-                job.chunkBytes = job.maxChunkBytes;
+        QueryPerformanceCounter(&after);
+        double stepMs = frequency.QuadPart
+            ? (double)(after.QuadPart - before.QuadPart) * 1000.0
+              / (double)frequency.QuadPart : 0.0;
+        // Budget in time rather than in bytes: what matters to frame pacing is
+        // the milliseconds this stole, and how many bytes that bought varies
+        // with whether the source was resident.
+        UINT sentKib = (UINT)(((uint64_t)rows * pitch) / 1024u);
+        if (sentKib && stepMs > 0.0) {
+            // Weighted towards recent history, and hard against the worst
+            // case: a chunk that cost far more than expected must move the
+            // estimate immediately, not over the next twenty chunks.
+            double observed = stepMs / (double)sentKib;
+            double weight = observed > g_uploadMsPerKib ? 0.5 : 0.1;
+            g_uploadMsPerKib += (observed - g_uploadMsPerKib) * weight;
         }
+        UINT predicted = chunkBytesForTargetMs();
+        if (stepMs > kUploadTargetMs && job.chunkBytes > kUploadFloorBytes)
+            job.chunkBytes = job.chunkBytes / 2 < predicted
+                           ? job.chunkBytes / 2 : predicted;
+        else
+            job.chunkBytes = predicted;
+        if (job.chunkBytes < kUploadFloorBytes)
+            job.chunkBytes = kUploadFloorBytes;
+        if (job.chunkBytes > job.maxChunkBytes)
+            job.chunkBytes = job.maxChunkBytes;
+        tq::probe::count(tq::probe::CounterUploadSteps);
+        tq::probe::count(tq::probe::CounterUploadKiB,
+                         (uint32_t)(((uint64_t)rows * pitch) / 1024u));
         job.blockRow += rows;
         if (job.blockRow >= totalBlockRows) {
             ++job.mip;
@@ -887,15 +926,13 @@ void advanceTextureUploadsInternal() {
     }
 
     if (job.mip >= job.lowMip) {
+        tq::probe::count(tq::probe::CounterUploadJobsDone);
         releaseTexture = job.texture;
         releaseLowView = job.lowView;
         MappingLease* lease = job.lease;
         memset((BYTE*)&job + sizeof(job.state), 0,
                sizeof(job) - sizeof(job.state));
         InterlockedExchange(&job.state, 0);
-#ifdef TQ_DIAGNOSTIC
-        InterlockedIncrement(&g_diagUploadsCompleted);
-#endif
         if (lease && lease->jobs > 0) --lease->jobs;
         if (lease && lease->sealed && !lease->jobs) {
             unmap = lease->mappedBase;
@@ -909,50 +946,6 @@ void advanceTextureUploadsInternal() {
     if (unmap) UnmapViewOfFile(unmap);
 }
 
-#ifdef TQ_DIAGNOSTIC
-void logProgressiveUploadState(unsigned frame) {
-    if (!g_uploadLockReady) {
-        tq::hdr::log("Progressive state: frame=%u disabled\r\n", frame);
-        return;
-    }
-    unsigned active = 0, reserved = 0, usedLeases = 0, sealedLeases = 0;
-    LONG leaseJobs = 0;
-    UINT headMip = 0, headLowMip = 0, headBlockRow = 0, headChunk = 0;
-    UINT headWidth = 0, headHeight = 0;
-    EnterCriticalSection(&g_uploadLock);
-    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
-        const UploadJob& job = g_uploadJobs[i];
-        if (job.state == 1) ++reserved;
-        if (job.state != 2) continue;
-        if (!active) {
-            headMip = job.mip;
-            headLowMip = job.lowMip;
-            headBlockRow = job.blockRow;
-            headChunk = job.chunkBytes;
-            headWidth = job.desc.Width;
-            headHeight = job.desc.Height;
-        }
-        ++active;
-    }
-    for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
-        const MappingLease& lease = g_mappingLeases[i];
-        if (!lease.used) continue;
-        ++usedLeases;
-        if (lease.sealed) ++sealedLeases;
-        leaseJobs += lease.jobs;
-    }
-    LeaveCriticalSection(&g_uploadLock);
-    tq::hdr::log("Progressive state: frame=%u created=%ld completed=%ld steps=%ld "
-                 "active=%u reserved=%u leases=%u sealed=%u leaseJobs=%ld "
-                 "head=%ux%u mip=%u/%u row=%u chunk=%u\r\n",
-                 frame, InterlockedCompareExchange(&g_diagUploadsCreated, 0, 0),
-                 InterlockedCompareExchange(&g_diagUploadsCompleted, 0, 0),
-                 InterlockedCompareExchange(&g_diagUploadSteps, 0, 0),
-                 active, reserved, usedLeases, sealedLeases, leaseJobs,
-                 headWidth, headHeight, headMip, headLowMip,
-                 headBlockRow, headChunk);
-}
-#endif
 
 bool createProgramResources(ID3D11Device* device);
 
@@ -994,14 +987,6 @@ void recordScreenTarget(const D3D11_TEXTURE2D_DESC* desc,
     texture->GetDesc(&target.desc);
     target.upgraded = desc->Format == DXGI_FORMAT_R8G8B8A8_UNORM
                    && target.desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-#ifdef TQ_DIAGNOSTIC
-    tq::hdr::log("Screen target: id=%u requested=%u actual=%u upgraded=%u "
-                 "size=%ux%u bind=0x%x usage=%u misc=0x%x\r\n",
-                 target.id, (unsigned)desc->Format,
-                 (unsigned)target.desc.Format, target.upgraded ? 1u : 0u,
-                 target.desc.Width, target.desc.Height, target.desc.BindFlags,
-                 (unsigned)target.desc.Usage, target.desc.MiscFlags);
-#endif
 }
 
 bool fp16SceneTarget(const D3D11_TEXTURE2D_DESC* desc,
@@ -1066,6 +1051,8 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
                                    const D3D11_SUBRESOURCE_DATA* initial,
                                    ID3D11Texture2D** texture) {
     const void* caller = __builtin_return_address(0);
+    tq::probe::Scope timing(tq::probe::PhaseTextureCreate);
+    tq::probe::count(tq::probe::CounterTextureCreate);
     bool progressivelyHandled = false;
     HRESULT progressive = createProgressiveTexture(device, desc, initial, texture,
                                                     caller, &progressivelyHandled);
@@ -1108,7 +1095,7 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     // quality the directional request can fall below the classification
     // threshold, and the stabiliser wants a size it can trust over one that
     // depends on this guess being right.
-    tq::shadow::noteShadowMapSize(scaled.Width);
+    tq::shadow::noteShadowMapSize(scaled.Width, directional);
     tq::hdr::log("Shadow map: %ux%u requested, %ux%u created (%s, scale %u,"
                  " %u MiB)\r\n",
                  desc->Width, desc->Height, scaled.Width, scaled.Height,
@@ -1120,12 +1107,21 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
         s.originalWidth = desc->Width;
         s.originalHeight = desc->Height;
         s.scale = scale;
+    } else if (!InterlockedCompareExchange(&g_shadowTableFullLogged, 1, 0)) {
+        // Never silently: an unrecorded map keeps its unscaled viewport and
+        // renders into a fraction of itself, which looks like a shadow bug
+        // rather than a bookkeeping one.
+        tq::hdr::log("Shadow map table full at %u entries; %ux%u will render"
+                     " unscaled\r\n", g_shadowTextureCount,
+                     scaled.Width, scaled.Height);
     }
     return hr;
 }
 
 HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode, SIZE_T size,
                                      ID3D11ClassLinkage* linkage, ID3D11PixelShader** shader) {
+    tq::probe::Scope timing(tq::probe::PhaseShaderCreate);
+    tq::probe::count(tq::probe::CounterShaderCreate);
     tq::dxbc::PatchResult patch = {};
     bool enhanced = g_options.shadows && tq::dxbc::enhanceShadowPcf(bytecode, size, &patch);
     // enhanceShadowPcf matches the per-material receivers, which this renderer
@@ -1194,18 +1190,6 @@ HRESULT WINAPI hookCreateRenderTargetView(
         used = &translated;
     }
     HRESULT hr = g_createRenderTargetView(device, resource, used, view);
-#ifdef TQ_DIAGNOSTIC
-    ScreenTargetInfo* screen = screenTarget(identity);
-    if (screen) {
-        D3D11_RENDER_TARGET_VIEW_DESC actual = {};
-        if (SUCCEEDED(hr) && view && *view) (*view)->GetDesc(&actual);
-        tq::hdr::log("Screen RTV: id=%u requested=%u used=%u actual=%u hr=0x%08lx\r\n",
-                     screen->id,
-                     description ? (unsigned)description->Format : 0u,
-                     used ? (unsigned)used->Format : 0u,
-                     (unsigned)actual.Format, (unsigned long)hr);
-    }
-#endif
     return hr;
 }
 
@@ -1246,13 +1230,13 @@ void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* sha
     g_psSetShader(context, replacement, classes, count);
 }
 
-bool dsvIsShadow(ID3D11DepthStencilView* dsv) {
-    if (!dsv) return false;
+const ShadowTexture* dsvShadowTexture(ID3D11DepthStencilView* dsv) {
+    if (!dsv) return nullptr;
     ID3D11Resource* resource = nullptr;
     dsv->GetResource(&resource);
     void* identity = identityOf(resource);
     release(resource);
-    return isShadowIdentity(identity);
+    return shadowTextureForIdentity(identity);
 }
 
 void applyViewports(ID3D11DeviceContext* context) {
@@ -1288,21 +1272,49 @@ void WINAPI hookOMSetRenderTargets(ID3D11DeviceContext* context, UINT count,
         if (!rtvs[i]) continue;
         hasColorTarget = true;
     }
-    bool was = g_shadowBound;
+    const bool was = g_shadowBound;
+    const bool wasDirectional = g_shadowDirectional;
+    const UINT wasScale = g_shadowScale;
+    tq::probe::count(tq::probe::CounterSetRenderTargets);
     // TQ's water-reflection pass can allocate a square R32 depth/SRV texture
     // resembling the shadow map. Its DSV is paired with a color target; the
     // actual shadow-map pass is depth-only. Never scale reflection viewports.
-    g_shadowBound = g_options.shadows && !hasColorTarget && dsvIsShadow(dsv);
-    if (g_shadowBound) {
-        ID3D11Resource* resource = nullptr;
-        dsv->GetResource(&resource);
-        g_shadowScale = shadowScaleForIdentity(identityOf(resource));
-        release(resource);
+    const ShadowTexture* shadow = g_options.shadows && !hasColorTarget
+                                ? dsvShadowTexture(dsv) : nullptr;
+    g_shadowBound = shadow != nullptr;
+    if (shadow) {
+        g_shadowScale = shadow->scale;
+        g_shadowDirectional = shadow->originalWidth >= kDirectionalShadowSize;
+        tq::probe::count(tq::probe::CounterShadowBind);
     } else {
         g_shadowScale = 1;
     }
     g_omSetRenderTargets(context, count, rtvs, dsv);
-    if (was != g_shadowBound) { applyViewports(context); applyScissors(context); }
+    // Transitions are what matter, and there are two kinds: shadow/not-shadow,
+    // and one shadow map straight onto another. The second changes the scale
+    // and the GPU phase without flipping g_shadowBound -- a directional pass
+    // followed immediately by a point pass would otherwise keep the wrong
+    // viewport scale until the game's next RSSetViewports, and leave the
+    // directional region open so both shadow columns read blank.
+    if (was != g_shadowBound) {
+        applyViewports(context);
+        applyScissors(context);
+        if (g_shadowBound)
+            tq::probe::gpuBegin(context, g_shadowDirectional
+                ? tq::probe::GpuShadowDirectional : tq::probe::GpuShadowPoint);
+        else
+            tq::probe::gpuEnd(context, wasDirectional
+                ? tq::probe::GpuShadowDirectional : tq::probe::GpuShadowPoint);
+    } else if (g_shadowBound
+               && (wasDirectional != g_shadowDirectional
+                   || wasScale != g_shadowScale)) {
+        applyViewports(context);
+        applyScissors(context);
+        tq::probe::gpuEnd(context, wasDirectional
+            ? tq::probe::GpuShadowDirectional : tq::probe::GpuShadowPoint);
+        tq::probe::gpuBegin(context, g_shadowDirectional
+            ? tq::probe::GpuShadowDirectional : tq::probe::GpuShadowPoint);
+    }
 }
 
 void WINAPI hookRSSetViewports(ID3D11DeviceContext* context, UINT count,
@@ -1565,10 +1577,6 @@ void releaseHdrSizeResources() {
     release(g_hdr.presentCopySRV); release(g_hdr.presentCopy);
     release(g_hdr.backBufferSRV);
     release(g_hdr.backBufferRTV);
-#ifdef TQ_DIAGNOSTIC
-    release(g_fp16Probe);
-    g_fp16ProbeFrame = 0;
-#endif
     g_hdr.width = g_hdr.height = 0;
 }
 
@@ -1814,6 +1822,9 @@ bool createBloomProgramResources(ID3D11Device* device) {
 }
 
 bool createProgramResources(ID3D11Device* device) {
+    // Timestamp queries are device objects like any other, so they are built
+    // here rather than from inside a hooked call.
+    tq::probe::createResources(device);
     bool ok = true;
     if (g_options.smaa) ok = createSmaaProgramResources(device);
     if (ok) ok = createHdrProgramResources(device);
@@ -2082,6 +2093,7 @@ bool enhancedBloomSelected() {
 }
 
 bool renderEnhancedBloom() {
+    tq::probe::Scope bloomTiming(tq::probe::PhaseBloom);
     const tq::hdr::Runtime& runtime = tq::hdr::runtime();
     if (!enhancedBloomSelected() || !runtime.fp16Active) {
         tq::bloomhook::setSuppression(false);
@@ -2151,6 +2163,7 @@ bool renderEnhancedBloom() {
     bool wasInside = g_inside;
     g_inside = true;
     BloomTiming* timing = beginBloomTiming(g_context);
+    tq::probe::gpuBegin(g_context, tq::probe::GpuBloom);
     ID3D11ShaderResourceView* nullViews[3] = {};
     g_psSetShaderResources(g_context, 0, 3, nullViews);
     g_omSetRenderTargets(g_context, 0, nullptr, nullptr);
@@ -2211,6 +2224,7 @@ bool renderEnhancedBloom() {
     g_psSetShaderResources(g_context, 0, 3, nullViews);
 
     endBloomTiming(g_context, timing);
+    tq::probe::gpuEnd(g_context, tq::probe::GpuBloom);
     restoreState(g_context, old);
     g_inside = wasInside;
 
@@ -2277,6 +2291,8 @@ void issueDraw(ID3D11DeviceContext* c, bool indexed, UINT count, UINT start, INT
 }
 
 bool runSmaa(ID3D11DeviceContext* c, bool indexed, UINT count, UINT start, INT base) {
+    tq::probe::Scope timing(tq::probe::PhaseSmaa);
+    tq::probe::GpuScope gpuTiming(c, tq::probe::GpuSmaa);
     SavedState old;
     saveState(c, old);
     ID3D11ShaderResourceView* source = old.srvs[0];
@@ -2370,101 +2386,6 @@ bool prepareHdrPresentation(IDXGISwapChain* swapChain) {
     return ok;
 }
 
-#ifdef TQ_DIAGNOSTIC
-bool fp16ProbeFrame(unsigned frame) {
-    return frame == 1 || frame == 2 || frame == 30 || frame == 120
-        || frame == 180 || frame == 240 || frame == 300
-        || frame == 600 || frame == 1200;
-}
-
-void* renderTargetIdentity(ID3D11RenderTargetView* view) {
-    if (!view) return nullptr;
-    ID3D11Resource* resource = nullptr;
-    view->GetResource(&resource);
-    void* identity = identityOf(resource);
-    release(resource);
-    return identity;
-}
-
-void logFp16Probe(const char* stage, unsigned frame, ID3D11Texture2D* source) {
-    if (!stage || !source || !g_context || !g_device) return;
-    D3D11_TEXTURE2D_DESC sourceDesc = {};
-    source->GetDesc(&sourceDesc);
-    if (sourceDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT
-        || !sourceDesc.Width || !sourceDesc.Height) {
-        tq::hdr::log("FP16 probe: frame=%u stage=%s unsupported format=%u size=%ux%u\r\n",
-                     frame, stage, (unsigned)sourceDesc.Format,
-                     sourceDesc.Width, sourceDesc.Height);
-        return;
-    }
-    if (!g_fp16Probe) {
-        D3D11_TEXTURE2D_DESC probe = {};
-        probe.Width = probe.Height = 4;
-        probe.MipLevels = probe.ArraySize = 1;
-        probe.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        probe.SampleDesc.Count = 1;
-        probe.Usage = D3D11_USAGE_STAGING;
-        probe.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        HRESULT createHr = g_createTexture2D(g_device, &probe, nullptr, &g_fp16Probe);
-        if (FAILED(createHr) || !g_fp16Probe) {
-            tq::hdr::log("FP16 probe creation failed: hr=0x%08x\r\n",
-                         (unsigned)createHr);
-            return;
-        }
-    }
-    for (UINT y = 0; y < 4; ++y) {
-        for (UINT x = 0; x < 4; ++x) {
-            UINT sourceX = ((2 * x + 1) * sourceDesc.Width) / 8;
-            UINT sourceY = ((2 * y + 1) * sourceDesc.Height) / 8;
-            if (sourceX >= sourceDesc.Width) sourceX = sourceDesc.Width - 1;
-            if (sourceY >= sourceDesc.Height) sourceY = sourceDesc.Height - 1;
-            D3D11_BOX box = {sourceX, sourceY, 0, sourceX + 1, sourceY + 1, 1};
-            g_context->CopySubresourceRegion(g_fp16Probe, 0, x, y, 0,
-                                             source, 0, &box);
-        }
-    }
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    HRESULT mapHr = g_context->Map(g_fp16Probe, 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(mapHr)) {
-        tq::hdr::log("FP16 probe map failed: frame=%u stage=%s hr=0x%08x\r\n",
-                     frame, stage, (unsigned)mapHr);
-        return;
-    }
-    struct HalfPixel { uint16_t r, g, b, a; };
-    HalfPixel samples[4] = {};
-    unsigned rgbNonZero = 0;
-    unsigned rgbSpecial = 0;
-    uint16_t maxAbsHalf = 0;
-    for (UINT y = 0; y < 4; ++y) {
-        const HalfPixel* row = (const HalfPixel*)((const BYTE*)mapped.pData
-                                                  + y * mapped.RowPitch);
-        for (UINT x = 0; x < 4; ++x) {
-            const HalfPixel& pixel = row[x];
-            const uint16_t rgb[3] = {pixel.r, pixel.g, pixel.b};
-            bool nonZero = false;
-            for (UINT channel = 0; channel < 3; ++channel) {
-                uint16_t magnitude = rgb[channel] & 0x7fff;
-                if (magnitude) nonZero = true;
-                if (magnitude > maxAbsHalf) maxAbsHalf = magnitude;
-                if ((magnitude & 0x7c00) == 0x7c00) ++rgbSpecial;
-            }
-            if (nonZero) ++rgbNonZero;
-            if (x == y) samples[x] = pixel;
-        }
-    }
-    g_context->Unmap(g_fp16Probe, 0);
-    tq::hdr::log(
-        "FP16 probe: frame=%u stage=%s rgbNonZero=%u/16 special=%u "
-        "maxAbs=0x%04x diag="
-        "%04x/%04x/%04x/%04x,%04x/%04x/%04x/%04x,"
-        "%04x/%04x/%04x/%04x,%04x/%04x/%04x/%04x\r\n",
-        frame, stage, rgbNonZero, rgbSpecial, maxAbsHalf,
-        samples[0].r, samples[0].g, samples[0].b, samples[0].a,
-        samples[1].r, samples[1].g, samples[1].b, samples[1].a,
-        samples[2].r, samples[2].g, samples[2].b, samples[2].a,
-        samples[3].r, samples[3].g, samples[3].b, samples[3].a);
-}
-#endif
 
 // The overlay owns its rasterisation and its draw; the pipeline-state
 // discipline every other enhancement here follows stays on this side, along
@@ -2477,6 +2398,7 @@ void logFp16Probe(const char* stage, unsigned frame, ID3D11Texture2D* source) {
 void drawFrameOverlay(IDXGISwapChain* swapChain) {
     if (!tq::frameoverlay::enabled() || !g_device || !g_context) return;
     if (InterlockedCompareExchange(&g_programState, 2, 2) != 2) return;
+    tq::probe::Scope timing(tq::probe::PhaseOverlayDraw);
     SavedState old;
     saveState(g_context, old);
     ID3D11RenderTargetView* target = old.rtvs[0];
@@ -2518,27 +2440,6 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
                                   noTargets, nullptr);
     g_inside = true;
     g_context->CopyResource(g_hdr.presentCopy, backBuffer);
-#ifdef TQ_DIAGNOSTIC
-    const unsigned probeFrame = ++g_fp16ProbeFrame;
-    const bool probe = fp16ProbeFrame(probeFrame);
-    if (probe) {
-        logProgressiveUploadState(probeFrame);
-        tq::hdr::log("FP16 activity: frame=%u draws=%u clears=%u copies=%u updates=%u resolves=%u "
-                     "screenTargets=%u restoreAtPresent=%u\r\n",
-                     probeFrame, g_diagBackBufferDraws, g_diagBackBufferClears,
-                     g_diagBackBufferCopies, g_diagBackBufferUpdates,
-                     g_diagBackBufferResolves, g_screenTargetCount,
-                     g_diagRestoreAtPresent);
-        tq::hdr::log("FP16 identities: frame=%u current=%p cachedRTV=%p gameRTV=%p\r\n",
-                     probeFrame, identityOf(backBuffer),
-                     renderTargetIdentity(g_hdr.backBufferRTV),
-                     renderTargetIdentity(old.rtvs[0]));
-        logFp16Probe("game-copy", probeFrame, g_hdr.presentCopy);
-    }
-    g_diagBackBufferDraws = g_diagBackBufferClears = 0;
-    g_diagBackBufferCopies = g_diagBackBufferUpdates = 0;
-    g_diagBackBufferResolves = 0;
-#endif
     g_context->OMSetRenderTargets(1, &g_hdr.backBufferRTV, nullptr);
     g_context->OMSetBlendState(g_hdr.blend, nullptr, 0xffffffff);
     g_context->OMSetDepthStencilState(g_hdr.depth, 0);
@@ -2561,13 +2462,6 @@ bool presentHdrFrame(IDXGISwapChain* swapChain) {
     g_context->PSSetShaderResources(0, 3, noSrvs);
     g_bloom.freshForPresent = false;
     g_inside = false;
-#ifdef TQ_DIAGNOSTIC
-    if (probe) {
-        g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
-                                      noTargets, nullptr);
-        logFp16Probe("composed", probeFrame, backBuffer);
-    }
-#endif
     restoreState(g_context, old);
     backBuffer->Release();
     return true;
@@ -2687,64 +2581,11 @@ void WINAPI hookClearRenderTargetView(ID3D11DeviceContext* context,
     // prior flip-buffer contents and needs no preservation copy.
     bool backBuffer = !g_inside && context == g_context
                    && viewTargetsCurrentBackBuffer(view);
-#ifdef TQ_DIAGNOSTIC
-    if (backBuffer) ++g_diagBackBufferClears;
-#endif
     if (backBuffer && g_backBufferNeedsRestore)
         g_backBufferNeedsRestore = false;
     g_clearRenderTargetView(context, view, color);
 }
 
-#ifdef TQ_DIAGNOSTIC
-bool resourceTargetsCurrentBackBuffer(ID3D11Resource* resource) {
-    return resource && identityOf(resource) == g_backBufferIdentity;
-}
-
-void WINAPI hookCopySubresourceRegion(
-    ID3D11DeviceContext* context, ID3D11Resource* destination,
-    UINT destinationSubresource, UINT destinationX, UINT destinationY,
-    UINT destinationZ, ID3D11Resource* source, UINT sourceSubresource,
-    const D3D11_BOX* sourceBox) {
-    if (!g_inside && context == g_context
-        && resourceTargetsCurrentBackBuffer(destination))
-        ++g_diagBackBufferCopies;
-    g_copySubresourceRegion(context, destination, destinationSubresource,
-                            destinationX, destinationY, destinationZ,
-                            source, sourceSubresource, sourceBox);
-}
-
-void WINAPI hookCopyResource(ID3D11DeviceContext* context,
-                             ID3D11Resource* destination,
-                             ID3D11Resource* source) {
-    if (!g_inside && context == g_context
-        && resourceTargetsCurrentBackBuffer(destination))
-        ++g_diagBackBufferCopies;
-    g_copyResource(context, destination, source);
-}
-
-void WINAPI hookUpdateSubresource(
-    ID3D11DeviceContext* context, ID3D11Resource* destination,
-    UINT destinationSubresource, const D3D11_BOX* destinationBox,
-    const void* source, UINT sourceRowPitch, UINT sourceDepthPitch) {
-    if (!g_inside && context == g_context
-        && resourceTargetsCurrentBackBuffer(destination))
-        ++g_diagBackBufferUpdates;
-    g_updateSubresource(context, destination, destinationSubresource,
-                        destinationBox, source, sourceRowPitch,
-                        sourceDepthPitch);
-}
-
-void WINAPI hookResolveSubresource(
-    ID3D11DeviceContext* context, ID3D11Resource* destination,
-    UINT destinationSubresource, ID3D11Resource* source,
-    UINT sourceSubresource, DXGI_FORMAT format) {
-    if (!g_inside && context == g_context
-        && resourceTargetsCurrentBackBuffer(destination))
-        ++g_diagBackBufferResolves;
-    g_resolveSubresource(context, destination, destinationSubresource,
-                         source, sourceSubresource, format);
-}
-#endif
 
 // Grass vertex streams are dynamic and refilled as terrain blocks stream in,
 // so the only place their contents exist on the CPU is between the game's own
@@ -2752,6 +2593,8 @@ void WINAPI hookResolveSubresource(
 HRESULT WINAPI hookCreateBuffer(ID3D11Device* device, const D3D11_BUFFER_DESC* desc,
                                 const D3D11_SUBRESOURCE_DATA* initial,
                                 ID3D11Buffer** buffer) {
+    tq::probe::Scope timing(tq::probe::PhaseBufferCreate);
+    tq::probe::count(tq::probe::CounterBufferCreate);
     HRESULT result = g_createBuffer(device, desc, initial, buffer);
     if (SUCCEEDED(result) && buffer && *buffer)
         tq::grass::noteBufferCreated(*buffer, desc);
@@ -2761,6 +2604,7 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* device, const D3D11_BUFFER_DESC* d
 HRESULT WINAPI hookMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
                        UINT subresource, D3D11_MAP type, UINT flags,
                        D3D11_MAPPED_SUBRESOURCE* mapped) {
+    tq::probe::count(tq::probe::CounterMap);
     HRESULT result = g_map(context, resource, subresource, type, flags, mapped);
     if (SUCCEEDED(result) && mapped)
         tq::grass::noteMap(resource, subresource, mapped);
@@ -2769,6 +2613,10 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
 
 void WINAPI hookUnmap(ID3D11DeviceContext* context, ID3D11Resource* resource,
                       UINT subresource) {
+    tq::probe::count(tq::probe::CounterUnmap);
+    // Counted, never timed: this runs ~2,400 times a frame and a clock pair on
+    // each would cost more than the lookups it measured. The rewrite itself is
+    // timed inside grass.cpp, on the rare path that actually does the work.
     // Before the commit, so the driver receives the edited vertices rather
     // than a second write to memory it has already taken.
     tq::grass::noteUnmap(resource, subresource);
@@ -2780,7 +2628,9 @@ void WINAPI hookUnmap(ID3D11DeviceContext* context, ID3D11Resource* resource,
 
 // The crossing card. Same index range, same everything, over a stream holding
 // the block's cards turned a quarter turn about their own centres -- so every
-// blade keeps its place and gains a second card through it.
+// blade keeps its place and gains a second card through it. Priced with the
+// probe by drawing it on alternating frames only: +0.04 ms of GPU a frame
+// against the blades' own 2.7 ms, so it carries no switch of its own.
 void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
     ID3D11Buffer* bound = nullptr;
     UINT stride = 0;
@@ -2791,6 +2641,7 @@ void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT ba
     // contents have to be read back rather than waited for.
     if (!crossed) tq::grass::seedFromDraw(context, bound);
     if (crossed) {
+        tq::probe::count(tq::probe::CounterGrassCross);
         context->IASetVertexBuffers(0, 1, &crossed, &stride, &offset);
         // The original entry point: the hook has already run for this draw.
         g_drawIndexed(context, count, start, base);
@@ -2800,15 +2651,8 @@ void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT ba
 }
 
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
+    if (!g_inside) tq::probe::count(tq::probe::CounterDraw);
     if (!g_inside) tracePostProcessBinding(context);
-#ifdef TQ_DIAGNOSTIC
-    if (!g_inside && context == g_context) {
-        ID3D11RenderTargetView* target = nullptr;
-        context->OMGetRenderTargets(1, &target, nullptr);
-        if (viewTargetsCurrentBackBuffer(target)) ++g_diagBackBufferDraws;
-        release(target);
-    }
-#endif
     if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, false, count, start, 0); g_inside = false;
@@ -2825,15 +2669,8 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    if (!g_inside) tq::probe::count(tq::probe::CounterDrawIndexed);
     if (!g_inside) tracePostProcessBinding(context);
-#ifdef TQ_DIAGNOSTIC
-    if (!g_inside && context == g_context) {
-        ID3D11RenderTargetView* target = nullptr;
-        context->OMGetRenderTargets(1, &target, nullptr);
-        if (viewTargetsCurrentBackBuffer(target)) ++g_diagBackBufferDraws;
-        release(target);
-    }
-#endif
     if (!g_inside) restoreBeforeBackBufferDraw(context);
     if (!g_inside && g_options.smaa && g_fxaaBound) {
         g_inside = true; bool done = runSmaa(context, true, count, start, base); g_inside = false;
@@ -2844,9 +2681,21 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
+    const bool grassDraw = !g_inside && g_grassEnhanced && tq::grass::rendering();
+    // Opened before the game's own grass draw and closed after ours, so the
+    // region covers the blades and the crossing together.
+    if (grassDraw) {
+        tq::probe::count(tq::probe::CounterGrassDraw);
+        tq::probe::gpuBegin(context, tq::probe::GpuGrass);
+    }
     g_drawIndexed(context, count, start, base);
-    if (!g_inside && g_grassEnhanced && tq::grass::rendering())
-        drawGrassCross(context, count, start, base);
+    if (grassDraw) {
+        {
+            tq::probe::Scope timing(tq::probe::PhaseGrassCross);
+            drawGrassCross(context, count, start, base);
+        }
+        tq::probe::gpuEnd(context, tq::probe::GpuGrass);
+    }
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -2907,10 +2756,13 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     }
     tq::streaming::setPresentCallback(&onPresent);
     tq::streaming::setPostPresentCallback(&onPostPresent);
-    if (hdrRuntime.fp16Active) {
+    // The shadow path needs the pre-resize callback too, not just FP16: the
+    // renderer rebuilds its shadow targets across a resize and the identity
+    // table has to be dropped with them.
+    if (hdrRuntime.fp16Active || g_options.shadows)
         tq::streaming::setPreResizeCallback(&onBeforeResize);
+    if (hdrRuntime.fp16Active)
         tq::streaming::setResizeCallback(&onResize);
-    }
     g_device = device;
     g_context = context;
     if (swapChain) {
@@ -2986,18 +2838,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&cv[44], (void*)&hookRSSetViewports, (void**)&g_rsSetViewports);
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
-#ifdef TQ_DIAGNOSTIC
-    ok &= patchSlot(&cv[46], (void*)&hookCopySubresourceRegion,
-                    (void**)&g_copySubresourceRegion);
-    ok &= patchSlot(&cv[47], (void*)&hookCopyResource,
-                    (void**)&g_copyResource);
-    ok &= patchSlot(&cv[48], (void*)&hookUpdateSubresource,
-                    (void**)&g_updateSubresource);
-    ok &= patchSlot(&cv[57], (void*)&hookResolveSubresource,
-                    (void**)&g_resolveSubresource);
-#else
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
-#endif
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -3047,19 +2888,28 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
 }
 
 void onPresent(IDXGISwapChain* swapChain) {
+    // First, so the interval it closes is exactly the span the phases below
+    // were accumulated over: our own post-work here, the game's Present, and
+    // the game's next rendered frame.
     tq::frameoverlay::recordFrame();
-    tq::grass::onPresent(g_context);
+    tq::probe::beginFrame(g_context);
+    // The probe and the overlay both need device objects, and the worker that
+    // builds them is otherwise only started by a matched shader -- which never
+    // arrives when every visual enhancement is switched off.
+    if ((tq::probe::enabled() || tq::frameoverlay::enabled()) && g_device)
+        startProgramBuild(g_device);
+    tq::probe::Scope presentTiming(tq::probe::PhasePresent);
+    { tq::probe::Scope grassTiming(tq::probe::PhaseGrassPresent);
+      tq::grass::onPresent(g_context); }
     if (!InterlockedCompareExchange(&g_firstPresentLogged, 1, 0))
         tq::hdr::log("First Present reached: swapChain=%p fp16=%u hdr=%u\r\n",
                      swapChain, tq::hdr::runtime().fp16Active ? 1u : 0u,
                      tq::hdr::runtime().active ? 1u : 0u);
-    advanceTextureUploadsInternal();
+    { tq::probe::Scope streamTiming(tq::probe::PhaseStreamStep);
+      advanceTextureUploadsInternal(); }
     if (tq::hdr::runtime().fp16Active) {
         // If the game submits another Present without touching the new flip
         // buffer, restore before capturing it as the next game-space frame.
-#ifdef TQ_DIAGNOSTIC
-        g_diagRestoreAtPresent = g_backBufferNeedsRestore ? 1u : 0u;
-#endif
         if (g_backBufferNeedsRestore) restoreGameSpaceBackBuffer();
         // After that restore, which would otherwise copy the overlay away.
         drawFrameOverlay(swapChain);
@@ -3089,19 +2939,20 @@ void onBeforeResize(IDXGISwapChain* swapChain) {
     g_backBufferIdentity = nullptr;
     g_backBufferWidth = g_backBufferHeight = 0;
     g_backBufferNeedsRestore = false;
-#ifdef TQ_DIAGNOSTIC
-    g_diagBackBufferDraws = g_diagBackBufferClears = 0;
-    g_diagBackBufferCopies = g_diagBackBufferUpdates = 0;
-    g_diagBackBufferResolves = 0;
-    g_diagRestoreAtPresent = 0;
-    InterlockedExchange(&g_diagUploadsCreated, 0);
-    InterlockedExchange(&g_diagUploadsCompleted, 0);
-    InterlockedExchange(&g_diagUploadSteps, 0);
-#endif
     memset(g_screenTargets, 0, sizeof(g_screenTargets));
     g_screenTargetCount = 0;
     memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
     g_postProcessBindingCount = 0;
+    // The renderer rebuilds its shadow targets here too, and these are raw
+    // identity pointers with no release hook: a freed allocation's address can
+    // be handed back for something else entirely, and a depth-only pass that
+    // matched it would have its viewport multiplied.
+    memset(g_shadowTextures, 0, sizeof(g_shadowTextures));
+    g_shadowTextureCount = 0;
+    g_shadowBound = false;
+    g_shadowScale = 1;
+    InterlockedExchange(&g_shadowTableFullLogged, 0);
+    tq::shadow::resetShadowMapSizes();
 }
 
 void onResize(IDXGISwapChain* swapChain) {
@@ -3182,12 +3033,9 @@ void shutdown() {
     g_clearRenderTargetView = nullptr;
     g_psSetShaderResources = nullptr;
     g_updateSubresource = nullptr;
-#ifdef TQ_DIAGNOSTIC
-    g_copySubresourceRegion = nullptr;
-    g_copyResource = nullptr;
-    g_resolveSubresource = nullptr;
-#endif
     g_archiveUnmap = nullptr;
+    if (workerStopped) tq::probe::releaseResources();
+    tq::probe::shutdown();
     tq::frameoverlay::reset();
     InterlockedExchange(&g_archiveVtablePatched, 0);
     InterlockedExchange(&g_programState, 0);

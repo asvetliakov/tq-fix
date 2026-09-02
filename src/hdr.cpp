@@ -122,7 +122,7 @@ void logPath(wchar_t path[MAX_PATH]) {
     iniPath(path);
     wchar_t* slash = wcsrchr(path, L'\\');
     if (!slash) return;
-#ifdef TQ_DIAGNOSTIC
+#ifdef TQ_FORCE_TRACE
     lstrcpyW(slash + 1, L"tqflicker-debug.log");
 #else
     lstrcpyW(slash + 1, g_runtime.settings.debug
@@ -203,7 +203,7 @@ Settings readSettings() {
                             || !_wcsicmp(value, L"1")
                             || !_wcsicmp(value, L"on")
                             || !_wcsicmp(value, L"true");
-#ifdef TQ_DIAGNOSTIC
+#ifdef TQ_FORCE_TRACE
     g_runtime.settings.trace = true;
 #endif
     return g_runtime.settings;

@@ -1,5 +1,7 @@
 #include "grass.h"
 
+#include "probe.h"
+
 #include "hdr.h"
 
 #include <float.h>
@@ -138,8 +140,20 @@ unsigned g_pendingTurned;
 // draw, which is the only place a grass stream is certain, but by then the
 // game has long since written it: a twin that waits for the next Map/Unmap
 // waits for the block to be recycled, which for most blocks never happens.
-// A staging copy reads what is already there. One at a time, mapped a frame
-// later, so the read never waits on the copy it just queued.
+// A staging copy reads what is already there.
+//
+// Measured, and the reason this reads the way it does: the first version
+// queued the copy during a draw and mapped it from onPresent, believing that
+// to be the following frame. It is not -- onPresent runs *before* the game's
+// Present -- so every seed blocked the render thread until the GPU had caught
+// up with the copy it had just issued. One run of 8,176 frames spent 2,250 ms
+// in 96 such stalls, 23.4 ms each, which is one whole frame every time.
+//
+// So the copy is now handed over in three steps: queued at a draw, released
+// for reading only after a Present has actually happened, and then mapped with
+// DO_NOT_WAIT so a copy the GPU has not reached yet costs a retry rather than
+// a stall.
+enum SeedStage { SeedIdle, SeedCopyQueued, SeedReadable };
 ID3D11Buffer* g_seedStaging;
 unsigned g_seedSlot = kMaxGrassBuffers;
 LONG g_seedStage;
@@ -147,7 +161,9 @@ LONG g_seedStage;
 // One block's worth, reused. The rotate runs on this rather than on the
 // game's upload memory, which is write-combined and painful to read twice.
 BYTE* g_scratch;
-unsigned g_pendingSlot = kMaxGrassBuffers;
+// Published under g_grassLock and read without it by afterUnmap, which is on
+// the path of every unmap in the game.
+volatile LONG g_pendingSlot = (LONG)kMaxGrassBuffers;
 
 bool readable(const void* address, SIZE_T bytes) {
     MEMORY_BASIC_INFORMATION info = {};
@@ -544,11 +560,30 @@ static bool isOwnTwin(ID3D11Buffer* buffer) {
     return false;
 }
 
+// The shape a grass stream is created with. One definition, used both when a
+// buffer is created (candidacy) and when one is offered at a draw (adoption),
+// so the two entry points cannot drift into disagreeing about what grass is.
+static bool grassStreamShape(const D3D11_BUFFER_DESC& desc) {
+    return desc.ByteWidth == kGrassStreamBytes
+        && desc.Usage == D3D11_USAGE_DYNAMIC
+        && (desc.BindFlags & D3D11_BIND_VERTEX_BUFFER)
+        && (desc.CPUAccessFlags & D3D11_CPU_ACCESS_WRITE);
+}
+
 // Takes a slot for `buffer`, reusing its own if it has one, then any free
 // slot, then the coldest. Round-robin eviction could take a stream that is on
 // screen, which is what made a crossing vanish while the camera moved.
 static unsigned adoptStream(ID3D11Buffer* buffer) {
     unsigned chosen = kMaxGrassBuffers;
+    // The draw hook offers whatever is bound on stream 0 while RenderGrass is
+    // on the stack, which is not necessarily a grass stream. Adopting one of
+    // those used to start a staging copy into a fixed 44,800-byte buffer that
+    // could never match it, and the slot then stayed pending for the rest of
+    // the session, re-copying every frame. A stream has an exact shape; check
+    // it before taking a slot.
+    D3D11_BUFFER_DESC desc = {};
+    if (buffer) buffer->GetDesc(&desc);
+    if (!grassStreamShape(desc)) return kMaxGrassBuffers;
     EnterCriticalSection(&g_grassLock);
     unsigned free = kMaxGrassBuffers;
     unsigned coldest = 0;
@@ -574,6 +609,7 @@ static unsigned adoptStream(ID3D11Buffer* buffer) {
         memset(&g_grassBuffers[chosen], 0, sizeof(g_grassBuffers[chosen]));
         g_grassBuffers[chosen].buffer = buffer;
         g_grassBuffers[chosen].pending = true;
+        tq::probe::count(tq::probe::CounterGrassAdopt);
         g_grassBuffers[chosen].lastSeen = g_drawOrdinal;
         // An index that will not take the key leaves the stream untracked
         // rather than mis-tracked: the block draws uncrossed, as it did before.
@@ -593,11 +629,7 @@ static unsigned adoptStream(ID3D11Buffer* buffer) {
 void noteBufferCreated(ID3D11Buffer* buffer, const D3D11_BUFFER_DESC* desc) {
     if (internalBusy()) return;
     if (!buffer || !desc || !g_grassLockReady || !tracking()) return;
-    if (desc->ByteWidth != kGrassStreamBytes
-        || desc->Usage != D3D11_USAGE_DYNAMIC
-        || !(desc->BindFlags & D3D11_BIND_VERTEX_BUFFER)
-        || !(desc->CPUAccessFlags & D3D11_CPU_ACCESS_WRITE))
-        return;
+    if (!grassStreamShape(*desc)) return;
     EnterCriticalSection(&g_grassLock);
     unsigned slot = kMaxCandidates;
     for (unsigned i = 0; i < g_candidateHigh; ++i) {
@@ -691,6 +723,11 @@ void noteUnmap(ID3D11Resource* resource, UINT subresource) {
     // and is about to hand it to the driver. Every plane is checked before it
     // is read, so a buffer that reached here by size alone changes nothing.
     if (config().enhanced && g_scratch) {
+        // Timed here, on the block that does the work, rather than around the
+        // whole unmap hook: a clock pair on all 2,400 unmaps a frame costs
+        // more than the lookups it would measure and charges driver time to
+        // this column.
+        tq::probe::Scope timing(tq::probe::PhaseGrassFill);
         memcpy(g_scratch, memory, kGrassStreamBytes);
         float* base = (float*)g_scratch;
         const unsigned planes =
@@ -698,10 +735,14 @@ void noteUnmap(ID3D11Resource* resource, UINT subresource) {
         unsigned turned = 0;
         for (unsigned i = 0; i < planes; ++i)
             if (rotatePlane(base + (SIZE_T)i * kFloatsPerPlane)) ++turned;
+        // How many of the 350 planes a fill actually turns: the block sampled
+        // in research/grass.md drew 50 of them, so this is what says whether
+        // the copy and the walk above are mostly wasted.
+        tq::probe::count(tq::probe::CounterGrassRotate, turned);
 
         EnterCriticalSection(&g_grassLock);
         g_grassBuffers[slot].pending = true;
-        g_pendingSlot = slot;
+        g_pendingSlot = (LONG)slot;
         g_pendingTurned = turned;
         LeaveCriticalSection(&g_grassLock);
     }
@@ -718,7 +759,7 @@ void installBuffers() {
     InitializeCriticalSection(&g_grassLock);
     memset(g_grassBuffers, 0, sizeof(g_grassBuffers));
     memset(g_candidates, 0, sizeof(g_candidates));
-    g_pendingSlot = kMaxGrassBuffers;
+    g_pendingSlot = (LONG)kMaxGrassBuffers;
     indexReset(g_streamIndex);
     indexReset(g_candidateIndex);
     g_grassLockReady = true;
@@ -762,12 +803,21 @@ ID3D11Buffer* crossedBuffer(ID3D11Buffer* source) {
 }
 
 void afterUnmap(ID3D11DeviceContext* context) {
+    // Every unmap in the game arrives here -- about 2,400 a frame -- and almost
+    // none of them left anything to do. An aligned volatile LONG load is
+    // atomic on x86 and really is one load; a same-value compare-exchange, the
+    // first version of this fast path, is a bus-locked write dressed as one.
+    // A stale read costs nothing: the slot is only ever published by this same
+    // thread's noteUnmap moments earlier, and the critical section below
+    // re-reads it authoritatively.
+    if (g_pendingSlot == (LONG)kMaxGrassBuffers) return;
+    tq::probe::Scope timing(tq::probe::PhaseGrassFill);
     unsigned slot = kMaxGrassBuffers;
     unsigned turned = 0;
     EnterCriticalSection(&g_grassLock);
-    slot = g_pendingSlot;
+    slot = (unsigned)g_pendingSlot;
     turned = g_pendingTurned;
-    g_pendingSlot = kMaxGrassBuffers;
+    g_pendingSlot = (LONG)kMaxGrassBuffers;
     g_pendingTurned = 0;
     LeaveCriticalSection(&g_grassLock);
     if (!context || slot >= kMaxGrassBuffers || !g_scratch) return;
@@ -795,19 +845,23 @@ void afterUnmap(ID3D11DeviceContext* context) {
             device->Release();
         }
         if (!entry.crossed) {
+            tq::probe::count(tq::probe::CounterGrassTwinFail);
             tq::hdr::log("Grass crossed: twin buffer creation failed\r\n");
             return;
         }
+        tq::probe::count(tq::probe::CounterGrassTwinCreate);
     }
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(context->Map(entry.crossed, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))
         || !mapped.pData) {
+        tq::probe::count(tq::probe::CounterGrassTwinFail);
         tq::hdr::log("Grass crossed: twin upload failed slot=%u\r\n", slot);
         return;
     }
     memcpy(mapped.pData, g_scratch, kGrassStreamBytes);
     context->Unmap(entry.crossed, 0);
+    tq::probe::count(tq::probe::CounterGrassFill);
 
     EnterCriticalSection(&g_grassLock);
     entry.pending = false;
@@ -816,7 +870,7 @@ void afterUnmap(ID3D11DeviceContext* context) {
 
 void seedFromDraw(ID3D11DeviceContext* context, ID3D11Buffer* source) {
     if (!context || !source || !g_grassLockReady || !config().enhanced) return;
-    if (InterlockedCompareExchange(&g_seedStage, 0, 0) != 0) return;
+    if (InterlockedCompareExchange(&g_seedStage, 0, 0) != SeedIdle) return;
 
     unsigned slot = kMaxGrassBuffers;
     EnterCriticalSection(&g_grassLock);
@@ -842,25 +896,59 @@ void seedFromDraw(ID3D11DeviceContext* context, ID3D11Buffer* source) {
         device->Release();
         if (!g_seedStaging) return;
     }
+    tq::probe::count(tq::probe::CounterGrassSeedQueued);
     context->CopyResource(g_seedStaging, source);
     g_seedSlot = slot;
-    InterlockedExchange(&g_seedStage, 1);
+    InterlockedExchange(&g_seedStage, SeedCopyQueued);
+}
+
+// Marks a slot as no longer worth seeding. Leaving it pending with no twin is
+// what turned a single failure into a copy and a map on every subsequent
+// frame; clearing it stops that, and a later ordinary fill still promotes the
+// block through the Map/Unmap path.
+static void abandonSeed(unsigned slot) {
+    tq::probe::count(tq::probe::CounterGrassSeedFailed);
+    if (slot >= kMaxGrassBuffers) return;
+    EnterCriticalSection(&g_grassLock);
+    g_grassBuffers[slot].pending = false;
+    LeaveCriticalSection(&g_grassLock);
 }
 
 static void completeSeed(ID3D11DeviceContext* context) {
-    if (!context || InterlockedCompareExchange(&g_seedStage, 0, 0) != 1) return;
+    if (!context) return;
+    // One Present has to have happened between the copy and the read. This
+    // callback runs before the game's Present, so the frame in which the copy
+    // was queued is not yet on the GPU when it returns.
+    if (InterlockedCompareExchange(&g_seedStage, SeedReadable, SeedCopyQueued)
+        == SeedCopyQueued)
+        return;
+    if (InterlockedCompareExchange(&g_seedStage, 0, 0) != SeedReadable) return;
     const unsigned slot = g_seedSlot;
-    g_seedSlot = kMaxGrassBuffers;
-    InterlockedExchange(&g_seedStage, 0);
-    if (slot >= kMaxGrassBuffers || !g_seedStaging || !g_scratch) return;
+    if (slot >= kMaxGrassBuffers || !g_seedStaging || !g_scratch) {
+        g_seedSlot = kMaxGrassBuffers;
+        InterlockedExchange(&g_seedStage, SeedIdle);
+        return;
+    }
     Internal fence;
     GrassBuffer& entry = g_grassBuffers[slot];
-    if (!entry.buffer || entry.crossed) return;
+    if (!entry.buffer || entry.crossed) {
+        g_seedSlot = kMaxGrassBuffers;
+        InterlockedExchange(&g_seedStage, SeedIdle);
+        return;
+    }
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(context->Map(g_seedStaging, 0, D3D11_MAP_READ, 0, &mapped))
-        || !mapped.pData)
+    HRESULT hr = context->Map(g_seedStaging, 0, D3D11_MAP_READ,
+                              D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    // The copy has not retired yet. Keep the stage where it is and come back
+    // next frame; the whole point of this path is that it never waits.
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
+    g_seedSlot = kMaxGrassBuffers;
+    InterlockedExchange(&g_seedStage, SeedIdle);
+    if (FAILED(hr) || !mapped.pData) {
+        abandonSeed(slot);
         return;
+    }
     memcpy(g_scratch, mapped.pData, kGrassStreamBytes);
     context->Unmap(g_seedStaging, 0);
 
@@ -870,7 +958,8 @@ static void completeSeed(ID3D11DeviceContext* context) {
     unsigned turned = 0;
     for (unsigned i = 0; i < planes; ++i)
         if (rotatePlane(base + (SIZE_T)i * kFloatsPerPlane)) ++turned;
-    if (!turned) return;   // nothing recognisable: leave the block uncrossed
+    // Nothing recognisable: leave the block uncrossed, and stop offering it.
+    if (!turned) { abandonSeed(slot); return; }
 
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
@@ -884,15 +973,22 @@ static void completeSeed(ID3D11DeviceContext* context) {
             entry.crossed = nullptr;
         device->Release();
     }
-    if (!entry.crossed) return;
+    if (!entry.crossed) { abandonSeed(slot); return; }
 
     D3D11_MAPPED_SUBRESOURCE twin = {};
     if (FAILED(context->Map(entry.crossed, 0, D3D11_MAP_WRITE_DISCARD, 0, &twin))
-        || !twin.pData)
+        || !twin.pData) {
+        // An empty twin must never become bindable, so it goes away with the
+        // slot rather than being left for the draw hook to find.
+        entry.crossed->Release();
+        entry.crossed = nullptr;
+        abandonSeed(slot);
         return;
+    }
     memcpy(twin.pData, g_scratch, kGrassStreamBytes);
     context->Unmap(entry.crossed, 0);
 
+    tq::probe::count(tq::probe::CounterGrassSeedDone);
     EnterCriticalSection(&g_grassLock);
     entry.pending = false;
     LeaveCriticalSection(&g_grassLock);
@@ -925,7 +1021,7 @@ void shutdown() {
     g_drawOrdinal = 0;
     if (g_scratch) HeapFree(GetProcessHeap(), 0, g_scratch);
     g_scratch = nullptr;
-    g_pendingSlot = kMaxGrassBuffers;
+    g_pendingSlot = (LONG)kMaxGrassBuffers;
     InterlockedExchange(&g_twinDrawLogged, 0);
     InterlockedExchange(&g_rendering, 0);
     InterlockedExchange(&g_installed, 0);

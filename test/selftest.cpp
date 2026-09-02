@@ -14,6 +14,7 @@
 #include "frustum_fix.h"
 #include "grass.h"
 #include "hdr.h"
+#include "probe.h"
 #include "shadow_fix.h"
 #include "streaming.h"
 #include "visual.h"
@@ -21,7 +22,9 @@
 
 namespace {
 
-// Default shadow map scale; the tests exercise the shipped default.
+// Default shadow map scale; the tests exercise the shipped default. Measured
+// at 3.73 ms a frame against 2.31 ms at scale 2, and kept at 4 because the
+// smaller map visibly softens the shadows; the README documents the trade.
 const UINT kShadowScale = 4;
 // Point and spot maps scale separately; the split does not touch them.
 const UINT kPointShadowScale = 2;
@@ -493,6 +496,223 @@ HRESULT WINAPI overlayCreatePixelShader(ID3D11Device* device, const void* bytes,
 // configuration never reaches it: with the setting absent or 0 it must not
 // measure, allocate, build, or draw. The rest of the test proves it still
 // works when it is asked for.
+// Reads a whole small file, so the probe's CSV can be asserted on rather than
+// merely assumed to exist.
+char* readTextFile(const wchar_t* path, long* size) {
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return nullptr;
+    DWORD bytes = GetFileSize(file, nullptr);
+    char* text = (char*)calloc(bytes + 1, 1);
+    DWORD read = 0;
+    if (text) ReadFile(file, text, bytes, &read, nullptr);
+    CloseHandle(file);
+    if (size) *size = (long)read;
+    return text;
+}
+
+// Whether this device retires timestamp queries at all, and under which of the
+// three ways of asking. Two in-game runs of eight thousand frames each resolved
+// not one, so the capability has to be established here rather than assumed:
+// the probe's GPU columns are only worth having if the answer is yes.
+void testTimestampCapability(ID3D11Device* device, ID3D11DeviceContext* context) {
+    if (!device || !context) return;
+    D3D11_QUERY_DESC disjointDesc = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+    D3D11_QUERY_DESC stampDesc = {D3D11_QUERY_TIMESTAMP, 0};
+    ID3D11Query *disjoint = nullptr, *begin = nullptr, *end = nullptr;
+    bool created = SUCCEEDED(device->CreateQuery(&disjointDesc, &disjoint))
+                && SUCCEEDED(device->CreateQuery(&stampDesc, &begin))
+                && SUCCEEDED(device->CreateQuery(&stampDesc, &end));
+    check(created, "the device creates timestamp and disjoint queries");
+    if (!created) {
+        if (disjoint) disjoint->Release();
+        if (begin) begin->Release();
+        if (end) end->Release();
+        return;
+    }
+
+    // Something for the GPU to actually do between the two timestamps.
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = desc.Height = 512;
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D *source = nullptr, *destination = nullptr;
+    bool ready = SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &source))
+              && SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &destination));
+
+    context->Begin(disjoint);
+    context->End(begin);
+    if (ready) for (unsigned i = 0; i < 32; ++i)
+        context->CopyResource(destination, source);
+    context->End(end);
+    context->End(disjoint);
+
+    // First the way the render path asks: never flush, never wait.
+    bool quiet = false;
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT data = {};
+    for (unsigned i = 0; i < 200 && !quiet; ++i) {
+        quiet = context->GetData(disjoint, &data, sizeof(data),
+                                 D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+        if (!quiet) Sleep(1);
+    }
+    // Then the way that permits the runtime to flush first.
+    context->Flush();
+    bool flushed = quiet;
+    for (unsigned i = 0; i < 200 && !flushed; ++i) {
+        flushed = context->GetData(disjoint, &data, sizeof(data), 0) == S_OK;
+        if (!flushed) Sleep(1);
+    }
+    UINT64 first = 0, last = 0;
+    bool stamps = flushed
+               && context->GetData(begin, &first, sizeof(first), 0) == S_OK
+               && context->GetData(end, &last, sizeof(last), 0) == S_OK;
+
+    char detail[192];
+    snprintf(detail, sizeof(detail),
+             "timestamp queries retire on this device "
+             "(donotflush=%u afterflush=%u stamps=%u disjoint=%u freq=%llu)",
+             quiet ? 1u : 0u, flushed ? 1u : 0u, stamps ? 1u : 0u,
+             data.Disjoint ? 1u : 0u, (unsigned long long)data.Frequency);
+    check(flushed && stamps && data.Frequency != 0, detail);
+
+    if (source) source->Release();
+    if (destination) destination->Release();
+    disjoint->Release();
+    begin->Release();
+    end->Release();
+}
+
+void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
+    wchar_t ini[MAX_PATH], csv[MAX_PATH];
+    if (!GetFullPathNameW(L"tqflicker-probe-selftest.ini", MAX_PATH, ini, nullptr)
+        || !GetFullPathNameW(L"tqflicker-probe-selftest.csv", MAX_PATH, csv, nullptr))
+        return;
+    DeleteFileW(ini);
+    DeleteFileW(csv);
+
+    // Off by default, and silent: the probe must never write a file the user
+    // did not ask for, which is the same invariant the two logs hold.
+    tq::probe::readOptions(ini);
+    check(!tq::probe::enabled(), "probe stays off when the INI has no setting");
+    tq::probe::count(tq::probe::CounterDraw);
+    tq::probe::endFrame(33.0f);
+    check(tq::probe::frameCountForTest() == 0,
+          "probe records nothing while it is off");
+    check(!tq::probe::createResources(device),
+          "probe creates no device objects while it is off");
+
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"0", ini);
+    tq::probe::readOptions(ini);
+    check(!tq::probe::enabled(), "performance_trace=0 leaves the probe off");
+
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"1", ini);
+    tq::probe::readOptions(ini);
+    check(tq::probe::enabled() && !tq::probe::logsEveryFrame(),
+          "performance_trace=1 records hitching frames only");
+    tq::probe::resetForTest();
+
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
+    tq::probe::readOptions(ini);
+    tq::probe::setOutputPath(csv);
+    check(tq::probe::enabled() && tq::probe::logsEveryFrame(),
+          "performance_trace=full turns the probe on for every frame");
+
+    // A phase interval the clock can actually resolve, and a counter beside it.
+    int64_t start = tq::probe::now();
+    Sleep(4);
+    tq::probe::addPhase(tq::probe::PhaseGrassPresent, start);
+    tq::probe::count(tq::probe::CounterGrassSeedQueued);
+    tq::probe::count(tq::probe::CounterDraw, 7);
+    tq::probe::endFrame(16.7f);
+    float measured = tq::probe::phaseMillisecondsForTest(0, tq::probe::PhaseGrassPresent);
+    check(measured >= 2.0f && measured < 500.0f,
+          "probe times a phase with the high-resolution clock");
+    check(tq::probe::counterForTest(0, tq::probe::CounterDraw) == 7
+          && tq::probe::counterForTest(0, tq::probe::CounterGrassSeedQueued) == 1,
+          "probe counts what the frame was asked to do");
+    check(tq::probe::phaseMillisecondsForTest(0, tq::probe::PhaseBloom) == 0.0f,
+          "a phase that did not run stays at zero");
+
+    // A steady baseline, then one frame that spikes in a single phase. The row
+    // for that frame has to name the phase, not merely report the frame time.
+    for (unsigned i = 0; i < 90; ++i) tq::probe::endFrame(16.7f);
+    int64_t hitchStart = tq::probe::now();
+    Sleep(30);
+    tq::probe::addPhase(tq::probe::PhaseGrassPresent, hitchStart);
+    tq::probe::endFrame(48.0f);
+    for (unsigned i = 0; i < 16; ++i) tq::probe::endFrame(16.7f);
+
+    char summary[80] = {};
+    tq::probe::summarize(summary, sizeof(summary));
+    check(strstr(summary, "GRASS-PRES") != nullptr,
+          "the overlay summary names the phase that dominated the hitch");
+
+    if (device && context) {
+        check(tq::probe::createResources(device),
+              "probe builds its timestamp queries on the live device");
+
+        // Drive frames with real GPU work in them until a timestamp comes
+        // back. Two eight-thousand-frame runs reported no GPU timing at all
+        // because the frame's disjoint query was begun and never ended, and
+        // every timestamp is gated on that disjoint result. Asserting only
+        // that issuing the queries does not crash could not see it; this
+        // asserts that a number actually arrives.
+        D3D11_TEXTURE2D_DESC surface = {};
+        surface.Width = surface.Height = 512;
+        surface.MipLevels = surface.ArraySize = 1;
+        surface.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        surface.SampleDesc.Count = 1;
+        surface.Usage = D3D11_USAGE_DEFAULT;
+        surface.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ID3D11Texture2D *from = nullptr, *to = nullptr;
+        bool copies = SUCCEEDED(device->CreateTexture2D(&surface, nullptr, &from))
+                   && SUCCEEDED(device->CreateTexture2D(&surface, nullptr, &to));
+        unsigned before = tq::probe::frameCountForTest();
+        for (unsigned i = 0; i < 40; ++i) {
+            tq::probe::beginFrame(context);
+            tq::probe::gpuBegin(context, tq::probe::GpuSmaa);
+            if (copies) for (unsigned c = 0; c < 16; ++c)
+                context->CopyResource(to, from);
+            tq::probe::gpuEnd(context, tq::probe::GpuSmaa);
+            tq::probe::endFrame(16.7f);
+            context->Flush();
+            Sleep(2);
+        }
+        bool resolved = false;
+        for (unsigned back = 0;
+             back < tq::probe::frameCountForTest() - before && !resolved; ++back)
+            resolved = tq::probe::gpuResolvedForTest(back);
+        check(copies && resolved,
+              "probe reads back a GPU timestamp for a frame it timed");
+        if (from) from->Release();
+        if (to) to->Release();
+        tq::probe::releaseResources();
+    }
+
+    tq::probe::shutdown();
+    long size = 0;
+    char* csvText = readTextFile(csv, &size);
+    bool header = csvText
+               && strstr(csvText, "# performance_trace=full") == csvText
+               && strstr(csvText, "frame,ms") != nullptr
+               && strstr(csvText, "grass_present_ms") != nullptr
+               && strstr(csvText, "gpu_shadow_dir_ms") != nullptr
+               && strstr(csvText, ",unusual") != nullptr;
+    check(header, "the probe writes its mode and a header naming every column");
+    check(csvText && strstr(csvText, "grass_present:+") != nullptr,
+          "the hitch row attributes the spike to the phase that caused it");
+    free(csvText);
+
+    DeleteFileW(csv);
+    tq::probe::resetForTest();
+    tq::probe::readOptions(nullptr);
+    check(!tq::probe::enabled(), "probe stays off without an INI path");
+    DeleteFileW(ini);
+}
+
 void testFrameOverlay(ID3D11Device* device, ID3D11DeviceContext* context) {
     wchar_t ini[MAX_PATH];
     if (!GetFullPathNameW(L"tqflicker-overlay-selftest.ini", MAX_PATH, ini, nullptr))
@@ -511,11 +731,24 @@ void testFrameOverlay(ID3D11Device* device, ID3D11DeviceContext* context) {
           "frame overlay builds nothing while it is off");
     tq::frameoverlay::draw(device, context, nullptr, 1920);
 
-    WritePrivateProfileStringW(L"performance", L"frame_overlay", L"0", ini);
+    WritePrivateProfileStringW(L"debug", L"frame_overlay", L"0", ini);
     tq::frameoverlay::readOptions(ini);
     check(!tq::frameoverlay::enabled(), "frame_overlay=0 leaves the overlay off");
 
+    // An INI from before the key moved out of [performance] keeps working,
+    // and an explicit [debug] value wins over the legacy one.
+    WritePrivateProfileStringW(L"debug", L"frame_overlay", nullptr, ini);
     WritePrivateProfileStringW(L"performance", L"frame_overlay", L"1", ini);
+    tq::frameoverlay::readOptions(ini);
+    check(tq::frameoverlay::enabled(),
+          "the key's old [performance] home is still honoured");
+    WritePrivateProfileStringW(L"debug", L"frame_overlay", L"0", ini);
+    tq::frameoverlay::readOptions(ini);
+    check(!tq::frameoverlay::enabled(),
+          "a [debug] value overrides the legacy [performance] one");
+    WritePrivateProfileStringW(L"performance", L"frame_overlay", nullptr, ini);
+
+    WritePrivateProfileStringW(L"debug", L"frame_overlay", L"1", ini);
     tq::frameoverlay::readOptions(ini);
     check(tq::frameoverlay::enabled(), "frame_overlay=1 turns the overlay on");
 
@@ -1432,6 +1665,8 @@ int main(int argc, char** argv) {
         free(shadowBytes);
     }
 
+    testTimestampCapability(device, context);
+    testProbe(device, context);
     testFrameOverlay(device, context);
 
     int transformed = 0;
@@ -1470,6 +1705,8 @@ int main(int argc, char** argv) {
           "HDR logging creates no file when hdr_debug is absent");
     check(GetFileAttributesA("tqflicker-debug.log") == INVALID_FILE_ATTRIBUTES,
           "startup tracing creates no file when trace is absent");
+    check(GetFileAttributesA("tqflicker-frames.csv") == INVALID_FILE_ATTRIBUTES,
+          "the probe creates no CSV when probe is absent");
     fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
     fclose(g_report);
     return g_failures ? 1 : 0;

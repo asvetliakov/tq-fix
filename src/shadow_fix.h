@@ -20,13 +20,18 @@ namespace shadow {
 void install(HMODULE engineModule);
 void shutdown();
 
-// Reported by the texture-creation hook for every shadow map it creates. The
-// fit stabiliser snaps the projection centre onto the map's texel grid, so it
-// needs a real texel count rather than the size the game asked for, and it
-// keeps the smallest it is told about: every size involved is a power of two,
-// so a coarser grid still aligns the texels exactly while a finer one would
-// snap to half-texel positions and stabilise nothing.
-void noteShadowMapSize(unsigned texels);
+// Reported by the texture-creation hook for every shadow map it creates, with
+// the size actually created rather than the size the game asked for. The fit
+// stabiliser snaps the projection centre onto the *directional* map's texel
+// grid, because that is the projection being fitted; the smallest map seen is
+// kept only as a fallback for the lowest shadow quality, where no request is
+// large enough to be classified as directional.
+void noteShadowMapSize(unsigned texels, bool directional);
+
+// Forgets every reported size. Called when the renderer drops and rebuilds its
+// shadow targets (a resolution or quality change), so a smaller regenerated
+// map is not snapped onto the old, finer grid.
+void resetShadowMapSizes();
 
 // PCF tap offsets are UV distances, so the blur they produce measures
 // 0.5 * bluriness * world coverage: widening the projection softens shadow
@@ -46,6 +51,7 @@ float biasCompensation();
 bool cornerFilterEnabled();
 
 #ifdef TQ_SELFTEST
+void resetShadowMapSizesForTest();
 bool validateSupportedImageForTest(HMODULE engineModule);
 bool redirectCropRoundTripForTest(HMODULE engineModule);
 bool validateFitCameraCallForTest(HMODULE engineModule);

@@ -9,4 +9,6 @@ dist/
 
 # Reproducible audit output; regenerate with research/shadows/tools/run-audit.sh
 research/shadows/generated/
+# and with research/streaming/tools/run-audit.sh
+research/streaming/generated/
 research/shadows/shaders/generated/

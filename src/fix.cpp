@@ -7,6 +7,7 @@
 #include "frustum_fix.h"
 #include "grass.h"
 #include "hdr.h"
+#include "probe.h"
 #include "shadow_fix.h"
 #include "streaming.h"
 #include "visual.h"
@@ -163,6 +164,8 @@ bool resolveWinmm(HINSTANCE self) {
 HRESULT WINAPI hookCreateVertexShader(ID3D11Device* device, const void* bytecode,
                                       SIZE_T size, ID3D11ClassLinkage* linkage,
                                       ID3D11VertexShader** shader) {
+    tq::probe::Scope timing(tq::probe::PhaseShaderCreate);
+    tq::probe::count(tq::probe::CounterShaderCreate);
     tq::dxbc::PatchResult patched = {};
     bool changed = tq::dxbc::clampBoneIndices(bytecode, size, &patched);
     HRESULT result = g_createVertexShader(
@@ -362,6 +365,14 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
         if (!g_stop || !g_done) return FALSE;
         g_thread = CreateThread(nullptr, 0, installerThread, nullptr, 0, nullptr);
         return g_thread != nullptr;
+    }
+
+    // Titan Quest exits without unloading, so `reserved` is set and the block
+    // below never runs. Everything there is cleanup that process teardown does
+    // anyway; the one thing that would be lost is a measurement run's tail.
+    if (reason == DLL_PROCESS_DETACH && reserved) {
+        tq::probe::flushOnExit();
+        return TRUE;
     }
 
     if (reason == DLL_PROCESS_DETACH && !reserved) {

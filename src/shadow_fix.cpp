@@ -1,5 +1,7 @@
 #include "shadow_fix.h"
 
+#include "probe.h"
+
 #include "hdr.h"
 
 #include <float.h>
@@ -132,15 +134,24 @@ const unsigned kBasisThunkOffset = 64;
 float g_referenceUp[3];
 bool g_stabilizeBasis = true;
 LONG g_basisLogged;
+// The directional map's texel count, which is the grid the fit is snapped
+// onto, and the smallest map seen as a fallback for the lowest shadow quality
+// where no request is large enough to be classified directional.
+unsigned g_directionalTexels;
+unsigned g_smallestTexels;
+
 // The smallest shadow map the texture hook has created. A snap grid coarser
 // than a texel still aligns the texel grid exactly, because every size the
 // game requests and every scale it is given are powers of two; a grid *finer*
 // than a texel would snap to half-texel positions and stabilise nothing. So
 // the minimum is the safe choice, and the default is the smallest map the game
 // ever asks for, in case a fit runs before any map exists.
-unsigned g_mapTexels = 512;
+unsigned g_mapTexels;   // 0 until a shadow map has actually been created
 unsigned g_stabilizeSteps = 8;
 LONG g_stabilizeLogged;
+LONG g_noMapLogged;
+// The quantised extent last fitted, so a step across a threshold can be counted.
+double g_lastExtent0, g_lastExtent1;
 
 bool readable(const void* address, SIZE_T bytes) {
     MEMORY_BASIC_INFORMATION info = {};
@@ -375,6 +386,17 @@ void __stdcall stabilizeFit(FitCamera* camera) {
     const double q0 = quantizeExtent(e0, g_stabilizeSteps) * slack;
     const double q1 = quantizeExtent(e1, g_stabilizeSteps) * slack;
     if (!_finite(q0) || !_finite(q1) || q0 < e0 || q1 < e1) return;
+    // No map reported yet: leave the engine's own fit alone rather than snap
+    // to a guess. Shadow maps are created before the first frame is drawn, so
+    // this is a startup window of at most a frame or two -- unless the size
+    // hook never installed at all, which the one-shot line below makes
+    // visible instead of letting the shimmer return silently.
+    if (!g_mapTexels) {
+        if (InterlockedCompareExchange(&g_noMapLogged, 1, 0) == 0)
+            tq::hdr::log("Shadow fit left native: no shadow map size"
+                         " reported\r\n");
+        return;
+    }
     const double t0 = q0 / (double)g_mapTexels;
     const double t1 = q1 / (double)g_mapTexels;
     if (!(t0 > 0.0) || !(t1 > 0.0)) return;
@@ -390,6 +412,13 @@ void __stdcall stabilizeFit(FitCamera* camera) {
     for (int i = 0; i < 3; ++i)
         camera->position[i] =
             (float)((double)camera->position[i] + r0[i] * d0 + r1[i] * d1);
+    // A step across a quantisation threshold re-fits the whole map against a
+    // different caster set, so the frame it happens in is worth marking.
+    if (q0 != g_lastExtent0 || q1 != g_lastExtent1) {
+        g_lastExtent0 = q0;
+        g_lastExtent1 = q1;
+        tq::probe::count(tq::probe::CounterShadowFitChange);
+    }
     camera->extentRow0 = (float)q0;
     camera->extentRow1 = (float)q1;
 
@@ -597,9 +626,35 @@ void install(HMODULE engineModule) {
     installStabilization(engineModule);
 }
 
-void noteShadowMapSize(unsigned texels) {
-    if (texels >= 256 && texels <= 16384 && texels < g_mapTexels)
-        g_mapTexels = texels;
+void noteShadowMapSize(unsigned texels, bool directional) {
+    if (texels < 256 || texels > 16384) return;
+    // The grid to snap on is the directional map's own, because it is the
+    // directional projection being fitted. Taking the smallest map instead --
+    // which is what an initial value of 512 that could only ever shrink
+    // amounted to -- snapped an 8192-texel map onto a 512-texel grid, sixteen
+    // times coarser than the texels it was supposed to align with, so the
+    // centre moved in sixteen-texel jumps and stabilised far less than it
+    // looked like it did. A run reported "texel 0.0487 over 512" with the
+    // directional map at 8192.
+    //
+    // The last directional map reported wins, not the largest: an in-session
+    // shadow-quality change recreates the map at a new size, and holding on to
+    // the old one would snap onto a grid finer than the live map's texels --
+    // half-texel positions, which stabilise nothing.
+    if (directional) {
+        g_directionalTexels = texels;
+    } else if (!g_smallestTexels || texels < g_smallestTexels) {
+        g_smallestTexels = texels;
+    }
+    // Only fall back to the smallest map when no directional one was ever
+    // classified, which happens at the lowest shadow quality.
+    g_mapTexels = g_directionalTexels ? g_directionalTexels : g_smallestTexels;
+}
+
+void resetShadowMapSizes() {
+    // The renderer is about to rebuild its shadow targets, so everything known
+    // about their sizes is about to be stale.
+    g_directionalTexels = g_smallestTexels = g_mapTexels = 0;
 }
 
 float blurCompensation() { return config().blurScale; }
@@ -679,6 +734,8 @@ const float* chooseReferenceUpForTest(const float* direction,
                                       const float* fallback) {
     return chooseReferenceUp(direction, fallback);
 }
+
+void resetShadowMapSizesForTest() { resetShadowMapSizes(); }
 
 void stabilizeFitForTest(void* camera, unsigned texels, unsigned steps) {
     const unsigned savedTexels = g_mapTexels;

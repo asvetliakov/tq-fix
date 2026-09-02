@@ -65,7 +65,9 @@ bool installed();
 // matching a shader or a buffer.
 bool rendering();
 
-// Once per frame. Completes any twin waiting on a staging read.
+// Once per frame, before the game's own Present. Advances any twin waiting on
+// a staging read: the frame after the copy was queued it becomes readable, and
+// the frame after that it is mapped without waiting.
 void onPresent(ID3D11DeviceContext* context);
 
 // ---------------------------------------------------------------------------
@@ -105,7 +107,8 @@ void afterUnmap(ID3D11DeviceContext* context);
 
 // Starts a twin for a stream that was adopted after the game had already
 // filled it, by copying what the buffer holds now. Called from the draw when
-// no twin exists; the copy is read back and turned at the next Present.
+// no twin exists; the copy is read back and turned once a Present has actually
+// carried it to the GPU, and never by waiting for it.
 void seedFromDraw(ID3D11DeviceContext* context, ID3D11Buffer* source);
 
 // Turns one card a quarter turn about its own centre, in place. Position only:

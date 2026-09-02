@@ -1,0 +1,273 @@
+# Seeds for the Engine.dll resource / region-streaming call-graph closure.
+#
+# Every name below was selected from the 5599 exported symbols of the supported
+# Engine.dll, not guessed; research/streaming/exports.md records the filtering
+# and the per-family counts.
+#
+# ExportShadowAudit.java matches a seed as a plain substring of the function's
+# display name, so each class-qualified entry is listed twice: once in Ghidra's
+# demangled `Class::Method` spelling and once as the `Method@Class` substring of
+# the MSVC-mangled label that survives when the demangler declines a symbol.
+# Bare method names that are already unique across the export table are listed
+# once.
+
+# ---------------------------------------------------------------------------
+# Resource manager, loader thread, and the per-resource load state machine.
+# ---------------------------------------------------------------------------
+BaseResourceManager::LoadResource
+LoadResource@BaseResourceManager
+BaseResourceManager::PreLoadResource
+PreLoadResource@BaseResourceManager
+BaseResourceManager::UnloadResource
+UnloadResource@BaseResourceManager
+BaseResourceManager::UnloadUnreferencedResources
+UnloadUnreferencedResources@BaseResourceManager
+BaseResourceManager::MaintainBudget
+MaintainBudget@BaseResourceManager
+BaseResourceManager::EvictOldResources
+EvictOldResources@BaseResourceManager
+BaseResourceManager::SetThreadUnloadFence
+SetThreadUnloadFence@BaseResourceManager
+BaseResourceManager::SetThreadFencesPaused
+SetThreadFencesPaused@BaseResourceManager
+BaseResourceManager::RemoveThreadFenceCounter
+RemoveThreadFenceCounter@BaseResourceManager
+BaseResourceManager::EnablePreLoading
+EnablePreLoading@BaseResourceManager
+
+ResourceLoader::StartThread
+StartThread@ResourceLoader
+ResourceLoader::StopThread
+StopThread@ResourceLoader
+ResourceLoader::EnqueueResource
+EnqueueResource@ResourceLoader
+ResourceLoader::LoadResource
+LoadResource@ResourceLoader
+ResourceLoader::UnloadResource
+UnloadResource@ResourceLoader
+ResourceLoader::PurgeResource
+PurgeResource@ResourceLoader
+ResourceLoader::CreateMarker
+CreateMarker@ResourceLoader
+GetHasMarkerPast
+EnableSingleProcessorMode
+ResourceLoader::Update
+Update@ResourceLoader
+
+EnsureAvailable
+GetInLoadingQueue
+Resource::SetLoadedState
+SetLoadedState@Resource
+Resource::GetLoadedState
+GetLoadedState@Resource
+Resource::Lock
+Lock@Resource
+Resource::Unlock
+Unlock@Resource
+PreLoadDependentResources
+MarkAsUsed@Resource
+GetLastTouchedFrame
+
+# ---------------------------------------------------------------------------
+# Archive, file system, and the memory-mapped archive views the mod leases.
+# ---------------------------------------------------------------------------
+Archive::Open
+Open@Archive
+Archive::ReOpen
+ReOpen@Archive
+Archive::ReadFromFile
+ReadFromFile@Archive
+Archive::ExtractFileToMemory
+ExtractFileToMemory@Archive
+Archive::FindFile
+FindFile@Archive
+Archive::GetFileEntry
+GetFileEntry@Archive
+FreeFileBuffer
+
+FileSourceArchive::OpenFile
+OpenFile@FileSourceArchive
+FileSourceArchive::OpenFileStream
+OpenFileStream@FileSourceArchive
+FileSourceArchive::GetMapping
+GetMapping@FileSourceArchive
+FileSourceArchive::CloseFile
+CloseFile@FileSourceArchive
+FileSourceArchive::CloseFileStream
+CloseFileStream@FileSourceArchive
+FileSourceArchive::FindFilePath
+FindFilePath@FileSourceArchive
+FileSourceDirectory::OpenFile
+OpenFile@FileSourceDirectory
+FileSourceDirectory::OpenFileStream
+OpenFileStream@FileSourceDirectory
+
+FileSystem::OpenFile
+OpenFile@FileSystem
+FileSystem::OpenFileStream
+OpenFileStream@FileSystem
+FileSystem::CloseFile
+CloseFile@FileSystem
+FileSystem::FindFullFilePath
+FindFullFilePath@FileSystem
+FileSystem::AddSourceArchive
+AddSourceArchive@FileSystem
+
+MemoryMappedFile::Open
+Open@MemoryMappedFile
+MemoryMappedFile::MapView
+MapView@MemoryMappedFile
+MemoryMappedFile::UnmapView
+UnmapView@MemoryMappedFile
+MemoryMappedFile::Close
+Close@MemoryMappedFile
+
+IOStreamRead::Initialize
+Initialize@IOStreamRead
+IOStreamRead::GetFileBuffer
+GetFileBuffer@IOStreamRead
+
+# ---------------------------------------------------------------------------
+# Region and level streaming.
+# ---------------------------------------------------------------------------
+Region::LoadLevel
+LoadLevel@Region
+BackgroundLoadLevel
+PostLoadLevel
+Region::UnloadLevel
+UnloadLevel@Region
+Region::PreLoad
+PreLoad@Region
+PrepareUnload
+IsLevelLoading
+IsLevelLoaded
+IsLoadingFinished
+WaitForLoadingToFinish
+MarkAsUsedThisFrame
+Region::UpdateUsage
+UpdateUsage@Region
+Region::AddToScene
+AddToScene@Region
+GetLoadFileName
+
+RegionLoader::Update
+Update@RegionLoader
+RegionLoader::SetFrustum
+SetFrustum@RegionLoader
+RegionLoader::GetIsDone
+GetIsDone@RegionLoader
+GetAreLevelsLoaded
+
+World::GetNumLevelsLoading
+GetNumLevelsLoading@World
+World::UnloadExtraRegions
+UnloadExtraRegions@World
+UpdateRegionUsage
+SetRegionLoaded
+World::LoadMap
+LoadMap@World
+LockMapFile
+UnlockMapFile
+World::AddRegion
+AddRegion@World
+World::RemoveRegion
+RemoveRegion@World
+
+Level::Load
+Load@Level
+Level::LoadRenderData
+LoadRenderData@Level
+Level::PreLoad
+PreLoad@Level
+Level::PostLoad
+PostLoad@Level
+Level::Unload
+Unload@Level
+HasLoadedRenderData
+
+# ---------------------------------------------------------------------------
+# Frustum entity queries: the shadow caster query the mod widened.
+# ---------------------------------------------------------------------------
+GetEntitiesInFrustum
+GetRegionsInFrustum
+GetLoadedRegionsInFrustum
+GetEnclosingFrustum
+GetEntitiesInPriorFrameFrustum
+GetObjectsInFrustum
+GetMeshesInFrustum
+WorldFrustum::SetFrustum
+SetFrustum@WorldFrustum
+GetRegionFrustum
+GetRelativeFrustum
+GetSubFrustum
+
+# ---------------------------------------------------------------------------
+# Terrain and grid block streaming.
+# ---------------------------------------------------------------------------
+Terrain::Load
+Load@Terrain
+Terrain::LoadRenderData
+LoadRenderData@Terrain
+Terrain::PreLoad
+PreLoad@Terrain
+Terrain::Unload
+Unload@Terrain
+UpdateVertexBuffer
+ProcessDirtyRects
+GetBlocksInDirtySet
+CreateGrassGeometry
+
+TerrainBase::ConstructBlocks
+ConstructBlocks@TerrainBase
+InitializeBlocks
+AddLoadedObject
+UnloadOldObjects
+DestroyTerrainBlocks
+
+GridRegion::Load
+Load@GridRegion
+GridRegion::PreLoad
+PreLoad@GridRegion
+GridRegion::PostLoad
+PostLoad@GridRegion
+ReadLatticeChunk
+
+# ---------------------------------------------------------------------------
+# The frame boundary these costs must be timed against.
+# ---------------------------------------------------------------------------
+Engine::PresentSurface
+PresentSurface@Engine
+GraphicsEngine::PresentSurface
+PresentSurface@GraphicsEngine
+GraphicsCanvas::PresentSurface
+PresentSurface@GraphicsCanvas
+GraphicsCanvas::BeginFrame
+BeginFrame@GraphicsCanvas
+GraphicsCanvas::EndFrame
+EndFrame@GraphicsCanvas
+Engine::Render
+Render@Engine
+Engine::UpdateFrustum
+UpdateFrustum@Engine
+Engine::EvictOldResources
+EvictOldResources@Engine
+GraphicsEngine::LoadTexture
+LoadTexture@GraphicsEngine
+GraphicsEngine::LoadMesh
+LoadMesh@GraphicsEngine
+GraphicsEngine::LoadShader2
+LoadShader2@GraphicsEngine
+GraphicsTexture::Initialize
+Initialize@GraphicsTexture
+GetIsReadyToUse
+GetThreadInfos
+
+# ---------------------------------------------------------------------------
+# Address seeds: the two file-source vtable slots the mod already patches
+# (src/visual.cpp:578 reads slot 2, src/visual.cpp:641 replaces slot 4), given
+# here as preferred virtual addresses because the mod knows them only by RVA.
+# The audit resolved them to GAME::FileDirectory::Unlock and
+# GAME::FileDirectory::Lock; see findings.md section 0.
+# ---------------------------------------------------------------------------
+@0x1014e540
+@0x1014e560

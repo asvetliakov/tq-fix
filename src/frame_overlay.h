@@ -10,10 +10,15 @@ namespace frameoverlay {
 // rolling average, the 99th percentile, the worst frame, a hitch count, and a
 // graph of the sampled history.
 //
-// It is off unless [performance] frame_overlay is 1 in tqflicker.ini. While it
-// is off this module allocates nothing, measures nothing, and draws nothing --
-// enabled() is the only entry point the render path reaches, and every other
-// one returns immediately.
+// It is off unless [debug] frame_overlay is 1 in tqflicker.ini (the key's old
+// home under [performance] is still honoured). While it is off this module
+// allocates nothing and draws nothing -- enabled() is the only entry point the
+// render path reaches -- though recordFrame still samples the frame boundary
+// whenever the probe needs it, since the two share one clock. Measuring
+// without the panel is not a mode here any more: that is simply
+// [debug] performance_trace with the overlay off, and it is how a measurement
+// run avoids the panel's own pipeline save/restore and uploads landing inside
+// the very frame times being recorded.
 
 // The original, unhooked device entry points. Nothing the overlay creates is
 // something the game asked for, so its resources must not travel through
@@ -48,7 +53,9 @@ void setStreamingMode(bool optimized);
 // render thread reaches draw(); visual.cpp does that through g_programState.
 bool createResources(ID3D11Device* device, const DeviceCalls& calls);
 
-// One sample per presented frame, taken from the game's Present wrapper.
+// One sample per presented frame, taken from the game's Present wrapper. It is
+// also the frame boundary the probe records against, so it runs whenever either
+// of the two is on.
 void recordFrame();
 
 // Draws over `target` at its own resolution. The caller owns saving and

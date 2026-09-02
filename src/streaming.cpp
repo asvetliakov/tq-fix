@@ -1,5 +1,6 @@
 #include "streaming.h"
 #include "hdr.h"
+#include "probe.h"
 
 #include <windows.h>
 #include <string.h>
@@ -29,9 +30,9 @@ volatile LONG g_rendererInstalled;
 RendererPresentFn g_rendererPresent;
 void** g_rendererPresentSlot;
 volatile LONG g_firstPresentReturned;
-#ifdef TQ_DIAGNOSTIC
+// Milestone frames for the trace log; hdr::log is a no-op while trace is off,
+// so this costs one interlocked increment per present.
 volatile LONG g_presentReturnCount;
-#endif
 volatile LONG g_resizeInstalled;
 ResizeBuffersFn g_resizeBuffers;
 void** g_resizeSlot;
@@ -64,15 +65,20 @@ HRESULT __fastcall hookRendererPresent(void* renderer, void*, void* parameter) {
     BYTE* field = (BYTE*)renderer + kRendererSwapChainOffset;
     if (renderer && readable(field)) swapChain = *(IDXGISwapChain**)field;
     if (g_presentCallback) g_presentCallback(swapChain);
-    HRESULT result = g_rendererPresent(renderer, parameter);
-#ifdef TQ_DIAGNOSTIC
+    // Timed separately from everything else: this is where a frame waits when
+    // the GPU is behind, and telling that apart from work on this thread is
+    // the difference between a CPU problem and a GPU one.
+    HRESULT result;
+    {
+        tq::probe::Scope timing(tq::probe::PhasePresentCall);
+        result = g_rendererPresent(renderer, parameter);
+    }
     LONG present = InterlockedIncrement(&g_presentReturnCount);
     if (present == 1 || present == 2 || present == 30 || present == 120
         || present == 180 || present == 240 || present == 300
         || present == 600 || present == 1200 || result != S_OK)
         tq::hdr::log("Renderer Present result: frame=%ld hr=0x%08lx\r\n",
                      present, (unsigned long)result);
-#endif
     if (!InterlockedCompareExchange(&g_firstPresentReturned, 1, 0))
         tq::hdr::log("First renderer Present returned through the overlay chain: hr=0x%08lx\r\n",
                      (unsigned long)result);
@@ -207,9 +213,7 @@ void shutdown() {
     g_rendererPresentSlot = nullptr;
     g_rendererPresent = nullptr;
     InterlockedExchange(&g_firstPresentReturned, 0);
-#ifdef TQ_DIAGNOSTIC
     InterlockedExchange(&g_presentReturnCount, 0);
-#endif
     InterlockedExchange(&g_rendererInstalled, 0);
     if (g_resizeSlot && g_resizeBuffers && readable(g_resizeSlot)
         && *g_resizeSlot == (void*)&hookResizeBuffers)

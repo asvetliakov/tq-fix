@@ -14,6 +14,11 @@ evidence from a local installation.
 - `supported-build.md` identifies the exact audited binaries.
 - `seeds.txt` lists the renderer entry points that start the call-graph walk.
 - `tools/` contains the headless Ghidra exporter and orchestration script.
+  `tools/run-audit.sh` is a thin caller over the shared
+  `research/tools/audit.sh`, which carries the game-directory resolution, hash
+  pinning, Ghidra/JDK discovery, export verification, and PE dumping for every
+  audit under `research/`.  `tools/ExportShadowAudit.java` is shared with
+  `research/streaming/` and stays here.
 - `generated/` output is not committed; `tools/run-audit.sh` reproduces it.
   It contains function inventories, call graphs,
   assembly, and decompiler output.

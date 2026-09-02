@@ -1,5 +1,7 @@
 #include "frame_overlay.h"
 
+#include "probe.h"
+
 #include <algorithm>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,8 +16,8 @@ namespace {
 // same stretch of world without the window rolling out from under it.
 const unsigned kSampleCount = 4096;
 
-const UINT kTextWidth = 532;   // 65 glyphs at 8 px plus the 12 px left margin
-const UINT kTextHeight = 66;
+const UINT kTextWidth = 660;   // 81 glyphs at 8 px plus the 12 px left margin
+const UINT kTextHeight = 80;
 const UINT kGraphHeight = 110;
 const UINT kGraphMinWidth = 264;
 const UINT kGraphMaxWidth = kSampleCount + 8;
@@ -52,6 +54,9 @@ bool g_streamingOptimized = true;
 
 uint32_t* g_textPixels;
 uint32_t* g_graphPixels;
+// What the graph texture currently holds, so only the columns that actually
+// changed have to be uploaded.
+uint32_t* g_graphUploaded;
 FrameSample* g_samples;
 float* g_sorted;
 unsigned g_write;
@@ -191,6 +196,10 @@ void renderTextPanel(uint32_t mode, unsigned visible, unsigned oldest) {
     snprintf(line, sizeof(line), "HITCHES >%u MS: %u / %.1f S",
              (unsigned)kHitchMs, hitches, historySeconds);
     drawText(12, 51, line, muted);
+    // Where the time went, when the probe is on to answer it.
+    char attribution[80];
+    tq::probe::summarize(attribution, sizeof(attribution));
+    if (attribution[0]) drawText(12, 65, attribution, muted);
 }
 
 void renderGraphPanel(uint32_t mode, unsigned visible, unsigned oldest) {
@@ -296,18 +305,62 @@ bool ensureGraphTexture(ID3D11Device* device, UINT screenWidth) {
     release(g_res.graphSrv);
     release(g_res.graphTexture);
     freeBuffer(g_graphPixels);
+    freeBuffer(g_graphUploaded);
     g_res.graphWidth = 0;
     g_graphPixels = (uint32_t*)calloc((size_t)width * kGraphHeight, sizeof(uint32_t));
+    g_graphUploaded = (uint32_t*)calloc((size_t)width * kGraphHeight, sizeof(uint32_t));
     if (!g_graphPixels) return false;
     if (!createPanelTexture(device, width, kGraphHeight,
                             &g_res.graphTexture, &g_res.graphSrv)) {
         release(g_res.graphSrv);
         release(g_res.graphTexture);
         freeBuffer(g_graphPixels);
+        freeBuffer(g_graphUploaded);
         return false;
     }
     g_res.graphWidth = width;
     return true;
+}
+
+// The graph is the expensive upload -- at a 3000 px display it is well over a
+// megabyte through the immediate context, inside Present. Most refreshes change
+// a narrow band of it, so compare against what was uploaded last time and send
+// only the columns that moved.
+void uploadGraphColumns(ID3D11DeviceContext* context) {
+    const UINT width = g_res.graphWidth;
+    if (!width || !g_graphPixels) return;
+    const UINT pitch = width * (UINT)sizeof(uint32_t);
+    // Once the sample window is full the whole waveform scrolls every refresh,
+    // so the diff below would scan everything only to find everything changed;
+    // upload it whole and skip both the compare and the mirror copy.
+    if (g_count >= kSampleCount) {
+        context->UpdateSubresource(g_res.graphTexture, 0, nullptr,
+                                   g_graphPixels, pitch, 0);
+        return;
+    }
+    if (!g_graphUploaded) {
+        context->UpdateSubresource(g_res.graphTexture, 0, nullptr,
+                                   g_graphPixels, pitch, 0);
+        return;
+    }
+    UINT first = width, last = 0;
+    for (UINT column = 0; column < width; ++column) {
+        bool differs = false;
+        for (UINT row = 0; row < kGraphHeight && !differs; ++row)
+            differs = g_graphPixels[(size_t)row * width + column]
+                   != g_graphUploaded[(size_t)row * width + column];
+        if (!differs) continue;
+        if (column < first) first = column;
+        last = column;
+    }
+    if (first > last) return;   // nothing moved
+    D3D11_BOX box = {first, 0, 0, last + 1, kGraphHeight, 1};
+    context->UpdateSubresource(g_res.graphTexture, 0, &box,
+                               g_graphPixels + first, pitch, 0);
+    for (UINT row = 0; row < kGraphHeight; ++row)
+        memcpy(g_graphUploaded + (size_t)row * width + first,
+               g_graphPixels + (size_t)row * width + first,
+               (size_t)(last - first + 1) * sizeof(uint32_t));
 }
 
 bool resourcesReady() {
@@ -338,8 +391,15 @@ UINT targetWidth(ID3D11RenderTargetView* target, UINT fallbackWidth) {
 }  // namespace
 
 void readOptions(const wchar_t* iniPath) {
-    g_enabled = iniPath
-             && GetPrivateProfileIntW(L"performance", L"frame_overlay", 0, iniPath) == 1;
+    // The key lives under [debug] now; a value in its old [performance] home
+    // is still honoured so an existing INI keeps working. -1 as the missing
+    // marker: 0 is a real answer.
+    int mode = iniPath
+             ? GetPrivateProfileIntW(L"debug", L"frame_overlay", -1, iniPath)
+             : 0;
+    if (mode == -1)
+        mode = GetPrivateProfileIntW(L"performance", L"frame_overlay", 0, iniPath);
+    g_enabled = mode > 0;
     if (!g_enabled) return;
     // Measurement starts at install rather than when the shaders finish
     // building, so the first seconds of a session are not a hole in the graph.
@@ -409,20 +469,30 @@ bool createResources(ID3D11Device* device, const DeviceCalls& calls) {
 }
 
 void recordFrame() {
-    if (!g_enabled || !g_samples) return;
+    // The frame boundary is one clock, shared. The probe is configured
+    // independently of the overlay, so a run can attribute hitches without
+    // paying for a panel; measuring here keeps them from drifting apart.
+    const bool sampling = g_enabled && g_samples;
+    if (!sampling && !tq::probe::enabled()) return;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     if (!g_frequency.QuadPart) QueryPerformanceFrequency(&g_frequency);
     if (g_lastFrame.QuadPart && g_frequency.QuadPart) {
         double milliseconds = (double)(now.QuadPart - g_lastFrame.QuadPart) * 1000.0
                             / (double)g_frequency.QuadPart;
-        // Outside this range the sample is a counter glitch or a load screen,
-        // not a frame, and would drag every statistic with it.
+        // Outside this range the sample is not a frame: below it a counter
+        // glitch, above it a suspend, a debugger, or minutes spent alt-tabbed
+        // away -- which recorded as a clamped ten-second "frame" would own the
+        // worst-frame line and write a hitch row no phase can explain. Load
+        // hitches are orders of magnitude shorter and pass untouched.
         if (milliseconds > 0.01 && milliseconds < 10000.0) {
-            g_samples[g_write].ticks = now.QuadPart;
-            g_samples[g_write].milliseconds = (float)milliseconds;
-            g_write = (g_write + 1) % kSampleCount;
-            if (g_count < kSampleCount) ++g_count;
+            if (sampling) {
+                g_samples[g_write].ticks = now.QuadPart;
+                g_samples[g_write].milliseconds = (float)milliseconds;
+                g_write = (g_write + 1) % kSampleCount;
+                if (g_count < kSampleCount) ++g_count;
+            }
+            tq::probe::endFrame((float)milliseconds);
         }
     }
     g_lastFrame = now;
@@ -440,11 +510,11 @@ void draw(ID3D11Device* device, ID3D11DeviceContext* context,
     LONGLONG refreshTicks = g_frequency.QuadPart / 10;
     if (!g_lastRefresh || !refreshTicks
         || g_lastFrame.QuadPart - g_lastRefresh >= refreshTicks) {
+        tq::probe::Scope timing(tq::probe::PhaseOverlayRaster);
         renderOverlayPixels();
         context->UpdateSubresource(g_res.textTexture, 0, nullptr, g_textPixels,
                                    kTextWidth * (UINT)sizeof(uint32_t), 0);
-        context->UpdateSubresource(g_res.graphTexture, 0, nullptr, g_graphPixels,
-                                   g_res.graphWidth * (UINT)sizeof(uint32_t), 0);
+        uploadGraphColumns(context);
         g_lastRefresh = g_lastFrame.QuadPart;
     }
 
@@ -484,6 +554,7 @@ void releaseResources() {
     g_res.graphWidth = 0;
     freeBuffer(g_textPixels);
     freeBuffer(g_graphPixels);
+    freeBuffer(g_graphUploaded);
 }
 
 void reset() {
