@@ -19,6 +19,12 @@ evidence from a local installation.
   and what was deliberately left out.
 - `seeds.txt` lists the entry points that start the call-graph walk.
 - `tools/run-audit.sh` is a thin caller over the shared `research/tools/audit.sh`.
+- `arc-format.md` decodes the `.arc` container and records what was checked
+  across every archive in the installation — whether anything is stored
+  uncompressed, whether the data region is contiguous, the block size, and what
+  `Resources/Levels.arc` actually contains.  `tools/arcinfo.py` is the program
+  that produced those numbers; unlike the Ghidra export it needs nothing but
+  Python and a read-only installation.
 - `generated/` output is not committed; `tools/run-audit.sh` reproduces it.  It
   contains the function inventory, call graph, assembly, decompiler output,
   data references, and the PE dump.
@@ -26,7 +32,9 @@ evidence from a local installation.
   mod hooks, then the three questions this audit was opened to answer — whether
   file or archive I/O reaches the render thread, what the frustum entity queries
   cost and what a region pull-in does, and what the game already serializes
-  against Present.
+  against Present.  §4–§7 were added later: why the mod's own probe could not
+  see any of this, why the texture uploader must copy rather than take
+  ownership, the archive `File` class, and the verified patch sites.
 
 Generated output is evidence, not source code.  Addresses are virtual addresses
 using `Engine.dll`'s preferred image base (`0x10000000`) unless a file

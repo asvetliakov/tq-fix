@@ -60,8 +60,14 @@ const char* const kCounterNames[CounterCount] = {
     "grass_twin_fail", "upload_steps", "upload_kib", "upload_jobs_started",
     "upload_jobs_done", "upload_rejected", "shader_create",
     "texture_create", "buffer_create", "set_render_targets", "shadow_bind",
-    "shadow_fit_change", "ps_set_srv"
+    "shadow_fit_change", "ps_set_srv",
+    // The engine channel; see the enum. Durations are `_us`, deliberately.
+    "upload_reject_pool", "upload_reject_budget", "upload_reject_alloc",
+    "upload_reject_scan", "upload_src_arc", "upload_src_loose",
+    "upload_src_none", "engine_tex_create_off", "engine_tex_create_off_us"
 };
+static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
+              "every counter needs a CSV column name");
 
 // The panel's 3x5 font has A-Z, 0-9, space, '.', ':', '-', '/' and '>' and
 // nothing else, so the CSV's snake_case names cannot be drawn as they stand.
@@ -82,6 +88,11 @@ const float g_hitchMs = 20.0f;
 wchar_t g_csvPath[MAX_PATH];
 
 FrameRecord* g_records;
+// The engine channel's accumulator. Written with InterlockedExchangeAdd from
+// the game's threads and drained with InterlockedExchange at the top of
+// endFrame, so a value belongs to the frame that was open when it was counted
+// and no write can ever land in the middle of a record being copied out.
+volatile LONG g_engineCounters[CounterCount];
 // The thread whose frames are being recorded, learned from the Present
 // callback. Device-creation hooks run on whatever thread the game calls them
 // from, and a write from any other thread would race endFrame's reset of the
@@ -207,7 +218,12 @@ void writeHeader() {
     // A fresh file per session: an appended run would silently share columns
     // with a build that may have had different ones.
     DeleteFileW(g_csvPath);
-    char line[2048];
+    // Sized for the whole column set with room to add to it. The overrun this
+    // guards against is silent: snprintf returns the length it *would* have
+    // written, so `n += snprintf(...)` walks past the end and the header is
+    // emitted truncated and unterminated, with no error anywhere. The self-test
+    // asserts the header's comma count against a row's for exactly this reason.
+    char line[4096];
     // Named so the summarizer knows whether these rows are the whole session
     // or only its hitches, instead of guessing from index contiguity.
     snprintf(line, sizeof(line), "# performance_trace=%s\r\n",
@@ -302,7 +318,7 @@ void describeUnusual(const FrameRecord& record, char* out, size_t size,
 }
 
 void emitRecord(const FrameRecord& record, bool flushWhenFull = false) {
-    char line[3072];
+    char line[8192];
     int n = snprintf(line, sizeof(line), "%u,%.3f", record.index,
                      record.milliseconds);
     for (unsigned i = 0; i < PhaseCount && n > 0 && n < (int)sizeof(line); ++i)
@@ -459,6 +475,28 @@ void countInternal(Counter counter, uint32_t amount) {
     g_current.counters[counter] += amount;
 }
 
+bool isRenderThread() {
+    return !g_renderThread || GetCurrentThreadId() == g_renderThread;
+}
+
+void engineCountInternal(Counter counter, uint32_t amount) {
+    if (!detail::active || counter >= CounterCount || !amount) return;
+    InterlockedExchangeAdd(&g_engineCounters[counter], (LONG)amount);
+}
+
+uint32_t microsecondsSince(int64_t startTicks) {
+    if (!detail::active || !startTicks || !g_frequency.QuadPart) return 0;
+    int64_t elapsed = now() - startTicks;
+    if (elapsed <= 0) return 0;
+    double microseconds =
+        (double)elapsed * 1000000.0 / (double)g_frequency.QuadPart;
+    // Saturating rather than wrapping: a column that reads 4294967295 says
+    // "longer than this can express", where a wrapped one would read as a fast
+    // load and quietly hide the worst case in the file.
+    if (microseconds >= 4294967295.0) return 0xffffffffu;
+    return (uint32_t)microseconds;
+}
+
 bool createResources(ID3D11Device* device) {
     if (!detail::active || !device || g_gpuReady) return g_gpuReady != 0;
     D3D11_QUERY_DESC disjoint = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
@@ -532,6 +570,14 @@ void beginFrame(ID3D11DeviceContext* context) {
 void endFrame(float cpuFrameMilliseconds) {
     if (!detail::active || !g_records) return;
     g_renderThread = GetCurrentThreadId();
+    // Fold the game's threads in first, so their counts belong to the frame
+    // that is closing rather than to whichever one happens to close next. The
+    // exchange is what makes this exact: a write landing between the read and
+    // the store is not lost, it is carried into the following frame.
+    for (unsigned i = 0; i < CounterCount; ++i) {
+        LONG pending = InterlockedExchange(&g_engineCounters[i], 0);
+        if (pending > 0) g_current.counters[i] += (uint32_t)pending;
+    }
     if (g_gpuCurrent) {
         // The disjoint query has to be ended, not merely begun. Without this
         // GetData never returns S_OK for it, and since every timestamp in the
@@ -656,6 +702,8 @@ void shutdown() {
     g_mode = ModeOff;
     free(g_records);
     g_records = nullptr;
+    for (unsigned i = 0; i < CounterCount; ++i)
+        InterlockedExchange(&g_engineCounters[i], 0);
     g_frameIndex = g_emitCursor = 0;
     g_renderThread = 0;
     g_logBytes = g_logDropped = 0;

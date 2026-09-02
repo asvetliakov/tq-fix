@@ -688,17 +688,25 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
         || !g_uploadLockReady) return E_FAIL;
     TextureOwner owner = {};
     const BYTE* dds = (const BYTE*)initial[0].pSysMem - 0x80;
-    // Past this point the texture is one this path wanted; a decline is worth
-    // counting because it is the case the Engine audit predicts -- a texture
-    // read out of a .arc, whose owner is not the loose-file class the unmap
-    // hook matches.
+    // Past this point the texture is one this path wanted, so every decline
+    // below is a fact about the install rather than about the texture -- and
+    // each is counted separately, because "rejected" conflating three
+    // unrelated outcomes is what made the previous runs unreadable. All of
+    // them go through the engine channel: this function runs on the game's
+    // loader thread, where probe::count writes nothing.
     if (!findTextureOwner(dds, &owner)) {
-        tq::probe::count(tq::probe::CounterUploadRejected);
+        // The audit's prediction, if it fires: a texture read out of a .arc,
+        // whose File is not the loose-file class this scan accepts.
+        tq::probe::engineCount(tq::probe::CounterUploadSrcNone);
+        tq::probe::engineCount(tq::probe::CounterUploadRejectScan);
+        tq::probe::engineCount(tq::probe::CounterUploadRejected);
         return E_FAIL;
     }
+    tq::probe::engineCount(tq::probe::CounterUploadSrcLoose);
     UploadJob* job = reserveUploadJob();
     if (!job) {
-        tq::probe::count(tq::probe::CounterUploadRejected);
+        tq::probe::engineCount(tq::probe::CounterUploadRejectPool);
+        tq::probe::engineCount(tq::probe::CounterUploadRejected);
         return E_FAIL;
     }
 
@@ -731,9 +739,11 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
         (*texture)->Release();
         *texture = nullptr;
         InterlockedExchange(&job->state, 0);
-        // The other owner-shaped decline: the unmap vtable is not the
-        // loose-file class this path knows how to lease.
-        tq::probe::count(tq::probe::CounterUploadRejected);
+        // The retention resource could not be acquired: the lease table is
+        // full, or the mapping pointer moved under the swap. Stage 2 replaces
+        // leases with a copy, and this becomes the allocation failure proper.
+        tq::probe::engineCount(tq::probe::CounterUploadRejectAlloc);
+        tq::probe::engineCount(tq::probe::CounterUploadRejected);
         return E_FAIL;
     }
 
@@ -752,7 +762,9 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
     // ceiling. Opening at the maximum is what produced the 34 ms outlier: the
     // controller could only correct after a frame had already paid for it.
     job->chunkBytes = chunkBytesForTargetMs();
-    tq::probe::count(tq::probe::CounterUploadJobsStarted);
+    // Also the loader thread's, so also the engine channel; this counter
+    // has been reading zero for every run that ever recorded it.
+    tq::probe::engineCount(tq::probe::CounterUploadJobsStarted);
     ++lease->jobs;
     InterlockedExchange(&job->state, 2);
     LeaveCriticalSection(&g_uploadLock);
@@ -1047,12 +1059,14 @@ HRESULT createOriginalTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* 
     return hr;
 }
 
-HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* desc,
-                                   const D3D11_SUBRESOURCE_DATA* initial,
-                                   ID3D11Texture2D** texture) {
-    const void* caller = __builtin_return_address(0);
-    tq::probe::Scope timing(tq::probe::PhaseTextureCreate);
-    tq::probe::count(tq::probe::CounterTextureCreate);
+// The body of the CreateTexture2D hook, split out so the hook itself can be a
+// thin frame that decides which of the probe's two channels the call belongs
+// in. This function has several returns, and re-deciding that at each of them
+// by hand is exactly the bookkeeping that rots.
+HRESULT createTexture2DDispatch(ID3D11Device* device,
+                                const D3D11_TEXTURE2D_DESC* desc,
+                                const D3D11_SUBRESOURCE_DATA* initial,
+                                ID3D11Texture2D** texture, const void* caller) {
     bool progressivelyHandled = false;
     HRESULT progressive = createProgressiveTexture(device, desc, initial, texture,
                                                     caller, &progressivelyHandled);
@@ -1114,6 +1128,31 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
         tq::hdr::log("Shadow map table full at %u entries; %ux%u will render"
                      " unscaled\r\n", g_shadowTextureCount,
                      scaled.Width, scaled.Height);
+    }
+    return hr;
+}
+
+HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_DESC* desc,
+                                   const D3D11_SUBRESOURCE_DATA* initial,
+                                   ID3D11Texture2D** texture) {
+    const void* caller = __builtin_return_address(0);
+    // Texture loads run on the game's loader thread, and the frame record
+    // cannot accept a write from there: probe::count and probe::addPhase both
+    // drop it. So every texture the game streamed in -- which is to say all of
+    // them, and precisely the ones under investigation -- was being discarded
+    // by the instrument meant to be watching it. Off-thread calls go to the
+    // engine channel instead, where they survive.
+    const bool renderThread = tq::probe::isRenderThread();
+    const int64_t started = tq::probe::enabled() ? tq::probe::now() : 0;
+    if (renderThread) tq::probe::count(tq::probe::CounterTextureCreate);
+    else tq::probe::engineCount(tq::probe::CounterEngineTexCreateOff);
+    HRESULT hr = createTexture2DDispatch(device, desc, initial, texture, caller);
+    if (started) {
+        if (renderThread)
+            tq::probe::addPhase(tq::probe::PhaseTextureCreate, started);
+        else
+            tq::probe::engineCount(tq::probe::CounterEngineTexCreateOffUs,
+                                   tq::probe::microsecondsSince(started));
     }
     return hr;
 }

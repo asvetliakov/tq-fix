@@ -63,8 +63,13 @@ engages only for textures served from a loose-file source, never for a texture
 read out of a `.arc`**.  The name `hookArchiveUnmap` is a misnomer; it hooks the
 loose-file unmap.  Whether the audited installation actually serves the hot
 textures loose or from archives is **unproven** here — it is a property of the
-install, not the binary — but it is directly checkable from the mod's own
-`g_diagUploadsCreated` counter (`src/visual.cpp:750`).
+install, not the binary — but it is directly checkable from the mod's
+own counters.  *(Corrected: the `g_diagUploadsCreated` counter this originally
+named no longer exists.  Since Stage 0 of the mitigation plan the answer is
+reported directly, as the `upload_src_arc` / `upload_src_loose` /
+`upload_src_none` columns of the performance-trace CSV — and it had to be
+reported through a new channel, because the counters that would have answered
+it were being silently discarded; see §4 below.)*
 
 ## 1. Where the resource load actually happens
 
@@ -380,10 +385,12 @@ So the serialization chain per frame is:
 3. `Engine::PresentSurface` — `ResourceLoader::Update` (free unless
    statistics/debugging are on), then the device Present.
 
-**Where the mod's uploader sits.**  `src/streaming.cpp:62-67` wraps the render
-device's present entry and calls `visual::onPresent` *before* the real present;
-`advanceTextureUploadsInternal` (`src/visual.cpp:845`) runs there
-(`src/visual.cpp:3144`).  So the uploader runs at step 3, after the fence in
+**Where the mod's uploader sits.**  `src/streaming.cpp` wraps the render
+device's present entry and calls `visual::onPresent` *before* the real present,
+and `advanceTextureUploadsInternal` runs there.  *(Corrected: the line
+reference this carried, `src/visual.cpp:3144`, was past the end of that file
+even when it was written.  Prefer the symbol names, as the head of this
+document says.)*  So the uploader runs at step 3, after the fence in
 step 1 and after any forced load in step 2 — it is not literally queued behind
 them within a frame.  But:
 
@@ -391,8 +398,11 @@ them within a frame.  But:
   `job.source[mip].pSysMem`, which §1 proves is a `MapViewOfFile` view whose
   `UnmapViewOfFile` the mod deliberately deferred (`hookArchiveUnmap`,
   `src/visual.cpp:617`).  Every byte of that 1–2 MiB chunk that has not been
-  touched yet is a page fault against the file, taken on the present thread,
-  inside a region the mod times with `GetTickCount` (15.6 ms resolution).
+  touched yet is a page fault against the file, taken on the present thread.
+  *(Corrected: that region is timed with `QueryPerformanceCounter`, not
+  `GetTickCount`.  The 15.6 ms tick resolution was a real bug — it is what let
+  the upload budget ratchet to its ceiling and produce a 34 ms chunk — but it
+  was fixed in `17adf8a`, before this audit was written up.)*
 - Those faults compete for the disk with the loader thread's own `ReadFile`s,
   which are serialized on `archive + 0x60` for archive sources.  A deferred
   mapping also keeps the view — and therefore address space — alive across
@@ -411,14 +421,172 @@ Archive decompression (`FUN_1011d0e0` → `FUN_10065760`) happens under
 
 ---
 
+---
+
+## 4. The instrument could not see any of this
+
+`probe::countInternal` and `probe::addPhaseInternal` both begin with
+
+```c
+if (g_renderThread && GetCurrentThreadId() != g_renderThread) return;
+```
+
+which is correct — the frame record is one unsynchronized struct and a write
+from another thread would tear it — but it means **every counter and phase
+recorded from the game's loader thread was being silently dropped**.  §1 proves
+that the thread which runs `FUN_10213c80` is the thread that calls the D3D11
+device, and that is the loader thread, not the render thread.  So
+`CounterUploadJobsStarted`, `CounterUploadRejected` and `PhaseTextureCreate`
+were reading zero for exactly the loads this audit was opened to investigate,
+and no run recorded before Stage 0 can be used to argue anything about them.
+
+The fix is a second channel — `probe::engineCount` — which accumulates into an
+interlocked side array and folds into the frame record at `endFrame`.  Its
+duration columns are named `_us` rather than `_ms`, because `tools/frames.py`
+builds its "the mod's share" total from every column ending in `_ms` and would
+otherwise charge the game's own loading time to the mod.
+
+## 5. The uploader must copy, and must not take ownership
+
+`GraphicsTexture::Initialize` (`0x10194120`) has two branches.  The `"DDS "`
+branch calls the render device once.  The `"TEX"` branch is a `while` loop
+that calls it repeatedly, walking forward through the *same* buffer by a
+per-sub-blob length prefix.
+
+`arc-format.md` records the measurement: decompressing the first block of 502
+`.tex` entries from three scenery archives gives `TEX\x01` for every one and
+`DDS ` for none.  **The looping branch is the only one that matters on this
+install.**
+
+So any design in which the mod takes ownership of the source buffer at the
+first `CreateTexture2D` is a use-after-free while the loader thread is still
+iterating.  This is not only a constraint on future work: it is a live latent
+bug in the shipped loose-file path, which defers `UnmapViewOfFile` to job
+completion on the render thread.  It has never fired only because that path
+never engages on a stock install (§0, and `arc-format.md`).
+
+The uploader must therefore **copy** the mips it retains.  That is also what
+makes both `File` classes equivalent from its point of view, which is why the
+cross-reference below no longer recommends binding to the archive class.
+
+## 6. The archive `File` class
+
+vtable `Engine+0x2f719c`, object 0x28 bytes, constructed at `Engine+0x14d020`
+by `FileSourceArchive::OpenFile` (`0x1014ed30`).  Read out of the pinned
+`Engine.dll` at the recorded RVAs:
+
+| slot | address | member |
+| --- | --- | --- |
+| 0 | `0x10028310` | scalar deleting destructor — frees `+0x18`, `+0x24`, `+0x20` |
+| 2 | `0x1014cf30` | `Lock(offset, size)` |
+| 3 | `0x1014cfc0` | `LockAll()` → `Lock(0, GetLength())` |
+| 4 | `0x1014cf20` | `Unlock()` — `c6 41 10 00 c3`. **Frees nothing.** |
+| 6 | `0x1014cf00` | `GetLength()` → `entry[0x0c]` (`8b 41 08 8b 40 0c c3`) |
+
+```
++0x00 vtable             +0x10 locked flag (byte)
++0x04 FileSourceArchive* (→ +0xc = Archive*)
++0x08 entry record*      +0x14 scratch capacity   (uint)
++0x0c entry index        +0x18 scratch pointer    (operator new[])
++0x1c BlockBuffer.cachedBlockIndex (init 0xffffffff)
++0x20 / +0x24  two 256 KiB block scratch buffers
+```
+
+For comparison, the loose-file vtable at `Engine+0x2f71ec` is a different table
+with the same shape: `[2] = 0x1014e560` (`Lock`), `[4] = 0x1014e540`
+(`Unlock`), `[6] = 0x1014e500`.  A class check must therefore compare the
+vtable *and* its slots, and must not assume the object is 0x38 bytes — the
+archive `File` is 0x28, so a `readable(source + 0x34)` guard reads past its
+end.
+
+`Lock` grows `+0x18` to `size`, sets the locked flag, calls
+`Archive::ReadFromFile`, and returns the buffer.  So `pSysMem` on the archive
+path is **a fully materialized heap buffer** — no mapped view, and none of the
+page-fault-on-Present hazard §3 flags for the loose path.
+
+Ownership is *technically* transferable: the destructor's `operator delete[]`
+is `MSVCR110.dll!??_V@YAXPAX@Z`, reached through Engine's IAT slot
+`0x102ac304`, and `Archive::FreeFileBuffer` (`0x1011dce0`) is literally
+`PUSH EAX; CALL [0x102ac304]`.  §5 is why we must not.  Recorded as the escape
+hatch only.
+
+## 7. Verified patch sites
+
+All 5-byte `E8 rel32` unless noted; each read byte-for-byte out of
+`generated/disassembly.asm`, which `tools/run-audit.sh` reproduces.
+
+| # | site | bytes | what |
+| --- | --- | --- | --- |
+| P1 | `0x10167853` | `e8 68 46 0a 00` | `GraphicsDeferredRendererX::AddElementsInBox` → `Region::LoadLevel` |
+| P2 | `0x1017d8c3` | `e8 f8 e5 08 00` | `GraphicsForwardRenderer::AddElementsInBox` → `Region::LoadLevel` |
+| P3 | `0x10144484/8c/94/9c/a4/af/bd` | seven `e8 …` to `0x10120250` | the seven `UnloadUnreferencedResources` sweeps in `Engine::Update` |
+| P4 | `0x1014467a` | `e8 71 64 13 00` | `Engine::Update` → `World::UpdateRegionUsage` |
+| P5 | `0x10144789` | `e8 02 ad fd ff` | → `FUN_1011f490` (thread prune) — opens the loader fence |
+| P6 | `0x101447a2` | `ff 15 88 c1 2a 10` (6 B) | → `WaitForSingleObject(fence, INFINITE)` |
+| P7 | `0x101447a8` | `e8 63 ab fd ff` | → `FUN_1011f310` — closes the fence |
+| P8 | `0x1011d1d6` | `e8 85 85 f4 ff` | block decompress → `FUN_10065760` |
+
+Both `AddElementsInBox` sites have the identical shape, and the two
+instructions after the call are what would make an asynchronous retarget safe:
+
+```
+  6a 00 / 8b cf              PUSH 0 ; MOV ECX, Region*
+  e8 <rel32>                 CALL Region::LoadLevel
+  80 7f 74 00                CMP byte [EDI+0x74], 0
+  c7 47 6c 00 00 00 00       MOV dword [EDI+0x6c], 0
+  0f 85 <rel32>              JNZ epilogue     ; region skipped while loading
+```
+
+`MOV` does not touch flags, so the `MOV dword [EDI+0x6c],0` between the `CMP`
+and the `JNZ` runs on the skip path too: a region deferred rather than loaded
+still has its unload countdown reset and cannot be evicted while the load is in
+flight.
+
+`FUN_10065760` **is zlib `uncompress` built `__fastcall`**: `ECX` = dest,
+`EDX` = `uLongf* destLen`, `source` and `sourceLen` on the stack, and the
+**caller** cleans them (`1011d1df  ADD ESP,8`).  Its body is
+`inflateInit_` (`0x10067680`) → `inflate` (`0x10067810`) → `inflateEnd`
+(`0x10068eb0`) with `uncompress`'s exact `Z_BUF_ERROR` / `Z_NEED_DICT`
+mapping.  Two consequences:
+
+- a replacement cannot be declared as a plain GCC `__fastcall` function, whose
+  convention is callee-pop; it needs a hand-emitted thunk;
+- its prologue is `55 8b ec 83 e4 f8`, byte-identical to `src/grass.cpp`'s
+  `kRenderPrologue`, and shared with `Region::LoadLevel`,
+  `Archive::ReadFromFile` and `Region::GetEntitiesInFrustum`.  **A six-byte
+  prologue match proves nothing about identity.**  A hook here must verify
+  16–24 bytes even though it only steals 6–7.
+
+Almost every hook target is exported by decorated name
+(`?LoadLevel@Region@GAME@@QAE_N_N@Z`, `?ReadFromFile@Archive@GAME@@QBE…`,
+`?LoadResource@ResourceLoader@GAME@@QAEXPAVResource@2@@Z`, …), so the right
+shape is to resolve by name and use the RVA as an identity assertion rather
+than as the lookup.  The recorded main-thread id is at `Engine+0x41a5dc`
+(`CMP EAX,[0x1041a5dc]` at `0x1014476b`), free to read for thread attribution.
+
+`Region::WaitForLoadingToFinish` (`0x1020bde0`) is exactly seven bytes,
+`80 79 78 01 74 fa c3`, and takes no arguments.  A trampoline over it is
+impossible — the stolen bytes contain the relative `74 fa` — so instrumenting
+it means replacing it outright rather than detouring it.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to
    archive entries.  If the audited install serves textures from `.arc`, the
    progressive uploader never runs and its cost is pure overhead; if it serves
    them loose, the uploader is holding `MapViewOfFile` views open across frames
-   and taking their page faults on the present thread.  The mod already has the
-   counter to tell these apart (`g_diagUploadsCreated`).
+   and taking their page faults on the present thread.  *(Answered since:
+   `arc-format.md` establishes that this install serves everything from `.arc`,
+   so the first branch is the one that holds and the uploader has never run.
+   The `upload_src_*` columns confirm it per run.)*
+
+   **This item's implied fix — bind to the archive `File` class as well — is
+   the wrong shape, and §5 below says why.**  The `"TEX"` container branch of
+   `GraphicsTexture::Initialize` walks one buffer across several
+   `CreateTexture2D` calls, so a design that takes ownership of that buffer at
+   the first call is a use-after-free.  The uploader must copy the mips it
+   retains, which then makes both `File` classes identical from its point of
+   view and removes the need to bind to either.
 2. The renderer can force a synchronous level load (§1a).  A probe counter on
    `Region::LoadLevel` entries during a frame would separate "the game loaded a
    level inside our render pass" from every mod-side suspect, which is exactly

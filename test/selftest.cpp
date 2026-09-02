@@ -511,6 +511,34 @@ char* readTextFile(const wchar_t* path, long* size) {
     return text;
 }
 
+// Runs on a thread that is deliberately not the render thread, so the two
+// counting channels can be told apart by where their writes end up.
+DWORD WINAPI engineChannelWorker(void*) {
+    tq::probe::count(tq::probe::CounterDrawIndexed, 5);
+    tq::probe::engineCount(tq::probe::CounterEngineTexCreateOff, 3);
+    tq::probe::engineCount(tq::probe::CounterEngineTexCreateOffUs, 900);
+    return 0;
+}
+
+// Fields in a CSV line, counting the separators rather than parsing: the only
+// field that can contain a space is `unusual`, and none contains a comma.
+unsigned csvFieldCount(const char* line) {
+    unsigned fields = 1;
+    for (const char* p = line; *p && *p != '\r' && *p != '\n'; ++p)
+        if (*p == ',') ++fields;
+    return fields;
+}
+
+// Whether the line's last field is exactly `name`.
+bool csvLastFieldIs(const char* line, const char* name) {
+    const char* end = line;
+    while (*end && *end != '\r' && *end != '\n') ++end;
+    const char* last = line;
+    for (const char* p = line; p < end; ++p) if (*p == ',') last = p + 1;
+    size_t length = strlen(name);
+    return (size_t)(end - last) == length && strncmp(last, name, length) == 0;
+}
+
 // Whether this device retires timestamp queries at all, and under which of the
 // three ways of asking. Two in-game runs of eight thousand frames each resolved
 // not one, so the capability has to be established here rather than assumed:
@@ -598,9 +626,12 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     tq::probe::readOptions(ini);
     check(!tq::probe::enabled(), "probe stays off when the INI has no setting");
     tq::probe::count(tq::probe::CounterDraw);
+    tq::probe::engineCount(tq::probe::CounterEngineTexCreateOff, 11);
     tq::probe::endFrame(33.0f);
     check(tq::probe::frameCountForTest() == 0,
           "probe records nothing while it is off");
+    check(tq::probe::microsecondsSince(tq::probe::now()) == 0,
+          "microsecondsSince reports nothing while the probe is off");
     check(!tq::probe::createResources(device),
           "probe creates no device objects while it is off");
 
@@ -635,6 +666,24 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           "probe counts what the frame was asked to do");
     check(tq::probe::phaseMillisecondsForTest(0, tq::probe::PhaseBloom) == 0.0f,
           "a phase that did not run stays at zero");
+
+    // The engine channel. The frame above taught the probe which thread is the
+    // render thread, so from here a write from anywhere else is refused by
+    // count() and accepted by engineCount() -- which is the entire reason the
+    // second channel exists, and the invariant the first one must not lose.
+    HANDLE worker = CreateThread(nullptr, 0, &engineChannelWorker, nullptr, 0,
+                                 nullptr);
+    if (worker) { WaitForSingleObject(worker, 5000); CloseHandle(worker); }
+    tq::probe::endFrame(16.7f);
+    check(worker != nullptr
+          && tq::probe::counterForTest(0, tq::probe::CounterEngineTexCreateOff) == 3
+          && tq::probe::counterForTest(0, tq::probe::CounterEngineTexCreateOffUs) == 900,
+          "engineCount from the game's own thread lands in the frame that closed");
+    check(tq::probe::counterForTest(0, tq::probe::CounterDrawIndexed) == 0,
+          "count() from a thread that is not the render thread still records nothing");
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(0, tq::probe::CounterEngineTexCreateOff) == 0,
+          "the engine channel drains, so a count is charged to one frame only");
 
     // A steady baseline, then one frame that spikes in a single phase. The row
     // for that frame has to name the phase, not merely report the frame time.
@@ -702,8 +751,23 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
                && strstr(csvText, "gpu_shadow_dir_ms") != nullptr
                && strstr(csvText, ",unusual") != nullptr;
     check(header, "the probe writes its mode and a header naming every column");
-    check(csvText && strstr(csvText, "grass_present:+") != nullptr,
-          "the hitch row attributes the spike to the phase that caused it");
+    check(csvText && strstr(csvText, "engine_tex_create_off_us") != nullptr,
+          "the header carries the engine channel's columns");
+    // The permanent regression test for the header buffer. snprintf truncation
+    // is silent -- `n += snprintf(...)` returns the length it wanted, so an
+    // overrun writes a short, unterminated header and nothing reports it. A
+    // header with fewer fields than its rows is the shape that failure takes.
+    bool widths = false;
+    if (csvText) {
+        const char* headerLine = strchr(csvText, '\n');
+        headerLine = headerLine ? headerLine + 1 : nullptr;
+        const char* firstRow = headerLine ? strchr(headerLine, '\n') : nullptr;
+        firstRow = firstRow ? firstRow + 1 : nullptr;
+        widths = headerLine && firstRow && *firstRow
+              && csvFieldCount(headerLine) == csvFieldCount(firstRow)
+              && csvLastFieldIs(headerLine, "unusual");
+    }
+    check(widths, "the CSV header has exactly as many fields as a row, ending in unusual");
     free(csvText);
 
     DeleteFileW(csv);

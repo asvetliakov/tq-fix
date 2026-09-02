@@ -85,6 +85,36 @@ enum Counter {
     CounterShadowBind,
     CounterShadowFitChange,
     CounterPsSetSrv,
+
+    // ---------------------------------------------------------------------
+    // The engine channel. Everything from here down is written from the game's
+    // loader thread or its main thread, never from the render thread, and so
+    // must go through engineCount() rather than count(): countInternal drops
+    // every write that is not the render thread's, which is exactly why the
+    // texture-load counters this block replaces were reading zero.
+    //
+    // Durations here are named `_us`, and that is load-bearing rather than
+    // stylistic. tools/frames.py builds "the mod's share" from every column
+    // ending in `_ms`, so an engine `_ms` column would be silently charged to
+    // the mod; `_us` falls into its counter bucket instead.
+    CounterEngineFirst,
+    // The three outcomes CounterUploadRejected used to conflate, plus the two
+    // Stage 2 adds. Their sum is still reported as upload_rejected, so a run
+    // recorded before the split compares on that column unchanged.
+    CounterUploadRejectPool = CounterEngineFirst,  // no free job slot
+    CounterUploadRejectBudget,                     // over the retained-byte cap
+    CounterUploadRejectAlloc,                      // the retention buffer failed
+    CounterUploadRejectScan,                       // no owning File on the stack
+    // Which File class served the texture. The whole progressive uploader is
+    // predicated on an answer to this, and until now nothing reported it.
+    CounterUploadSrcArc,
+    CounterUploadSrcLoose,
+    CounterUploadSrcNone,
+    // CreateTexture2D calls that did not arrive on the render thread -- i.e.
+    // the game's own texture loads -- and how long they took. This is the
+    // number that prices Stage 2's copy against the upload it replaces.
+    CounterEngineTexCreateOff,
+    CounterEngineTexCreateOffUs,
     CounterCount
 };
 
@@ -156,6 +186,30 @@ void countInternal(Counter counter, uint32_t amount);
 inline void count(Counter counter, uint32_t amount = 1) {
     if (detail::active) countInternal(counter, amount);
 }
+
+// Whether the caller is the thread whose frames are being recorded. True
+// before the first frame closes, when no render thread has been learned yet,
+// so a call site that branches on this behaves the same way count() does.
+bool isRenderThread();
+
+// The counting channel for the game's own threads. Accumulates into an
+// interlocked side array and folds into the frame record at endFrame, so the
+// column, its median and the `unusual` attribution all work unchanged -- but
+// unlike count() it cannot tear the record, because it never touches it.
+//
+// Legal for any counter, including the ones above CounterEngineFirst; a
+// render-thread write lands in the frame that is closing, exactly as count()
+// would. What is not legal is the reverse: nothing below CounterEngineFirst
+// may be written with count(), or it silently reads zero.
+void engineCountInternal(Counter counter, uint32_t amount);
+inline void engineCount(Counter counter, uint32_t amount = 1) {
+    if (detail::active) engineCountInternal(counter, amount);
+}
+
+// Elapsed microseconds since a now() reading, saturating at UINT32_MAX and 0
+// while the probe is disabled. For the `_us` counters, whose whole point is to
+// carry a duration through the integer channel.
+uint32_t microsecondsSince(int64_t startTicks);
 
 // ---------------------------------------------------------------------------
 // GPU regions. Created on the shader-build worker rather than the render
