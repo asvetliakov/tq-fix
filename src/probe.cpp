@@ -64,7 +64,8 @@ const char* const kCounterNames[CounterCount] = {
     // The engine channel; see the enum. Durations are `_us`, deliberately.
     "upload_reject_pool", "upload_reject_budget", "upload_reject_alloc",
     "upload_reject_scan", "upload_src_arc", "upload_src_loose",
-    "upload_src_none", "engine_tex_create_off", "engine_tex_create_off_us"
+    "upload_src_none", "engine_tex_create_off", "engine_tex_create_off_us",
+    "upload_unmap", "upload_unmap_us", "upload_release_us"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");

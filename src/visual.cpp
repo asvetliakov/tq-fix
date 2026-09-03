@@ -644,7 +644,16 @@ void releaseMapping(void* token) {
         memset(lease, 0, sizeof(*lease));
     }
     tq::upload::unlock();
-    if (unmap) UnmapViewOfFile(unmap);
+    // The other half of the retire path, and the one the run-4 data points
+    // hardest at: tearing down a mapped view of a file that can be 341 MiB,
+    // on the render thread, inside Present.
+    if (unmap) {
+        int64_t started = tq::probe::now();
+        UnmapViewOfFile(unmap);
+        tq::probe::engineCount(tq::probe::CounterUploadUnmap);
+        tq::probe::engineCount(tq::probe::CounterUploadUnmapUs,
+                               tq::probe::microsecondsSince(started));
+    }
 }
 
 int64_t uploadNow() {

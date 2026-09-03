@@ -314,8 +314,18 @@ void advance(ID3D11DeviceContext* context) {
     }
     LeaveCriticalSection(&g_uploadLock);
 
+    // Timed because this is a suspect, not a formality: releasing a texture
+    // returns its device memory, and for the largest sources that is hundreds
+    // of megabytes freed inside the render thread's Present callback.
+    int64_t releaseStart = (releaseLowView || releaseTexture) ? g_calls.now() : 0;
     if (releaseLowView) releaseLowView->Release();
     if (releaseTexture) releaseTexture->Release();
+    if (releaseStart) {
+        double ms = g_calls.millisecondsSince(releaseStart);
+        if (ms > 0.0)
+            tq::probe::engineCount(tq::probe::CounterUploadReleaseUs,
+                                   (uint32_t)(ms * 1000.0));
+    }
     // Outside the lock, so an implementation is free to make a syscall here --
     // the shipped one unmaps a view. It may take the lock back if it needs to;
     // a CRITICAL_SECTION is recursive, and this thread no longer holds it.

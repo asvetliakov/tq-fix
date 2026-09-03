@@ -115,6 +115,15 @@ enum Counter {
     // number that prices Stage 2's copy against the upload it replaces.
     CounterEngineTexCreateOff,
     CounterEngineTexCreateOffUs,
+    // The retire path, split three ways. Run 4 showed 9 of its 10 worst frames
+    // retiring a job against a 5.4% base rate, on chunks of 128-512 KiB -- so
+    // the cost is not the upload, it is what happens when a job finishes. That
+    // is two COM releases, which under DXMT free the texture's device memory,
+    // and one UnmapViewOfFile over a view of the whole source file. These say
+    // which, rather than leaving it to be argued.
+    CounterUploadUnmap,
+    CounterUploadUnmapUs,
+    CounterUploadReleaseUs,
     CounterCount
 };
 
