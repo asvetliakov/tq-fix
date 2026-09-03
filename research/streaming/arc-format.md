@@ -149,6 +149,20 @@ per-sub-blob length prefix.  So the looping branch is the only one that
 matters here, and any design that takes ownership of the source buffer at the
 first `CreateTexture2D` is a use-after-free while the loader thread iterates.
 
+## The install this was measured in
+
+These numbers describe the game serving everything from `.arc`.  The same
+machine has a loose high-resolution texture pack — 12,519 `.tex`, 92.4 GiB,
+all `TEX\x01`, p50 2.67 MiB, p90 21.33 MiB, p99 85.33 MiB, **max 341.33 MiB**
+— which installs into `Settings/` and, when present, serves those textures
+through the loose-file `File` class instead.  It was parked in `Settings-back/`
+for this survey.
+
+The size distribution is the part that carries over: the archives' largest
+entry is 21.33 MiB and 949 are >= 2 MiB, while the pack has 7,570 >= 2 MiB and
+580 >= 32 MiB.  A design sized against the archive numbers is sized against
+the wrong distribution for a machine running the pack.
+
 ## Provenance note
 
 `Resources/Levels.arc` (mtime Aug 31) and `Resources/Shaders.arc` (Sep 1) are

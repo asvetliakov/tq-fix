@@ -54,6 +54,16 @@ set.  Reads go through `Archive::ReadFromFile` at `0x1011d320`:
   at `0x1011d0e0`: *"Archive: Block decompression error in file '%s', block %u
   of %u. Expected size %u, actual size %u."*
 
+**Which class serves a given texture is a property of the installation, not of
+the binary — and this one is switchable.**  The audited machine has a loose
+high-resolution texture pack (12,519 `.tex`, 92.4 GiB, every one a `TEX\x01`
+container, up to **341 MiB for a single texture** against the archives' 21 MiB
+maximum) which drops into the game's `Settings/` directory.  With it installed
+the *loose* class serves those textures and the progressive uploader engages;
+with it parked, everything comes from `.arc` and the uploader has never run.
+`arc-format.md`'s survey, and finding (1) below, describe the parked state.
+Any measurement has to say which of the two it was taken in.
+
 **This matters for the mod.**  `src/visual.cpp:617-650` requires
 `vtable[2] == Engine.dll+0x14e560` and `vtable[4] == Engine.dll+0x14e540` before
 it will lease a mapping or install `hookArchiveUnmap`.  Those are precisely
@@ -460,10 +470,19 @@ install.**
 
 So any design in which the mod takes ownership of the source buffer at the
 first `CreateTexture2D` is a use-after-free while the loader thread is still
-iterating.  This is not only a constraint on future work: it is a live latent
-bug in the shipped loose-file path, which defers `UnmapViewOfFile` to job
-completion on the render thread.  It has never fired only because that path
-never engages on a stock install (§0, and `arc-format.md`).
+iterating.  That is the constraint on the archive work, and it is not
+negotiable.
+
+*(Corrected, against an earlier draft of this section: the shipped loose-file
+path is **not** already broken by this.  It defers `UnmapViewOfFile` to job
+completion, but the lease is reference-counted, and the second and later
+sub-blobs of a `TEX` container are handled explicitly — by then the mod has
+already swapped `source+0x34` to NULL, so `findTextureOwner` reports a null
+`mappedBase`, `createLease` is skipped, the existing unsealed lease is found,
+and `hooked` falls through to `lease->mappedBase != nullptr`.  The job joins
+the lease and takes a count.  The view therefore outlives every job that reads
+it.  The "live latent bug" claim was reasoning, not a byte, and it does not
+survive reading the code; the constraint above stands on its own.)*
 
 The uploader must therefore **copy** the mips it retains.  That is also what
 makes both `File` classes equivalent from its point of view, which is why the
