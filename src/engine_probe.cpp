@@ -679,14 +679,46 @@ PeekMessageFn g_peekMessage;
 DispatchMessageFn g_dispatchMessage;
 CallPatch g_peekPatch, g_dispatchPatch;
 
+// What the window actually receives, so "the pump is slow" can be read
+// against how much it is being asked to carry. Claimed with an interlocked
+// exchange rather than a lock: the pump is single-threaded in practice, and
+// a histogram is not worth a critical section on it.
+const unsigned kMessageKinds = 64;
+volatile LONG g_messageId[kMessageKinds];
+volatile LONG g_messageCount[kMessageKinds];
+volatile LONG g_messageSlow[kMessageKinds];   // peeks over 5 ms returning it
+
+void noteMessage(UINT id, bool slow) {
+    // +1 so a real WM_NULL (0) is distinguishable from an unclaimed slot.
+    const LONG key = (LONG)id + 1;
+    unsigned slot = (id * 2654435761u) % kMessageKinds;
+    for (unsigned probe = 0; probe < kMessageKinds; ++probe) {
+        volatile LONG* cell = &g_messageId[(slot + probe) % kMessageKinds];
+        LONG held = InterlockedCompareExchange(cell, key, 0);
+        if (held == 0 || held == key) {
+            const unsigned at = (slot + probe) % kMessageKinds;
+            InterlockedIncrement(&g_messageCount[at]);
+            if (slow) InterlockedIncrement(&g_messageSlow[at]);
+            return;
+        }
+    }
+}
+
 BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
                                UINT last, UINT remove) {
     if (!g_peekMessage) return FALSE;
     const int64_t started = tq::probe::now();
     const BOOL result = g_peekMessage(message, window, first, last, remove);
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
     tq::probe::engineCount(tq::probe::CounterPumpPeek);
-    tq::probe::engineCount(tq::probe::CounterPumpPeekUs,
-                           tq::probe::microsecondsSince(started));
+    tq::probe::engineCount(tq::probe::CounterPumpPeekUs, elapsed);
+    if (!result) {
+        // The queue was empty. Time spent here is the cost of asking.
+        tq::probe::engineCount(tq::probe::CounterPumpPeekMiss);
+        tq::probe::engineCount(tq::probe::CounterPumpPeekMissUs, elapsed);
+    } else if (message) {
+        noteMessage(message->message, elapsed > 5000u);
+    }
     return result;
 }
 
@@ -1117,7 +1149,54 @@ bool install(HMODULE engine) {
     return false;
 }
 
+namespace {
+
+struct MessageName { UINT id; const char* name; };
+const MessageName kMessageNames[] = {
+    {0x0003, "MOVE"}, {0x0005, "SIZE"}, {0x0006, "ACTIVATE"},
+    {0x0007, "SETFOCUS"}, {0x0008, "KILLFOCUS"}, {0x000f, "PAINT"},
+    {0x0014, "ERASEBKGND"}, {0x001c, "ACTIVATEAPP"}, {0x0046, "WINPOSCHANGING"},
+    {0x0047, "WINPOSCHANGED"}, {0x007e, "DISPLAYCHANGE"}, {0x0084, "NCHITTEST"},
+    {0x00a0, "NCMOUSEMOVE"}, {0x00ff, "INPUT"}, {0x0100, "KEYDOWN"},
+    {0x0101, "KEYUP"}, {0x0102, "CHAR"}, {0x0104, "SYSKEYDOWN"},
+    {0x0112, "SYSCOMMAND"}, {0x0113, "TIMER"}, {0x0020, "SETCURSOR"},
+    {0x0200, "MOUSEMOVE"}, {0x0201, "LBUTTONDOWN"}, {0x0202, "LBUTTONUP"},
+    {0x0204, "RBUTTONDOWN"}, {0x0205, "RBUTTONUP"}, {0x020a, "MOUSEWHEEL"},
+    {0x0219, "DEVICECHANGE"}, {0x0281, "IME_SETCONTEXT"},
+};
+
+void reportMessages() {
+    unsigned total = 0;
+    for (unsigned i = 0; i < kMessageKinds; ++i)
+        total += (unsigned)g_messageCount[i];
+    if (!total) return;
+    // Most frequent first, at most twelve kinds; a game window sees far fewer
+    // than that, so the list is the whole truth rather than a sample. Slots
+    // are struck off as they are printed rather than filtered by a descending
+    // count, which would silently drop ties.
+    bool done[kMessageKinds] = {};
+    for (unsigned printed = 0; printed < 12; ++printed) {
+        int best = -1;
+        for (unsigned i = 0; i < kMessageKinds; ++i)
+            if (g_messageId[i] && !done[i]
+                && (best < 0 || g_messageCount[i] > g_messageCount[best]))
+                best = (int)i;
+        if (best < 0) break;
+        done[best] = true;
+        const UINT id = (UINT)(g_messageId[best] - 1);
+        const char* name = "?";
+        for (unsigned k = 0; k < sizeof(kMessageNames) / sizeof(*kMessageNames); ++k)
+            if (kMessageNames[k].id == id) { name = kMessageNames[k].name; break; }
+        tq::hdr::log("Engine trace: pump message 0x%04x %-14s x%-7ld slow %ld\r\n",
+                     id, name, g_messageCount[best], g_messageSlow[best]);
+    }
+    tq::hdr::log("Engine trace: %u messages dispatched in the session\r\n", total);
+}
+
+}  // namespace
+
 void shutdown() {
+    reportMessages();
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
     tq::detour::restoreCall(g_dispatchPatch);

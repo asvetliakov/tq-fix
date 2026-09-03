@@ -317,6 +317,13 @@ enum Counter {
     CounterPumpPeekUs,
     CounterPumpDispatch,
     CounterPumpDispatchUs,
+    // The peek split by what it returned. PeekMessage does not block, so a
+    // slow one is the call itself being slow, not a wait for a message to
+    // arrive -- and if the slow ones are the peeks that found the queue
+    // EMPTY, that is conclusive: the cost is the round trip to ask, not
+    // anything the game or its window has to do.
+    CounterPumpPeekMiss,
+    CounterPumpPeekMissUs,
     CounterCount
 };
 
