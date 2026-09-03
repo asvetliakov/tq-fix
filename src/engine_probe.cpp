@@ -542,6 +542,45 @@ volatile LONG g_messageId[kMessageKinds];
 volatile LONG g_messageCount[kMessageKinds];
 volatile LONG g_messageSlow[kMessageKinds];   // peeks over 5 ms returning it
 
+typedef UINT_PTR (WINAPI* SetTimerFn)(HWND, UINT_PTR, UINT, TIMERPROC);
+SetTimerFn g_setTimer;
+CallPatch g_setTimerPatch;
+LONG g_setTimerCalls;
+
+// The game's timer, learned from the messages rather than from SetTimer.
+// SetTimer is never called while we are installed -- run 19 hooked it and
+// logged nothing -- because TQ.exe arms its timer during startup, long before
+// the renderer exists and this module can be loaded. But every WM_TIMER
+// carries the identity of the timer that produced it: hwnd, wParam = the
+// timer id, lParam = its TIMERPROC or null. That is everything SetTimer needs
+// to re-arm the same timer with a different period, which is the experiment.
+HWND g_timerWindow;
+UINT_PTR g_timerId;
+LONG g_timerKnown;
+LONG g_timerRearmed;
+uintptr_t g_timerProc;
+int64_t g_lastTimerTick;
+uint32_t g_timerGapMinUs = 0xffffffffu;
+LONG g_timerSamples;
+
+void noteTimer(const MSG* message) {
+    // The shortest gap between two WM_TIMER messages is the best estimate of
+    // the period the game asked for: the message is synthesized only when the
+    // queue is otherwise empty, so every other gap is inflated by coalescing.
+    const int64_t now = tq::probe::now();
+    if (g_lastTimerTick) {
+        const uint32_t gap = tq::probe::microsecondsSince(g_lastTimerTick);
+        if (gap && gap < g_timerGapMinUs) g_timerGapMinUs = gap;
+        InterlockedIncrement(&g_timerSamples);
+    }
+    g_lastTimerTick = now;
+    if (InterlockedCompareExchange(&g_timerKnown, 1, 0) == 0) {
+        g_timerWindow = message->hwnd;
+        g_timerId = message->wParam;
+        g_timerProc = (uintptr_t)message->lParam;
+    }
+}
+
 void noteMessage(UINT id, bool slow) {
     // +1 so a real WM_NULL (0) is distinguishable from an unclaimed slot.
     const LONG key = (LONG)id + 1;
@@ -598,6 +637,26 @@ void reportMessages() {
                      id, name, g_messageCount[best], g_messageSlow[best]);
     }
     tq::hdr::log("Engine trace: %u window messages so far\r\n", total);
+    if (g_timerKnown)
+        tq::hdr::log("Engine trace: game timer hwnd=%p id=%u proc=%p"
+                     " shortest gap %u us over %ld samples\r\n",
+                     (void*)g_timerWindow, (unsigned)g_timerId,
+                     (void*)g_timerProc, g_timerGapMinUs, g_timerSamples);
+    // Re-arm once, and only once, and only when asked. SetTimer on an (hwnd,
+    // id) pair that already exists replaces its period and leaves everything
+    // else alone, so the TIMERPROC the message carried is passed straight
+    // back rather than cleared -- passing null there would turn a callback
+    // timer into a posted one and change what the game does, not just when.
+    // It has to run on the thread that owns the window, and this does: the
+    // pump is the main thread.
+    if (g_timerPeriodMs && g_timerKnown && g_setTimer
+        && InterlockedCompareExchange(&g_timerRearmed, 1, 0) == 0) {
+        const UINT_PTR again = g_setTimer(g_timerWindow, g_timerId,
+                                          g_timerPeriodMs,
+                                          (TIMERPROC)g_timerProc);
+        tq::hdr::log("Engine trace: re-armed the game timer at %u ms -> %s\r\n",
+                     g_timerPeriodMs, again ? "ok" : "FAILED");
+    }
 }
 
 
@@ -693,11 +752,6 @@ CallPatch g_soundPatch, g_questsPatch, g_pumpPatch;
 // costs nothing -- it is called a handful of times in a session -- and the
 // first few calls say what the period actually is, which nothing has ever
 // reported.
-typedef UINT_PTR (WINAPI* SetTimerFn)(HWND, UINT_PTR, UINT, TIMERPROC);
-SetTimerFn g_setTimer;
-CallPatch g_setTimerPatch;
-LONG g_setTimerCalls;
-
 UINT_PTR __stdcall hookSetTimer(HWND window, UINT_PTR id, UINT elapse,
                                 TIMERPROC callback) {
     if (!g_setTimer) return 0;
@@ -790,6 +844,7 @@ BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
         tq::probe::engineCount(tq::probe::CounterPumpPeekMissUs, elapsed);
     } else if (message) {
         noteMessage(message->message, elapsed > 5000u);
+        if (message->message == WM_TIMER) noteTimer(message);
     }
     return result;
 }

@@ -1202,9 +1202,29 @@ the timer rate the first reading is right; if lengthening the period changes
 nothing, the second is, and the pump is closed as a host property with no
 lever in it.
 
-`SetTimer` is now also logged with its arguments on the first eight calls, so
-the next run reports the period the game actually asks for -- which nothing
-has ever recorded.
+### Run 19: `SetTimer` is never called, and why that is informative
+
+The hook installed (12 of 12 imports redirected) and logged **nothing**.
+`TQ.exe` arms its timer during startup, before the renderer exists and long
+before this module can be loaded -- so the call is already in the past by the
+time anything here is watching.  The `timer_period_ms` switch as first written
+could therefore never have fired.
+
+But the timer identifies itself in every message it produces.  A `WM_TIMER`
+carries `hwnd`, `wParam` = the timer id, and `lParam` = its `TIMERPROC` or
+null, which is exactly what `SetTimer` needs to re-arm the same timer.  So the
+experiment is rebuilt around the messages instead of the call: the first
+`WM_TIMER` supplies the identity, and `SetTimer` on an `(hwnd, id)` pair that
+already exists replaces the period and leaves everything else alone.  The
+`TIMERPROC` is passed straight back rather than cleared -- passing null there
+would turn a callback timer into a posted one and change *what* the game does
+rather than only *when*.
+
+The period itself is also derived from the messages: the **shortest** gap
+between two `WM_TIMER` arrivals.  `WM_TIMER` is synthesized only when the
+queue is otherwise empty, so every gap is inflated by coalescing and only the
+minimum approaches the period actually asked for.  Run 18's 14.2 arrivals a
+second is a lower bound on the timer's rate, not a measurement of it.
 
 ## Cross-references worth acting on
 
