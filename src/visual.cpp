@@ -162,7 +162,13 @@ struct MappingLease {
     void* source;
     void* mappedBase;
     LONG jobs;
+    // What the view costs in address space, so the pool can be judged in bytes
+    // rather than in slots. FileDirectory keeps its length at +0x28, which is
+    // all GetLength (`8b 41 28 c3`) returns.
+    unsigned bytes;
 };
+// Summed over live leases and sampled once a frame into upload_leased_mib.
+volatile LONG g_leasedBytes;
 
 MappingLease g_mappingLeases[kMaxMappingLeases];
 
@@ -592,6 +598,7 @@ void __fastcall hookArchiveUnmap(void* source, void*) {
             retained = true;
             if (!lease->jobs) {
                 unmap = lease->mappedBase;
+                InterlockedExchangeAdd(&g_leasedBytes, -(LONG)lease->bytes);
                 memset(lease, 0, sizeof(*lease));
             }
         }
@@ -905,8 +912,15 @@ bool retainMapping(void* ownerPointer, void** token) {
     if (hooked && !owner.mappedBase)
         hooked = lease->mappedBase != nullptr;
     if (!hooked) {
-        if (lease && !lease->jobs) memset(lease, 0, sizeof(*lease));
+        if (lease && !lease->jobs) {
+            InterlockedExchangeAdd(&g_leasedBytes, -(LONG)lease->bytes);
+            memset(lease, 0, sizeof(*lease));
+        }
         return false;
+    }
+    if (!lease->bytes && readable((BYTE*)owner.source + 0x28)) {
+        lease->bytes = *(const unsigned*)((BYTE*)owner.source + 0x28);
+        InterlockedExchangeAdd(&g_leasedBytes, (LONG)lease->bytes);
     }
     ++lease->jobs;
     *token = lease;
@@ -925,6 +939,7 @@ void releaseMapping(void* token) {
     if (lease->jobs > 0) --lease->jobs;
     if (lease->sealed && !lease->jobs) {
         unmap = lease->mappedBase;
+        InterlockedExchangeAdd(&g_leasedBytes, -(LONG)lease->bytes);
         memset(lease, 0, sizeof(*lease));
     }
     tq::upload::unlock();
@@ -1054,6 +1069,12 @@ void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
 void advanceTextureUploadsInternal() {
     if (!g_context) return;
     tq::upload::advance(g_context);
+    // Once a frame, on the render thread, so the column is a gauge: what the
+    // leases are holding right now, not what they have ever held.
+    LONG leased = g_leasedBytes;
+    if (leased > 0)
+        tq::probe::count(tq::probe::CounterUploadLeasedMib,
+                         (uint32_t)(leased / (1024 * 1024)));
 }
 
 
@@ -3130,6 +3151,7 @@ void shutdown() {
             UnmapViewOfFile(g_mappingLeases[i].mappedBase);
         memset(&g_mappingLeases[i], 0, sizeof(g_mappingLeases[i]));
     }
+    InterlockedExchange(&g_leasedBytes, 0);
     bool workerStopped = true;
     if (g_programThread) {
         workerStopped = WaitForSingleObject(g_programThread, 2000) == WAIT_OBJECT_0;

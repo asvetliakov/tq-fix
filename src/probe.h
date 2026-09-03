@@ -147,6 +147,12 @@ enum Counter {
     // the loose source refused turns up here instead, so this is the other
     // half of the evidence rather than a curiosity.
     CounterArcOpen,
+    // Address space held by live mapping leases, sampled once a frame so the
+    // column reads as a gauge rather than a total. The pool's only real limit
+    // is a count -- 128 leases -- and a count says nothing about bytes: at the
+    // measured median texture that is ~340 MiB of views, and at the 4K cap's
+    // maximum it would be 2.7 GiB, in a process that has about 3.
+    CounterUploadLeasedMib,
     CounterCount
 };
 
