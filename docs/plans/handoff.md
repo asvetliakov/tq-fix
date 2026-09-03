@@ -8,7 +8,8 @@ work on branch `stutter-mitigation`.
 ## Read these first
 
 1. `docs/plans/game-stutter-mitigation.md` — the plan, and its Status section,
-   which corrects two of its five headline findings.
+   which corrects two of its five headline findings and records what Stage 3
+   measured away.
 2. `research/streaming/findings.md` §4–§7 — the probe's blindness, why the
    uploader must not take ownership, the archive `File` class, and the eight
    verified patch sites.
@@ -37,6 +38,10 @@ if it objects, recreate `Settings/` containing just those.
 | `cd9536e` | `upload_leased_mib`, to size a byte budget rather than guess one. |
 | `134a8ee` | Run 9: the pack measured out of the picture. |
 | `eb550ca` | Plan item 2.5 — the full SRV is now referenced. |
+| `b161e08` | **Stage 3.** `src/detour.{h,cpp}` and `src/engine_probe.{h,cpp}`; fourteen verified sites in `Engine.dll`. |
+| `ff2b1bd` | `Engine::Update` and `Engine::Render` bracketed; `GameEngine::Update` in `Game.dll`. |
+| `3d52496` | `detour::patchImport`; TQ.exe's main loop measured through its import table, patching no code. |
+| `7af497d`, `2c10504`, `b7352d7` | The rest of the loop, and the message pump split. Eleven imports of TQ.exe and two of `Engine.dll`. |
 
 Verification is `npm run doctor && npm run build && npm run selftest`.
 
@@ -90,139 +95,48 @@ maximum, in a process already carrying ~336 MiB of the mod's shadow targets.
 answers it on the next pack-on run with any route. With a real peak, replace
 the count with a byte budget.
 
-## Stage 3 landed; run 10 measured it
+## Stage 3 is finished, and the frame is fully accounted for
 
-`src/detour.{h,cpp}` and `src/engine_probe.{h,cpp}`, plus 27 `engine_*`
-columns. Ten hook groups, all installed on the pinned build; the byte tables
-are re-verified against `Engine.dll` and the whole thing costs nothing
-measurable — p50, p99 and the mod's share are unchanged against run 8 despite
-a detour on a function called 12.0 million times in the session.
+Seven instrumented runs (10-16), each one costing nothing measurable: p50, p99
+and the mod's share never moved. `research/streaming/findings.md` §8-§14 has
+the detail. Where the frame goes:
 
-`research/streaming/findings.md` §8 has the numbers and the plan's Status
-section has what they change. In short:
+| | session | frames over 50 ms |
+| --- | ---: | ---: |
+| `Engine::Render` | 57.2% | 51.0% |
+| `Engine::PresentSurface` | 21.6% | 5.2% |
+| `Engine::Update` | 10.2% | 8.8% |
+| **`PeekMessageA`** | **8.2%** | **20.3%** |
+| unexplained | 2.3% | 12.2% |
 
-- **Four hypotheses closed by measurement, not deferred**: the region lock is
-  never contended (0 hits), the seven sweeps cost 11.2 ms a session, the
-  loader fence wait costs 1.6 ms, and `WaitForLoadingToFinish` is never
-  called. Stage 6.1, 6.2 and 6.3 can be deleted.
-- **Stage 5's premise is confirmed but small**: `Region::LoadLevel` is 100%
-  main-thread and cost 511 ms in the worst frame — but exactly one frame in
-  7,347 has a load costing over a millisecond.
-- **Stage 4.1 is well aimed**: 4.38 s a session in block inflates, 1.88 GiB
-  inflated to serve 1.03 GiB.
-- **2.4 has its number**: `upload_leased_mib` peaked at 1,064 MiB.
-- **Two thirds of the hitch time is still dark**, including ~950 ms of the
-  1,466 ms worst frame and the whole of the second class, whose frames show
-  every engine column at zero.
+**The two classes of hitch both have names now.**
 
-## Run 11 closed the frame's accounting
+*The big one* is the game's own loading, inside `Engine::Render`: the worst
+frame is 1,453.8 ms of which 1,448.6 is render, with a forced main-thread
+`Region::LoadLevel` of 505.7 ms and 264 ms of archive inflate under it.
 
-`Engine::Update` and `Engine::Render`, bracketed whole. The session now adds
-up to 100.2%: render 57.9%, Present 12.5%, update 10.3%, **outside everything
-10.0%**, the mod 9.5%.
+*The second one* — unnamed since run 8, on frames that draw normally with the
+mod idle — is **`PeekMessageA` on an empty queue**, 730 µs on average and up
+to 212 ms, against 0.67 dispatched messages a frame. Under CrossOver that is a
+wineserver round trip. It is not the game's and **not reachable from this
+mod**; the lever is CrossOver's own synchronisation settings.
 
-- **The worst frame is Stage 5's.** 1,453.8 ms, of which 1,448.6 is
-  `Engine::Render` with `Region::LoadLevel` inside it. §1a confirmed.
-- **`Engine::Render` is 46.9% of the hitch time.** Stages 4 and 5 are aimed
-  correctly.
-- **38.4% of the hitch time, and 18 of the 32 frames over 100 ms, is outside
-  `Engine.dll` entirely** — on frames that draw normally with the mod idle,
-  spending 100–225 ms where a normal frame spends 0.21 ms. Nothing in this
-  plan would improve them.
-- The mapping-lease hypothesis for those frames is tested and dead: the worst
-  stall cluster held 18 MiB, the 1,024 MiB cluster had the least stall time.
+**Closed by measurement, not deferred**: the region lock is never contended
+(0 hits), the seven sweeps cost 11.2 ms a session, the loader-fence wait 1.6
+ms, `WaitForLoadingToFinish` is never called, `GameEngine::Update` is 0.3%,
+the online platform poll 44 ms, sound 2 ms, address space never below 3,445
+MiB. Stage 6.1, 6.2 and 6.3 can be deleted.
 
-## Run 12 ruled out the last candidate inside the game
+## Next: Stage 4.1, the last item with both a number and a fix
 
-`GameEngine::Update` is **307 ms of a 102,662 ms session — 0.3%**, 1.3% of
-hitch time and **0.0%** of the time in frames over 100 ms. The stalls are not
-the game's simulation.
+The archive block cache. 4.38 s a session across 7,527 inflates at 582 µs
+each, inflating 1.88 GiB to serve 1.03 GiB — a 1.8x amplification that is the
+single-slot block cache of R1 re-inflating what it already has. It attacks
+`Engine::Render`, which is the half that is ours.
 
-It also corrected run 11's accounting: the game's `Present` is called
-**outside** `Engine::Render` (median frame 2.00 ms render, 3.57 ms Present),
-so the brackets really are disjoint and the frame decomposes exactly —
-render 55.2%, Present 14.2%, **unexplained 11.6%**, update 9.6%, the mod
-9.2%, `GameEngine::Update` 0.3%. In hitching frames the residual is 40.9%
-over 50 ms and 44.7% over 100 ms.
-
-The residual is not a steady tax: median 0.12–0.61 ms on ordinary frames, and
-twenty discrete events of 50–398 ms arriving in **bursts**.
-
-## Run 13 killed the main-loop hypotheses, so I read the loop
-
-`Sleep`: **one call** in the session, 100 ms asked and 100 ms delivered.
-`GetMessageA`: **zero calls**. `WaitForSingleObject`: **zero**. Free address
-space never below **3,445 MiB**. The residual survived at 10.8% of the
-session and 36.3% of the time in hitching frames.
-
-`Engine::Render` has exactly one caller, `TQ.exe+0x44eea6`, and every call in
-that loop resolves through the import table. The order is `GameEngine::Update`
-→ `FixupCharacterCollisions` → **`Engine::PresentSurface`** → `Engine::Render`:
-the present is *deferred* to the top of the next iteration.
-
-**And the probe's frame boundary is the renderer's `Present`, which is called
-inside `Engine::PresentSurface`.** So the head of that function — everything
-before it reaches D3D, exactly where a swapchain or GPU wait would sit — has
-been inside every frame's window and inside none of the brackets since run 11.
-The residual was never mysterious; the instrument was standing in the one
-place it could not see.
-
-## Next: run 14
-
-`Engine::PresentSurface` and the collision fixup, both bracketed through
-TQ.exe's import table — **no patched code at all**. Ini:
-`cache/runs/run14-present-surface.ini`, settings identical to runs 10–13.
-
-If `engine_present_surface_us` takes the residual, the stalls are the game
-waiting to present, and that is mod-reachable: buffer count, sync interval,
-flip model. If neither it nor `game_collisions_us` does, what remains is two
-TQ.exe-internal calls in that loop (`0x44b590`, `0x4aa3c0`), which would need
-`.text` detours in the executable.
-
-## Superseded: run 13
-
-TQ.exe imports `Sleep`, `WaitForSingleObject`, `GetMessageA` and **no
-`PeekMessage`** — so its pump is the blocking one — and it imports
-`?NeedsSleep@GameEngine@GAME@@QBE_NXZ` beside `Sleep`, so it is a frame
-limiter. All three are now timed through **TQ.exe's import table**, which
-patches no code and is scoped to that one module.
-
-`loop_sleep_req_us` against `loop_sleep_us` is the pair that decides it: a
-loop that asks for a millisecond and is handed two hundred is an environment
-problem, not a game one, and the fix would be mod-side or a CrossOver setting
-rather than anything in Stages 4–6. `proc_avail_va_mib` rides along free and
-closes the address-space question for good.
-
-Ini: `cache/runs/run13-main-loop.ini`; settings identical to runs 10–12.
-
-## Superseded: run 12
-
-Answered above. Stage 4.1 remains safe to write in parallel on its own
-evidence; Stage 5's premise is confirmed but it fixes one frame a session, so
-it waits on where the residual lands.
-
-## The old Stage 3 notes
-
-Instrument Engine.dll itself. Everything so far has been vtable slots and
-mod-side code; Stage 3 writes into `.text` on paths that run thousands of times
-a second, so it is a real step up in exposure. The plan's §3.1/§3.2 have the
-design and the mitigations. Points worth carrying in:
-
-- The eight patch sites in `findings.md` §7 were re-verified byte-for-byte
-  against the pinned `Engine.dll` at the start of this work. Re-verify anyway.
-- `55 8b ec 83 e4 f8` is shared by `Region::LoadLevel`,
-  `Archive::ReadFromFile`, `FUN_1011d0e0` and
-  `Region::GetEntitiesInFrustum`. **A six-byte prologue match proves nothing.**
-  Verify 16–24 bytes, steal 6–7.
-- Engine duration columns are `_us`, never `_ms`, or `tools/frames.py` charges
-  them to the mod.
-- What Stage 3 has to explain: ~7–8.7 s per session of hitch time in no mod
-  column, a reproducible ~1,400–1,500 ms frame carrying ~1,300 archive opens,
-  and a *second* class the archive story does not cover — run 9's frames 1327
-  and 5726, 256 ms and 228 ms, with no archive opens and nothing named at all.
-
-Stages 4 (archive read path) and 5 (asynchronous level loads) remain gated on
-what Stage 3 measures.
+Stage 5 stays parked: its premise is confirmed — `Region::LoadLevel` is 100%
+main-thread — but exactly **one frame in 7,347** has a load costing over a
+millisecond, so it fixes the worst frame of a session and nothing else.
 
 ## Conventions
 

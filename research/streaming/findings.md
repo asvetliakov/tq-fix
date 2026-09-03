@@ -1016,6 +1016,66 @@ Engine.dll's code, which is the same reason TQ.exe's `GetMessageA` read zero
 calls in run 13 -- so splitting them is two more import-table entries and
 still no patched code.
 
+## 14. Run 16: the pump is `PeekMessageA`, and it is the host
+
+| | | |
+| --- | ---: | ---: |
+| `EWindow::ProcessMessages` | 8,395 ms | 6,798 calls |
+| — `PeekMessageA` | **8,297 ms** | 11,367 calls — **98.8% of the pump** |
+| — `DispatchMessageA` | 72 ms | 4,569 calls |
+| — the loop's own nine instructions | 27 ms | |
+
+The worst frames are **212 ms in two peeks**.  Not a message flood -- the
+median frame peeks twice and the maximum is nineteen.  Not the game's window
+procedure -- dispatch averages 15.7 µs and totals 72 ms in a session.
+
+**`PeekMessageA` averages 730 µs per call on this machine, against 0.67
+dispatched messages per frame.**  The queue is empty almost every time, and
+polling an empty queue costs three quarters of a millisecond, with excursions
+to 200.  That is 8.2% of wall clock and **1.22 ms of every average frame**,
+before the spikes.
+
+### Three checks, because this is a conclusion about the host
+
+- **The instrument is not creating it.**  Run 15 measured the pump at 7,974 ms
+  with no hook inside it; run 16 measures 8,395 ms with two.  The split did not
+  inflate what it split.
+- **It is not the mod's or the game's I/O starving the host.**  Frames with a
+  peek over 20 ms and frames with a peek under 2 ms have the *same* median
+  archive I/O -- zero.  The three worst non-load frames (143.0, 50.8, 46.5 ms
+  of peek) have **no** archive activity within five frames either side.
+- **It is not correlated with load.**  The heavy frames that do show I/O
+  (2910, 2913) are the level-load frames where everything is heavy.
+
+So the second class of hitch, unnamed since run 8, is `PeekMessageA` on an
+empty queue taking a fifth of a second.  Under CrossOver that is a wineserver
+round trip, and **it is not the game's problem and not reachable from this
+mod.**  The mod owns the import slot and can measure it; there is nothing
+useful to put in its place, because the work is the round trip itself.
+
+The one lever is the host: how CrossOver is configured to synchronise (its
+wineserver / esync-style options) directly changes what a round trip costs.
+That is a setting to test, not code to write.
+
+### Where the frame goes, complete
+
+After seven instrumented runs, the frame is fully accounted for and the
+remaining hitch time has one fixable owner:
+
+| | session | frames over 50 ms |
+| --- | ---: | ---: |
+| `Engine::Render` | 57.2% | 51.0% |
+| `Engine::PresentSurface` | 21.6% | 5.2% |
+| `Engine::Update` | 10.2% | 8.8% |
+| **`PeekMessageA`** | **8.2%** | **20.3%** |
+| unexplained | 2.3% | 12.2% |
+| everything else measured | <1% | <3% |
+
+`Engine::Render` is the half that is ours to attack, and §8 already priced the
+work inside it: 4.38 s a session in archive block inflates, 1.88 GiB inflated
+to serve 1.03 GiB.  That is Stage 4.1, and it is the last item in this
+investigation with both a number and a fix.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

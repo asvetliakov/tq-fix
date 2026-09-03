@@ -144,11 +144,43 @@ work outside `Engine.dll`. Run 12 decides whether the time is `Game.dll`'s
 simulation or something below the process — and those point at completely
 different work.
 
-**Sequencing.** Stage 4.1 (the block cache) is now safe to write on its own
-evidence: 4.38 s a session, 1.88 GiB inflated to serve 1.03 GiB. Stage 5
-should wait for run 12, not because its premise is in doubt — it is
-confirmed — but because it fixes one frame per session, and if run 12 puts
-the dark time in `Game.dll` there is a much larger target beside it.
+**Runs 12–16 finished the job.** The frame is now fully accounted for and the
+dark time has a name. `findings.md` §10–§14:
+
+| | session | frames over 50 ms |
+| --- | ---: | ---: |
+| `Engine::Render` | 57.2% | 51.0% |
+| `Engine::PresentSurface` | 21.6% | 5.2% |
+| `Engine::Update` | 10.2% | 8.8% |
+| **`PeekMessageA`** | **8.2%** | **20.3%** |
+| unexplained | 2.3% | 12.2% |
+
+**The second class of hitch is `PeekMessageA` on an empty queue** — 730 µs on
+average and up to 212 ms, against 0.67 dispatched messages a frame, with the
+message pump owned by `Engine.dll` rather than by the executable. Under
+CrossOver that is a wineserver round trip. It is not the game's, and it is
+not reachable from this mod; the lever is CrossOver's own synchronisation
+settings. Three checks rule out the alternatives: the instrument does not
+create it, it does not correlate with archive I/O, and it is not a message
+flood.
+
+Also closed, so that nothing below proposes them again: `GameEngine::Update`
+is 0.3% of the session, the online platform poll 44 ms, sound 2 ms, the
+jukebox and quest triggers nothing, graphics options 28 ms, and free address
+space never falls below 3,445 MiB.
+
+**So the remaining work is one item.** `Engine::Render` is the half that is
+ours, and §8 priced what is inside it. **Stage 4.1 is the last thing in this
+plan with both a number and a fix**: 4.38 s a session across 7,527 block
+inflates at 582 µs each, inflating 1.88 GiB to serve 1.03 GiB — the 1.8×
+amplification a single-slot cache in front of a 2 GB entry produces by
+construction.
+
+Stage 4.2 and 4.3 stay gated on what 4.1 leaves. Stage 5 stays parked: its
+premise is confirmed — `Region::LoadLevel` is 100% main-thread and cost 505.7
+ms in the worst frame — but exactly **one frame in 7,347** has a load costing
+over a millisecond, so it fixes the worst frame of a session and nothing
+else. Stage 6 is deleted.
 
 ---
 
