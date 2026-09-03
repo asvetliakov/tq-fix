@@ -652,6 +652,17 @@ GiB requested: a **1.8x amplification**, which is the single-slot block cache
 of R1 re-inflating what it has already inflated.  4.1's multi-block cache is
 aimed at a real number.
 
+> **Corrected by run 21; see §19.**  The 4.38 s and the 1.8x are measurements
+> and they stand.  "Re-inflating what it has already inflated" is not -- it is
+> an inference, and inflated-over-served reads the same whether the excess is
+> re-inflation or partial consumption of blocks that are never asked for
+> again.  Run 21 is the first evidence, and it does not yet settle it.  Do not
+> quote this paragraph's second clause as established.
+>
+> **Settled by run 22 (§20): it is false.**  With a 256 MiB cache -- 1,024
+> resident blocks -- 91.8% of block requests are still for a block nothing
+> has seen before.  The excess is partial consumption, not re-inflation.
+
 ### A column that means something other than its name
 
 `engine_res_enqueued` recorded **12,003,283** calls, 1,634 a frame.
@@ -1287,6 +1298,1035 @@ That is the honest end of this line, and it is worth having reached rather
 than assumed: three of the five stages this plan opened with were aimed at
 mechanisms that turned out to cost single-digit milliseconds a session, and
 this one was aimed at a mechanism that is real, large, and not ours.
+
+## 18. Stage 4.1: the block routine, read all the way through
+
+The archive block cache is the first change in this work that has to be
+*right* rather than merely cheap.  Every other patch either measures something
+or refuses a resource; this one answers a request for data with data of its
+own, and if it ever answers with the wrong block the result is a corrupt
+texture or a corrupt level, silently, on a path that runs thousands of times a
+zone transition.  So `FUN_1011d0e0` was re-read end to end against the pinned
+`Engine.dll` before a line of it was written, and none of what follows is
+taken from §6, §7 or `arc-format.md` -- those agree with it, which is
+reassuring, but they are not the source.
+
+### The routine, and what its operands say
+
+`FUN_1011d0e0` is `__thiscall` with three stack arguments and ends `RET 0xc`:
+
+```
+  this  = ecx                       Archive*
+  [ebp+0x08] entry index    [ebp+0x0c] block index    [ebp+0x10] BlockBuffer*
+```
+
+Its first forty-seven bytes are the whole address derivation, and every offset
+the cache needs is an immediate inside one of them:
+
+```
+1011d0ec  8b 41 2c        mov eax,[ecx+0x2c]      the archive's entry table
+1011d0ef  c1 e2 04        shl edx,4               } entry * 0x11 ...
+1011d0f2  03 55 08        add edx,[ebp+8]         }
+1011d0fa  8d 34 90        lea esi,[eax+edx*4]     } ... * 4 = stride 0x44
+1011d101  8b 46 20        mov eax,[esi+0x20]      this entry's descriptors
+1011d104  8d 0c 5b        lea ecx,[ebx+ebx*2]     } block * 3 ...
+1011d108  8d 3c 88        lea edi,[eax+ecx*4]     } ... * 4 = stride 0xc
+```
+
+Note that `entry+0x20` is a **pointer** at runtime where the on-disk file
+record holds `firstBlockIndex`; the engine rewrites it when it opens the
+archive.  Reading the on-disk layout as the runtime one would have produced a
+key built from an integer treated as an address.
+
+The remaining fields come out of the operands of the three calls that consume
+them, which is a stronger statement than any structure diagram:
+
+```
+1011d12c  ff 37           push [edi]              descriptor[0], the offset
+1011d12e  ff 70 0c        push [eax+0xc]          the open .arc HANDLE
+1011d131  ff 15 ..        call SetFilePointerEx
+
+1011d145  ff 70 04        push [eax+4]            descriptor[1], compressed
+1011d14c  ff 77 04        push [edi+4]            BlockBuffer[1], the staging
+1011d14f  ff 70 0c        push [eax+0xc]          the HANDLE again
+1011d152  ff 15 ..        call ReadFile
+
+1011d1c2  ff 71 04        push [ecx+4]            compressed -> sourceLen
+1011d1c5  8b 41 08        mov eax,[ecx+8]         descriptor[2] -> destLen
+1011d1c8  ff 77 04        push [edi+4]            BlockBuffer[1] -> source
+1011d1cb  8b 4f 08        mov ecx,[edi+8]         BlockBuffer[2] -> dest
+1011d1d6  e8 85 85 f4 ff  call 0x10065760         zlib uncompress
+```
+
+So `BlockBuffer` is the twelve bytes at `File+0x1c` -- `{cachedBlockIndex,
+compressed scratch, decompressed scratch}` -- and `[edi+8]` is the buffer the
+inflate writes, which is exactly the buffer a cache hit has to fill.
+
+And the epilogue is the contract a hit has to reproduce, in full:
+
+```
+1011d230  89 1f           mov [edi],ebx           cachedBlockIndex = block
+1011d234  b0 01           mov al,1                return true
+1011d23a  c2 0c 00        ret 0xc                 three stack arguments
+```
+
+Nothing else in the function is observable from outside it.  The archive's
+critical section at `archive+0x60` is taken and released around the seek and
+the read only; the two error paths run only when a length disagrees; the
+`GetCurrentThreadId` at the top is discarded.  A hit therefore has to write
+one dword and return 1 -- and, as a side effect worth naming, takes the
+archive lock zero times.
+
+### Three things checked because assuming them would have been wrong
+
+- **The uncompressed branch never reaches here.**  `Archive::ReadFromFile`
+  tests `TEST byte [ecx],2 / JZ` at `1011d390` and takes a different path when
+  the compressed bit is clear, so the 6,880 uncompressed `.mp3` entries
+  `arc-format.md` found in `Audio/Dialog*.arc` never reach the block routine
+  at all.  The cache cannot see them.
+- **The block size is read, not assumed.**  `MOV [ESI+0x40],0x40000` at
+  `1011ea94` is the only writer in the image, and the cache re-reads
+  `archive[0x40]` at runtime and refuses to key anything whose archive
+  disagrees -- which doubles as a cheap assertion that the pointer it was
+  handed really is an `Archive`.
+- **The relocated dwords name the syscalls.**  `Engine+0x2ac190` is
+  `KERNEL32!SetFilePointerEx` and `Engine+0x2ac1a4` is `KERNEL32!ReadFile`, so
+  the two windows above are not merely byte sequences that happen to match;
+  they are the seek and the read.
+
+### What is now machine-checked
+
+`tools/verify-sites.py` reads all of the above back out of
+`src/engine_probe.cpp` and compares it to the installed binaries.  Six windows
+-- the forty-seven byte derivation, the seek, the read, the inflate, the
+epilogue and the block-size writer -- plus a section that takes each offset
+`src/arc_cache.cpp` dereferences with and checks it against the *operand* that
+uses it: `kArchiveEntryTableOffset` against the `0x2c` in `mov eax,[ecx+0x2c]`,
+`kArchiveEntryStride` against `((1 << 4) + 1) * 4`, `kSlotBytes` against the
+immediate in the block-size store, and so on.  Perturbing any one constant
+fails the tool.
+
+The four windows past the prologue are required only when the cache is on:
+the instrument needs the function to *be* the block routine, and the cache
+additionally needs every offset it reads to be the offset the routine reads.
+
+### Why the design is what it is
+
+- **Key.**  `{archive, handle, offset, compressed size, decompressed size}`.
+  The first three identify a block; the two sizes are carried because they are
+  free and because they turn "a wrong hit is implausible" into "a wrong hit
+  needs a recycled `Archive` *and* a recycled `HANDLE` *and* the same offset
+  *and* both lengths".
+- **Slab.**  A fixed `archive_cache_mb` MiB of 256 KiB slots with a clock
+  victim, committed once.  The default is `0`, which allocates nothing.
+- **Lock.**  Held across the lookup and the copy out, and across the insert --
+  a slot released before it is copied could be evicted and rewritten
+  underneath the copy.  Never held across the `ReadFile` or the inflate: a
+  miss holds nothing while the engine does its own work.
+- **Lookup.**  A linear scan of a tag array, deliberately.  At most 1,024
+  slots is a 4 KiB scan, against a routine entered 7,491 times in a
+  hundred-second session and an inflate that costs 582 microseconds.  A hash
+  table would buy nothing here and would need tombstones to survive the clock.
+- **`8verify`.**  Commits the slab and never serves from it.  Every block is
+  read and inflated by the engine exactly as it would be otherwise, and then
+  compared byte for byte against whatever the slab already holds for that key
+  -- so every request that *would* have been a hit is instead a proof, at the
+  cost of an uncached run.  This needs no second buffer and no thread-local
+  anything, which is why it is shaped as a comparison on insert rather than as
+  a shadow read.  A disagreement disables the cache for the rest of the
+  session and writes the key that caused it to the log.
+
+### And what it does not do
+
+`archive_cache_mb` defaults to `0` and installs nothing at `0`.  When it is
+set it is the one thing in `src/engine_probe.cpp` that installs with the
+performance probe off, because it is a fix and not an instrument -- but it
+opens no other gate: the module check, the export check and the byte checks
+are unchanged, and a build that is not the audited `Engine.dll` still gets
+nothing.
+
+## 19. Run 21: the cache is correct, and the 1.8x may not be what we thought
+
+`archive_cache_mb=8verify`, the same Eternal Embers route and save as runs
+10-16 and 18-20, 94.8 seconds.  Two results, and the second one is the
+important one.
+
+### The route reproduced, which is what makes the rest readable
+
+| | run 10 | run 21 |
+| --- | ---: | ---: |
+| `engine_arc_read` | 4,941 | 4,932 |
+| `engine_arc_kib` | 1,083,143 | 1,075,574 |
+| `engine_arc_blocks` | 7,527 | 7,513 |
+| `engine_arc_inflate_us` | 4,380 ms | 4,310 ms |
+| `engine_level_load_main_us` | 513 ms | 515 ms |
+
+Every archive column within 1.6%, on a route walked by hand eleven runs
+apart.  The mod's share is unmoved -- 9.5% against 9.7%, 9,456 ms against
+9,215 ms absolute -- so the verify boot cost nothing measurable, as designed.
+p50 went 9.0 to 10.0 ms, which is not the cache: the session was five seconds
+shorter and `waiting on Present` fell from 12,294 ms to 9,393 ms, i.e. it
+contained proportionally less GPU-bound standing around.  The cache's own work
+in verify mode is one 256 KiB `memcmp` or `memcpy` per request, about 200 ms
+over the session, and it lands outside the `engine_arc_inflate_us` window.
+
+### The correctness result, which is unambiguous
+
+**`arc_cache_bad` = 0.  286 blocks compared byte for byte against what the
+engine produced for the same key, and every one agreed.**
+
+**`arc_cache_skip` = 0, across 7,513 requests.**  That is the stronger of the
+two, and it is worth spelling out why: `describeBlock` refuses a request when
+the archive's `[0x40]` is not 0x40000, when any of the four dereferences is
+unreadable, or when the descriptor's decompressed size is not a sane block.
+It never once refused.  So the structure offsets recovered in §18 -- `0x2c`,
+the `0x44` stride, `0x20`, the 12-byte descriptor, `0xc`, `0x40` -- are right
+at *runtime*, on every archive the session touched, and not merely right in
+the byte tables.
+
+### The result that changes the question
+
+| | |
+| --- | ---: |
+| requests | 7,513 |
+| would-be hits (`arc_cache_verify`) | **286  (3.8%)** |
+| stores | 7,227  (96.2%) |
+| evictions | **7,195  (99.6% of stores)** |
+
+Two things to take from that, and they pull in opposite directions.
+
+**The 3.8% is not a measurement of reuse.**  99.6% of stores evicted a live
+block.  Thirty-two slots against a working set of several thousand is a
+revolving door: the hand made about 225 full sweeps, so a block whose revisit
+is more than 32 block-reads away is gone before the revisit arrives.  What
+3.8% measures is how much reuse survives 32 slots, which is a much less
+interesting number than how much reuse exists.
+
+**But there is a second reading of the 1.8x amplification that this repo has
+never separated out, and it is not the flattering one.**  §8 recorded
+
+> 1.88 GiB inflated to serve 1.03 GiB requested: a **1.8x amplification**,
+> which is the single-slot block cache of R1 re-inflating what it has already
+> inflated.
+
+The number is right; the clause after the colon is an assumption.
+Inflated-over-served is two columns divided, and it comes out the same under
+either of two mechanisms:
+
+- **(a) Re-inflation.** A block is inflated, lost by the engine's one-slot
+  cache, and inflated again later.  A block cache removes this.
+- **(b) Partial consumption.** The average read this session was 218 KiB
+  (1,075,574 KiB over 4,932 `ReadFromFile` calls) beginning at an arbitrary
+  offset, so it straddles 1.52 blocks (7,513 over 4,932) and leaves the head
+  of the first and the tail of the last unused.  Those bytes are inflated and
+  discarded, and a cache recovers them **only if some later read comes back
+  for them**.
+
+Mechanism (b) alone reproduces the whole 1.79x, because it is the same two
+columns.  Note also that (a) is already partly handled by the engine: a
+sequential walk through one `File` hits `cachedBlockIndex` on the block it
+straddled into, so the one-slot cache is not as useless as R1's framing
+suggests.  What is left for a mod-side cache is reuse *across* `File` objects
+and across re-opens of the same entry -- which for `Levels.arc`, opened
+repeatedly for one 2 GB entry, is exactly where it ought to be.  Whether it
+is actually there is the open question.
+
+`arc_cache_verify` is the only instrument that can answer it, and at 32 slots
+its answer is confounded.
+
+### Why the next run is another verify run, at the maximum size
+
+Run 22 is `256verify` -- 1,024 slots -- and still does not serve a block.
+
+Verify mode turns out to be a **faithful simulator of a serving cache**, and
+not by accident: it inserts on a miss and refreshes the reference bit on a
+hit, exactly as serving does, and the stream of requests reaching it is
+identical either way -- because a hit writes the engine's own one-slot cache
+before returning, so `FUN_1011d240` decides what to ask for the same way in
+both cases.  **`arc_cache_verify` at size N is precisely the hit count a
+serving cache of size N would achieve.**  So the ceiling can be measured at
+zero risk and with no behaviour change at all, which is a better first
+experiment than switching serving on and hoping.
+
+Going straight to the clamp rather than stepping is deliberate: 1,024 slots is
+the most this build will ever hold, so if the ceiling there is still 3-6%, no
+smaller size can beat it and **Stage 4.1 is a negative result** -- the 1.8x is
+mechanism (b), no block cache recovers it, and the item should be switched off
+and reported rather than tuned.  If instead it comes back at 20% or better,
+the reuse was real and hidden by capacity, and the knee is then found
+*downward* from 256.
+
+Either answer is worth having, and the second-order value is the same in both
+cases: 1,024 slots exercises thirty-two times as many distinct keys as run 21
+did, so it is also a far wider correctness test than the boot that was
+designed to be one.
+
+## 20. Run 22: the ceiling, and what the 1.8x actually is
+
+`archive_cache_mb=256verify` -- 1,024 slots, 256 MiB, still serving nothing --
+on the same route.  106 seconds, 8,157 frames, 7,673 blocks.  This was meant
+to separate the two readings of the amplification that §19 could not, and it
+does, unambiguously.
+
+### The ceiling is 8.2%, and 32 slots already has most of what matters
+
+| | 8 MiB / 32 slots (run 21) | 256 MiB / 1,024 slots (run 22) |
+| --- | ---: | ---: |
+| would-be hits, session | 286 / 7,513 = **3.8%** | 628 / 7,673 = **8.2%** |
+| would-be hits, frames > 200 ms | 258 / 1,934 = **13.3%** | 297 / 2,064 = **14.4%** |
+| would-be hits, heaviest frame | 254 / 1,470 = **17.3%** | 285 / 1,468 = **19.4%** |
+| evictions | 99.6% of stores | 85.4% of stores |
+| `arc_cache_bad` | 0 | 0 |
+| `arc_cache_skip` | 0 | 0 |
+
+**Thirty-two times the address space buys 4.4 points of session hit rate and
+2.1 points where it matters.**  That is the whole answer, and it settles §19's
+question against mechanism (a):
+
+- **The amplification is not recoverable re-inflation.**  With a quarter of a
+  gigabyte of cache -- 1,024 blocks resident, against a largest-entry block
+  count of 7,646 -- **91.8% of block requests are still for a block nothing
+  has seen before.**  The engine inflates a 256 KiB block, consumes part of
+  it, and is never asked for it again.  §8's "the single-slot block cache
+  re-inflating what it has already inflated" is now measured false, and §8
+  carries a notice saying so.
+- **The reuse that does exist is burst-local.**  It is concentrated in exactly
+  the frames that hurt -- 14.4% in frames over 200 ms and 19.4% in the single
+  archive-heaviest frame, against 8.2% overall -- and it is nearly all within
+  a window of a few dozen blocks, which is why 32 slots gets 17.3% of the
+  worst frame and 1,024 slots gets 19.4%.  Whatever the game does inside one
+  big level load, it comes back to blocks it read moments ago and to nothing
+  older.
+
+The slab is still saturated at 1,024 slots -- 85% of stores evict -- so the
+working set genuinely exceeds 256 MiB.  There is simply nothing worth having
+out in that tail.  Extrapolating the two points, twenty percent session hit
+rate would want tens of thousands of slots, i.e. several gigabytes, in a
+32-bit process.
+
+### What Stage 4.1 is therefore worth
+
+Arithmetic, not measurement, and the distinction matters because **no block
+has ever actually been served**: both runs were `verify`.  At 562 microseconds
+a block (4,309 ms over 7,673) and a 256 KiB `memcpy` costing on the order of
+25, a hit saves roughly 535 microseconds.
+
+| | session | heaviest frame |
+| --- | ---: | ---: |
+| 8 MiB | ~155 ms of 106 s (**0.15%**) | ~136 ms off 1,488 ms (**9%**) |
+| 256 MiB | ~336 ms of 106 s (**0.32%**) | ~152 ms off 1,392 ms (**11%**) |
+
+So: about a ninth of the worst frame of a session, for 8 MiB, and almost
+nothing extra for thirty-two times that.  The worst frame stays over 1.3
+seconds either way, because what dominates it is `Region::LoadLevel` (505 ms
+in run 10) and the ~950 ms no column has ever named.
+
+`proc_avail_va_mib` never fell below **3,458 MiB** with 256 MiB committed, so
+address space was never the constraint -- worth recording, because it means
+the size clamp was never what limited this.  What limited it is that the
+locality is not there.
+
+### Correctness, twice over
+
+Across runs 21 and 22: **914 blocks compared byte for byte, 0 mismatches, 0
+skips over 15,186 requests.**  Run 22 exercised thirty-two times as many
+distinct keys as run 21.  The key and the structure offsets of §18 are right,
+and `describeBlock` never once refused a request -- so `[0x40]` was `0x40000`
+and all four dereferences were readable on every archive the session touched.
+
+Whatever is decided about shipping it, that part is not in doubt, and the
+`verify` mode is the reason it can be said at all rather than argued.
+
+### Where this leaves the archive path
+
+`engine_arc_inflate_us` brackets the **whole** block routine -- the
+`SetFilePointerEx`, the `ReadFile` and the `uncompress` -- so its 4,309 ms is
+read *and* inflate, and nothing here says which. That is now the only open
+question on this path, and it decides between the two remaining archive items:
+
+- if the 562 microseconds a block is mostly **zlib**, the lever is 4.3
+  (libdeflate) and 4.2 buys little;
+- if it is mostly the **two syscalls**, the lever is 4.2 (one `ReadFile` over
+  a run of contiguous blocks) and 4.3 buys little.
+
+The second would be entirely in character for this install: §14-§17 spent four
+runs establishing that a single `PeekMessageA` round trip to the host costs
+126-212 ms, and a seek/read pair per 256 KiB is 7,673 pairs a session of
+exactly the kind of call CrossOver makes expensive.
+
+**And the instrument for it already exists as a verified site.**  P8 in §7 --
+the `E8` at `0x1011d1d6` to `FUN_10065760` -- is the call to zlib, it sits at
+offset 20 of `kArchiveInflateWindowBytes`, and it is already byte-checked by
+`verify-sites.py`.  A `detour::patchCall` on it gives `engine_arc_zlib_us`,
+and read+seek is then the subtraction.  One CallPatch, one column pair, no new
+reverse engineering, and it is the cheapest remaining question in the plan.
+
+## 21. Run 23: the cache serves, and the freeze frame is anatomised
+
+`archive_cache_mb=8`, serving for the first time.  Same route.
+
+### What serving actually bought, measured rather than computed
+
+| | run 21 `8verify` | run 23 `8` serving |
+| --- | ---: | ---: |
+| `engine_arc_blocks` | 7,513 | 7,498 |
+| `engine_arc_inflate_us` | 4,310 ms | **4,180 ms** |
+| hits | 286 would-be | **291 served** |
+| `arc_cache_hit_us` | -- | **420 us total** |
+| `arc_cache_bad` / `arc_cache_skip` | 0 / 0 | **0 / 0** |
+
+130 ms off the session, against the 155 ms §20 computed -- the difference is
+route variance (15 fewer blocks).  §20's arithmetic was sound.
+
+**One number was badly wrong, in the cache's favour: a hit costs 1.4
+microseconds, not the 25 assumed.**  420 us over 291 hits.  A miss costs 580.
+So a hit avoids essentially the whole cost of a block rather than 95% of it,
+and the `memcpy`-bound estimate was pessimistic by a factor of fifteen.  (The
+true figure is between 1.4 and about 2.4 us: `microsecondsSince` truncates, so
+sub-microsecond hits record zero.)
+
+That does not change the verdict -- the ceiling is the hit *rate*, and §20
+measured that at 8.2% with a quarter-gigabyte slab -- but it does mean the
+cache is as close to free as an intervention on this path can be.  Three runs,
+**1,205 blocks compared byte for byte, 0 mismatches, 0 skips over 22,684
+requests.**
+
+### The freeze frame, fully broken down for the first time
+
+Frame 4311, **1,310.2 ms**, the zone transition.  Every column that reads
+above noise:
+
+```
+engine_render               1,303.9 ms    99.5% of the frame
+  |- Region::LoadLevel        508.8 ms    38.8%   (100% main thread, 5 calls)
+  |    |- LoadResource        366.1 ms            (764 calls, all main thread)
+  |         |- read+inflate   259.8 ms            (1,468 blocks, 254 cache hits)
+  |- texture_create            25.2 ms            (715 textures)
+  |- buffer_create              2.8 ms
+  |- shader_create              1.6 ms
+  +- UNNAMED                  795.1 ms    60.7% of the frame
+```
+
+Counts: `arc_open` 1,299, `engine_arc_read` 1,282, `engine_arc_kib` 82,342,
+`engine_res_enqueued` 1,012, `proc_avail_va_mib` 3,799.
+
+Three things follow, and the third is the important one.
+
+**The whole archive path is 260 ms of a 1,310 ms frame.**  Every remaining
+archive item in the plan -- 4.1 which is done, 4.2's prefetch, 4.3's
+libdeflate -- is competing for a slice of 20% of this frame.  A perfect
+archive layer that returned every block instantaneously would leave 1,050 ms.
+
+**The level load is 509 ms and it is entirely on the main thread**, which is
+Stage 5's target and is worth more than the whole archive path.  Note it is
+only 143 ms wider than the resource loading nested inside it.
+
+**And 795 ms -- 61% of the frame -- is inside `Engine::Render` and is named by
+nothing.**  It is not the level load, not resource loading, not the archive,
+not texture or buffer or shader creation, not the mod (every mod phase is
+under 2 ms), not the GPU (`gpu_frame` spans the stall but its child passes are
+idle), and not the message pump (0.67 ms).  It has been the largest single
+unexplained cost in this project since run 8 and it has never had a candidate.
+
+### It now has a candidate, and it is verified in the disassembly
+
+`FUN_1014d020`, the archive `File` constructor called by
+`FileSourceArchive::OpenFile`:
+
+```
+1014d05e  c7039c712f10   MOV [EBX],0x102f719c        the archive File vtable
+1014d094  f6450002       TEST byte [EBP],0x2         compressed?
+1014d098  7441           JZ  0x1014d0db              if not, no buffers
+1014d09a  8b790c         MOV EDI,[ECX+0xc]           -> Archive*
+1014d0a1  8b7f40         MOV EDI,[EDI+0x40]          -> blockSize, 256 KiB
+1014d0a4  397d08         CMP [EBP+8],EDI             min(compressedSize, 256K)
+1014d0ae  0f42c8         CMOVC ECX,EAX
+1014d0b5  ff31           PUSH [ECX]
+1014d0b7  ff1518c32a10   CALL [0x102ac318]           operator new[]
+1014d0bd  894320         MOV [EBX+0x20],EAX
+1014d0c0  397d0c         CMP [EBP+0xc],EDI           ... and again for
+                                                     min(decompressedSize, 256K)
+```
+
+`0x102ac318` is `MSVCR110!??_U@YAPAXI@Z` -- `operator new[]` -- and
+`0x102ac304` is `??_V@YAXPAX@Z`, the matching `delete[]` that
+`Archive::FreeFileBuffer` and the File destructor call.  Both were read out of
+Engine.dll's import table this session.
+
+So **every compressed archive file the game opens allocates two buffers of up
+to 256 KiB each, and frees them when it closes**.  Frame 4311 opened 1,299 of
+them.  That is **up to 649 MiB of `operator new[]` / `delete[]` traffic in a
+single frame**, roughly 2,600 allocation/free pairs, in a 32-bit MSVC heap --
+under Wine, which is not the Windows heap.  `Lock` additionally grows the
+`+0x18` scratch to the requested size, adding the 80 MiB the frame actually
+read.
+
+The plan already names this and declines it:
+
+> Pooling the two 256 KiB `operator new[]` scratch buffers the archive `File`
+> constructor allocates per compressed entry -- 512 KiB of heap churn per
+> opened file in a fragmenting 32-bit MSVC heap -- is cheap and tempting but
+> needs its own evidence that fragmentation is biting.
+
+**Frame 4311 is that evidence's shape, and the instrument for it is four
+bytes.**  `detour::patchImport` on Engine.dll's two IAT slots gives
+`engine_heap_alloc` / `engine_heap_alloc_us` / `engine_heap_free` /
+`engine_heap_free_us`, scoped to Engine.dll, patching no code, exactly as the
+twelve import instruments added after `b161e08` are.  If those columns read
+hundreds of milliseconds on frame 4311, the 795 ms has a name and a fix
+(pooling the buffers), and it is larger than everything else left in the plan
+combined.  If they read single-digit milliseconds, the hypothesis dies for the
+price of one boot and the search continues.
+
+That is the next thing to build, ahead of 4.2 and 4.3 -- which are arguing
+over 260 ms while this is 795.
+
+### And a second, cheaper instrument to build alongside it
+
+`engine_arc_inflate_us` brackets the whole block routine, so its 580 us a
+block is `SetFilePointerEx` + `ReadFile` + `uncompress` together and nothing
+says which.  **P8** -- the `E8` at `0x1011d1d6`, already at offset 20 of
+`kArchiveInflateWindowBytes` and already byte-checked by `verify-sites.py` --
+splits it with one `detour::patchCall`.  Mostly zlib points at 4.3; mostly
+syscall points at 4.2, and given §14-§17 the second would be in character.
+
+Both instruments fit in one boot.
+
+## 22. Why 16 MiB is not worth a boot, and why 4.2 and 4.3 are not worth building yet
+
+Two questions asked directly, answered from the data already on disk rather
+than by running more.
+
+### The cache size is bracketed, and 16 MiB sits inside the bracket
+
+Runs 21 and 22 measured two points, and the frame that matters is the third
+column:
+
+| | session | frames > 200 ms | heaviest frame |
+| --- | ---: | ---: | ---: |
+| 8 MiB, 32 slots | 3.8% | 13.3% | **17.3%** |
+| 256 MiB, 1,024 slots | 8.2% | 14.4% | **19.4%** |
+
+**19.4% is the ceiling** -- 1,024 resident blocks against a working set that
+still evicts 85% of the time, so more slots is not the constraint.  32 slots
+already captures **89% of the achievable** on the freeze frame.  The whole
+gap between 8 MiB and 256 MiB is 31 hits on that frame, which at 580
+microseconds a block is **18 milliseconds**.
+
+16 MiB is 64 slots.  It sits between two measured points 18 ms apart, so it
+can buy at most single-digit milliseconds over 8 MiB, on one frame, once a
+session.  That is not worth a boot, and it is not worth changing the
+documented value either: 8 MiB is the number that was measured and the reason
+larger values are pointless is now recorded.
+
+The general finding is the useful part: **the reuse is burst-local.**  Inside
+one big level load the game returns to blocks it read moments ago and to
+nothing older, which is why the curve is flat from 32 slots onward.  Any
+future design that hopes to exploit archive locality should be sized against
+tens of blocks, not thousands.
+
+### 4.2 and 4.3 should not be built yet, and one of them may never be
+
+Run 23's frame anatomy (§21) reprices both of them:
+
+```
+frame 4311, 1,310.2 ms
+  the entire archive path      260 ms      20% of the frame
+  Region::LoadLevel            509 ms      39%   (Stage 5)
+  UNNAMED                      795 ms      61%   (nothing in the plan)
+```
+
+**4.2 and 4.3 are competing for slices of 260 ms, and they overlap.** Both
+attack the same 580 microseconds a block: 4.2 removes syscalls, 4.3 removes
+zlib time.  Whichever half of that 580 is small, the corresponding item is
+worth nothing -- and **nobody knows which half is which**, because
+`engine_arc_inflate_us` brackets the seek, the read *and* the `uncompress`
+together.  Building either one now is a coin flip on a 260 ms prize.
+
+4.3 is additionally the riskiest item in the whole plan.  It needs a
+hand-emitted caller-pop thunk on `FUN_10065760`'s non-standard convention
+(`ECX`/`EDX` plus two caller-popped stack arguments) on a path entered
+thousands of times a second, plus a vendored decompressor that has to agree
+with zlib bit for bit on 122,302 blocks.  That is a great deal of exposure for
+at most a fraction of 20% of one frame.
+
+So the order is:
+
+1. **Measure, do not build** -- run 24, below.  Two import redirects.
+2. **Whatever the heap columns say**, because 795 ms beats 260 ms and 509 ms
+   both.
+3. **Stage 5.1** -- retarget P1/P2 to `Region::BackgroundLoadLevel` -- and
+   *then* widen the game's preload distance.  509 ms, and see the note below
+   on why the ordering is the whole trick.
+4. **4.2 only if the split says the syscalls dominate.**
+5. **4.3 last, or never.**
+
+### Run 24: the two instruments, and why they are cheap
+
+Both are `detour::patchImport` -- four bytes of a data table, no code patched,
+scoped to `Engine.dll` -- which makes them the same class of instrument as the
+twelve added in runs 13-20 rather than anything new.
+
+**`engine_trace` bit 2048, the heap.**  `??_U@YAPAXI@Z` and `??_V@YAXPAX@Z`
+at Engine's IAT slots `0x2ac318` and `0x2ac304`, both verified by
+`verify-sites.py` to be MSVCR110's `operator new[]` and `operator delete[]`.
+Columns `engine_heap_alloc` / `_us` / `_kib`, `engine_heap_big` / `_big_us`
+(the subset at or above 64 KiB, which is what the block scratch buffers are),
+`engine_heap_free` / `_us`.  Hundreds of milliseconds on the freeze frame
+names the 795 ms; single-digit milliseconds kills the hypothesis.
+
+**`engine_trace` bit 4096, the read/inflate split.**  `SetFilePointerEx`
+(`0x2ac190`) and `ReadFile` (`0x2ac1a4`), also verified.  Columns
+`engine_io_seek` / `_us` and `engine_io_read` / `_us` / `_kib`; the inflate is
+`engine_arc_inflate_us` minus the two.  Engine.dll's other callers of both are
+all inside the same archive module -- `FUN_1011bfd0` through
+`Archive::AddFileFromMemory` -- so comparing `engine_io_read`'s count against
+`engine_arc_blocks` is what says the attribution holds.
+
+**The one thing to watch.**  This is the first instrument on a function the
+engine may call at a far higher rate than anything hooked so far, and two
+`QueryPerformanceCounter` calls per allocation could cost real time.  The
+precedent is reassuring -- a detour on `ResourceLoader::EnqueueResource` at 12
+million calls a session moved neither p50 nor the mod's share -- but
+`operator new[]` could be busier still.  p50 and the mod's share against run
+23 (9.0 ms, 9.5%) are the check, and the mask bisects it: `engine_trace=4096`
+installs the split alone, `2048` the heap alone.
+
+### Turning the cache on outside a measurement run
+
+Asked directly: the cache is validated, so should it come back on?  For normal
+play, yes -- but not for run 24, and the reasons are worth separating.
+
+**Not for run 24.**  Its numbers are the stock baseline any later fix is
+judged against, and one variable per run is how every run in this project has
+been designed.  There is a second, smaller reason that is specific to what run
+24 measures: a cache hit is by definition a block that was read recently, so
+its file pages are the ones most likely to still be in the host's page cache.
+Serving them removes the *cheapest* reads from the sample and biases the
+read-versus-inflate ratio upward on the read side.  It is only ~4% of the
+sample, but that ratio is the entire purpose of the boot.
+
+**For play, yes, and `verify` is the way in.**  `archive_cache_mb=8verify`
+with `[debug] trace=1` and `performance_trace` left at 0 installs the cache
+and nothing else -- which is what its third install gate exists for -- never
+serves a block, and compares every one byte for byte while the game is played
+normally.  All three measurement runs were ~100-second sessions on one Eternal
+Embers route; a few hours of ordinary play exercises far more archives, some
+reopened, and many more distinct keys, and this extends the proof to that for
+the price of one `memcmp` per block.
+
+**One thing had to be fixed to make that viable.**  `tq::hdr::log` appends
+into a fixed 64 KiB buffer that never resets, and run 23's log was 15 KB for
+a hundred seconds.  A fixed report cadence of 1,024 requests would have filled
+the buffer inside an hour of play -- and once it is full, **a mismatch late in
+a long session would be silently dropped**, which is the one line that must
+never be lost.  The cadence now backs off after the eighth report to every
+8,192 requests, so a measurement run gets the same eight it always did and a
+multi-hour session writes about a kilobyte.
+
+`cache/runs/play-with-cache-verify.ini` and `play-with-cache.ini` are
+those two configurations, each two lines from the reporter's own.
+
+### A note on preloading, since it was asked
+
+The proposal was to preload adjacent zones on a worker, possibly in a separate
+64-bit process serving decompressed blocks over IPC, having found that the
+game's own preload-distance setting made hitches *earlier* rather than
+smaller.
+
+**That last observation is exactly right and now has a mechanism.**  Both
+`AddElementsInBox` overloads call `Region::LoadLevel(region, false)` --
+synchronous, and §8 measured it at 100% main thread across 203,419 calls.
+Widening the radius widens the set of regions force-loaded *on the render
+thread*, so the setting can only move the hitch.  The engine already has the
+async path (`Region::BackgroundLoadLevel`, `0x1020be60`) and both call sites
+are already shaped for it: the two instructions after the call are
+`CMP byte [EDI+0x74],0` / `JNZ epilogue`, i.e. skip this region while a load
+is in flight.  So async alone gives pop-in, widening alone is worse, and
+**async plus widening is the preload idea with no pop-in.**  The ordering is
+the trick, and it is Stage 5.1 followed by a setting change.
+
+**The separate process is the part to decline**, on this project's own
+evidence.  `Levels.arc` is one entry -- 1.87 GiB decompressed, 626 MiB
+compressed -- so it fits a 4 GB helper.  But the transfer would have to be
+shared memory: anything with a host round trip per block is disqualified by
+§14-§17, where a *single* `PeekMessageA` round trip measured 126-212 ms, and
+frame 4311 wanted 1,468 blocks.  With shared memory the design collapses back
+into mapping a window into the 32-bit process and copying out of it, which is
+what §18's cache already does at 1.4 microseconds a block.  The helper's only
+real advantage is address space, and address space was never the constraint:
+`proc_avail_va_mib` never fell below 3,458 MiB with 256 MiB committed, and
+read **3,799 MiB during frame 4311 itself**.
+
+Also worth stating, because it is a point in the proposal's favour: **run 22's
+8.2% ceiling does not bound a preloading design.**  It bounds a *demand*
+cache, which needs reuse.  A preload cache needs prediction, and would serve
+first-touch blocks -- 91.8% of requests.  The reason not to build it is not
+that it cannot hit; it is that the entire archive path is 260 ms of a 1,310 ms
+frame, so even a perfect one leaves 1,050 ms of freeze.  If the read half
+turns out to dominate, the cheap version of the same idea is to map
+`Levels.arc` and let block reads come out of memory -- no helper, no IPC, no
+prediction.
+
+## 23. Run 24: the heap is innocent, 4.2 is dead, and I had the split backwards
+
+Two import instruments, four slots, 17 hooks installed, `engine_trace=1`.  Both
+answered.  One killed a hypothesis, the other reversed a prediction.
+
+### The heap hypothesis is dead, and cleanly
+
+| | session (99.1 s) | freeze frame (1,534.8 ms) |
+| --- | ---: | ---: |
+| `engine_heap_alloc` | 77,261 calls, **87 ms** | 7,324 calls, **1.6 ms** |
+| `engine_heap_free` | 73,183 calls, **86 ms** | 6,471 calls, **2.0 ms** |
+| `engine_heap_big` (>= 64 KiB) | 5,842 calls, 62 ms | 330 calls, 1.2 ms |
+| `engine_heap_alloc_kib` | 2,188,634 | 153,162 |
+
+**173 ms over a whole session, and 3.6 ms on the frame it was supposed to
+explain.**  The archive `File` constructor really does allocate two buffers per
+compressed entry and the freeze frame really does open 1,299 files and churn
+150 MiB -- and it costs three and a half milliseconds.  Wine's heap is simply
+not slow at this.
+
+So §21's candidate for the 795 ms is gone.  That is the instrument doing its
+job: the hypothesis was verified in the disassembly, plausible in shape, and
+wrong in magnitude, and one boot settled it.  **Pooling the two scratch
+buffers is now struck from the plan** -- it would recover single-digit
+milliseconds a session.
+
+(Note in passing: only 5,842 of a possible ~10,000 allocations were >= 64 KiB,
+because the constructor asks for `min(size, blockSize)` and most archive
+entries are smaller than 64 KiB.  The 256 KiB pair is the exception, not the
+rule.)
+
+### The read/inflate split, and it is the opposite of what I predicted
+
+I expected the syscalls to dominate, on the strength of §14-§17 -- where a
+single `PeekMessageA` round trip to the host measured 126-212 ms.  That
+reasoning does not transfer, and the numbers say so plainly:
+
+| | session | per block | share |
+| --- | ---: | ---: | ---: |
+| the whole block routine | 4,543 ms | 594 us | 100% |
+| **zlib `uncompress`** | **3,494 ms** | **457 us** | **76.9%** |
+| `ReadFile` | 1,043 ms | 136 us | 23.0% |
+| `SetFilePointerEx` | 5 ms | 1 us | 0.1% |
+
+`engine_io_read` counted 7,761 calls against `engine_arc_blocks`' 7,646, which
+is the attribution check: Engine.dll's other callers of `ReadFile` are all in
+the same archive module, and the ~115 extra calls are theirs.
+
+**File I/O under CrossOver is not the pathology the message pump is.**  The
+seek is genuinely free at a microsecond.  `ReadFile` moved 626 MiB in 1,043 ms
+-- about 600 MB/s -- so it is paying for *bytes*, not for round trips.
+
+Two consequences, and the first is a deletion.
+
+**4.2, the bounded compressed prefetch, is dead.**  Its whole pitch was "86
+syscall pairs and 86 acquisitions of `archive+0x60` for one texture".  The
+syscall half of that is worth 5 ms a session.  Collapsing many reads into
+fewer, larger ones transfers the same bytes at the same throughput -- and 4.2
+deliberately *over-reads* past the requested block, so it would move strictly
+more.  There is nothing for it to win.  Struck.
+
+**4.3, libdeflate, is now the only archive item left with a number.**  3,494 ms
+of zlib a session; 189 ms of it inside the freeze frame.  libdeflate is
+typically two to three times faster at decompression, so 1,700-2,300 ms a
+session and perhaps 110 ms of that frame.  It remains the riskiest item in the
+plan -- a hand-emitted caller-pop thunk on `FUN_10065760`'s non-standard
+convention, plus a vendored decompressor that must agree with zlib on 122,302
+blocks -- but it is no longer a coin flip: the number it attacks is now
+measured and it is the larger half.
+
+### And the frame is *more* unexplained than before, not less
+
+```
+frame 1906, 1,534.8 ms
+  engine_render                1,529.0 ms   99.6% of the frame
+    |- Region::LoadLevel         505.7 ms   (100% main thread)
+    |    |- LoadResource         404.7 ms
+    |         |- read + inflate  311.2 ms   (122 read, 189 zlib)
+    |- texture_create             23.4 ms   (715 textures)
+    |- heap alloc + free           3.6 ms
+    +- STILL UNNAMED             996.4 ms   64.9% of the frame
+```
+
+A second frame from the same run, 908.0 ms, is a useful contrast: its
+`Region::LoadLevel` is **0.01 ms** -- no level load at all -- and yet it has
+388 ms of main-thread resource loading, 64 ms of `Engine::Update`, 75 ms of
+texture creation, and **758 ms unnamed**.  So the missing time is not a
+side-effect of level loading; it appears with and without one.
+
+### What has never been measured, and it is the obvious thing
+
+Every instrument in this project times the main thread *doing* something.
+**Nothing has ever timed it waiting.**
+
+- The region lock was measured at **zero** contention -- but only at three
+  render-path call sites (§8).
+- The loader fence was measured at 1.6 ms -- but only at one call site.
+- **Engine.dll's archive lock, `archive+0x60`, is taken and released around
+  every one of the 7,646 block reads a session, and has never been
+  instrumented at all.**
+
+`FUN_1011d0e0` enters that section, seeks, reads, and leaves it -- so the
+loader thread holds it for the 136 microseconds of every `ReadFile`.  If the
+render thread force-loads a level while the loader thread is inside that
+window, the render thread blocks, and no column in any run to date would show
+it.  That is the right shape and roughly the right size for 996 ms.
+
+So run 25 adds `engine_trace` bit **8192**, four more import redirects on
+`Engine.dll`:
+
+| import | columns | note |
+| --- | --- | --- |
+| `EnterCriticalSection` (`0x2ac17c`) | `engine_cs_wait` / `_us` | **contended acquisitions only** -- `TryEnterCriticalSection` first, timestamp only on failure, so an uncontended lock records nothing. Covers every critical section in the module, the archive's included. |
+| `WaitForSingleObject` (`0x2ac188`) | `engine_obj_wait` / `_us` | every wait outside the one fence call site |
+| `WaitForMultipleObjects` (`0x2ac154`) | `engine_obj_wait` / `_us` | |
+| `Sleep` (`0x2ac108`) | `engine_sleep` / `_us` | |
+
+These are **disjoint from `engine_region_lock_*` and `engine_fence_wait_*` by
+construction**: `patchCall` repointed those four call sites at a mod-owned
+cell, so they no longer read the import slot.  Nothing is double counted.
+
+The group installs **last**, and that ordering is required rather than tidy:
+the region-lock and fence groups verify these same slots still hold kernel32's
+exports before they patch their call sites, and would refuse if this group had
+already redirected them.
+
+Either answer is worth the boot.  Hundreds of milliseconds of `engine_cs_wait`
+on the freeze frame names the 996 ms and points at a real fix -- the loader
+thread should not hold the archive lock across an inflate, and Stage 5.1 would
+stop the render thread being there to block on it.  Near zero says the main
+thread is *working*, not waiting, and that the remaining time is CPU inside
+`Engine::Render` that no import and no exported function reaches -- which
+would mean instrumenting that function's internals, a bigger job than anything
+attempted so far.
+
+## 24. Run 25: the archive lock is innocent, and a poll loop shows up instead
+
+`engine_trace=1`, 18 hooks, 4/4 blocking imports redirected, 96.3 seconds on
+the same route.  One hypothesis died, one instrument was built wrong, and the
+wrong instrument found something anyway.
+
+### Critical-section contention is not the missing time
+
+| | session | freeze frame (1,505.3 ms) |
+| --- | ---: | ---: |
+| `engine_cs_wait` | 3,159 contended | **0** |
+| `engine_cs_wait_us` | **222 ms** | **0.00 ms** |
+| `engine_region_lock_hits` (3 sites) | 0 | 0 |
+| `engine_fence_wait_us` (1 site) | 1 ms | -- |
+
+**Zero contended acquisitions on the freeze frame**, and 222 ms across a whole
+session across every critical section in `Engine.dll` -- the archive's own
+`archive+0x60` included, which is held across every one of 7,646 block reads
+and 136 microseconds of `ReadFile` each.  §23's hypothesis was that the render
+thread blocks there while the loader thread reads.  It does not.  Dead.
+
+That also generalises §8's region-lock result properly: it was measured at
+three call sites and now the whole module agrees with it.  **Lock contention is
+not a mechanism in this game on this machine.**
+
+### The instrument was wrong for the question, and that is my error
+
+`engine_obj_wait_us` read **178.7 seconds** and `engine_sleep_us` **165.5
+seconds** over a 96.3-second session.  Both larger than wall clock, because
+both sum across every thread in the process and most of it is background
+threads sitting idle.  One frame shows 31,288 ms of object wait.
+
+Unattributed, those two columns cannot answer anything.  The level and
+resource load columns have had a `_main` split since run 10 -- compared against
+the engine's own recorded thread id at `Engine+0x41a5dc` -- for precisely this
+reason, and these were built without one.
+
+### But the wrong instrument found a poll loop
+
+| | frames | `Sleep` calls per frame |
+| --- | ---: | ---: |
+| under 20 ms | 5,591 | **5.8** |
+| over 200 ms | 9 | **250.2** |
+
+A **43x** rate difference, and the four worst frames of the run carry 406,
+653, 436 and 319 `Sleep` calls each.  Background idle does not do that.
+Something polls with `Sleep` during the hitch.
+
+Set that against the freeze frame with everything runs 24 and 25 named
+subtracted out:
+
+```
+frame 1863, 1,505.3 ms
+  engine_render                1,498.9 ms
+    |- Region::LoadLevel         513.8 ms   (100% main thread)
+    |- texture_create             23.2 ms
+    |- heap alloc + free           3.6 ms
+    |- critical sections           0.0 ms
+    +- UNNAMED                   958.3 ms
+```
+
+**406 `Sleep` calls account for all 958 ms at 2.4 milliseconds apiece.**  That
+is the arithmetic of a `Sleep(1)` poll loop on a host whose sleep granularity
+is not one millisecond, and it is the first candidate for this time that is
+both the right size and the right shape.
+
+### Run 26 adds the split, and the requested-versus-actual pair decides it
+
+Seven columns: `engine_cs_wait_main` / `_us`, `engine_obj_wait_main` / `_us`,
+and `engine_sleep_main` / `_us` / **`_req_us`**.  The last is the same shape as
+the `loop_sleep_req_us` pair added in run 13 -- what the main thread *asked*
+for beside what it *got* -- and it splits three ways:
+
+- **actual large, requested small** (say 400 ms requested, 950 ms returned):
+  the game polls with `Sleep(1)` and the host hands back two to fifteen
+  milliseconds each time.  That is a granularity problem, it is why this
+  reproduces under CrossOver and would not on Windows, and **it is reachable
+  from here**: `timeBeginPeriod` is a `winmm` export, and `winmm.dll` is the
+  library this mod *is*.  It would be the first real lever found since the
+  loose-texture cap.
+- **both large**: the game really does mean to sleep for most of a second
+  while loading.  Its own poll loop, and the fix is Stage 5.1 -- make the
+  level load asynchronous so the main thread is not there to poll at all.
+- **near zero**: the sleeping is all worker threads, and the 958 ms is CPU
+  inside `Engine::Render` that no import and no exported function reaches.
+  That is the expensive answer, and it means instrumenting that function's
+  internals.
+
+All three are decisive, which is what makes the boot worth taking.  Nothing
+about the game changes: the same four import redirects as run 25, attributed
+by thread.
+
+### Standing correction to §8 and to my own reasoning in §23
+
+§8 closed the region lock on three call sites and I generalised that in §23
+into an argument that the *archive* lock might be the exception.  Run 25 says
+no exception exists.  Two conclusions worth carrying forward:
+
+1. **Every lock hypothesis in this project is now closed by measurement**, at
+   whole-module scope rather than per-site.
+2. **The pattern in my own errors is worth naming**: §23 predicted syscalls
+   over zlib and was wrong; §21 predicted heap churn and was wrong; §23
+   predicted lock contention and was wrong.  All three were mechanisms
+   verified in the disassembly and plausible in shape, and all three were
+   wrong about *magnitude*.  The instrument-first discipline is what has
+   caught each one for the price of a single boot, and it is the reason to
+   keep resisting the urge to build the fix before the measurement.
+
+## 25. Run 26: the main thread does poll, and the freeze is not one mechanism
+
+The `_main` split §24 should have had from the start.  97.5 seconds, 7,046
+frames, same route.  Three results, and the third is the one that reorganises
+the remaining work.
+
+### The main thread polls with `Sleep`, and it is the game's own loop
+
+| | all threads | **main thread** |
+| --- | ---: | ---: |
+| `engine_cs_wait` | 2,968 / 209 ms | 1,532 / **88 ms** |
+| `engine_obj_wait` | 12,229 / 183,036 ms | 8,388 / **158 ms** |
+| `engine_sleep` | 63,027 / 164,060 ms | 418 / **518 ms** |
+
+The unattributed columns really were background idle: 183 seconds of object
+wait over a 97-second session collapses to **158 milliseconds** once the main
+thread is separated out.  Same for `Sleep`: 164 seconds becomes 518
+milliseconds.
+
+And on the freeze frame the poll loop is unmistakable:
+
+```
+frame 1911, 1,376.9 ms
+  engine_render                1,371.1 ms
+    |- Region::LoadLevel         512.6 ms   (100% main thread)
+    |- main-thread Sleep         434.9 ms   350 calls, 350 ms requested
+    |- texture_create             23.5 ms
+    |- heap alloc + free           3.6 ms
+    |- critical sections           0.0 ms
+    |- object waits                0.0 ms
+```
+
+**350 `Sleep(1)` calls on the main thread in one frame.**  Against 418 for the
+whole session -- so 84% of the session's main-thread sleeping happens in that
+single frame.  This is the game waiting for its loader thread, one millisecond
+at a time.
+
+### The granularity lever is small, and that is worth knowing before building it
+
+| | |
+| --- | ---: |
+| main-thread `Sleep` calls | 418 |
+| requested | 418 ms |
+| actual | 518 ms |
+| **ratio** | **1.24x**, 1.24 ms per `Sleep(1)` |
+
+§24 hoped for two to fifteen milliseconds a call, which would have made
+`timeBeginPeriod` -- a `winmm` export, in the library this mod *is* -- a real
+lever.  It is 1.24.  Perfect granularity would recover **100 ms a session and
+about 85 ms of the freeze frame**.  Worth a switch eventually because it is
+nearly free, but it is a rounding error against the 435 ms the loop costs, and
+it is not the fix.
+
+**The requested 350 ms is the point.**  The game asks to sleep for a third of
+a second in that frame.  This is its own poll loop, not the host's
+granularity, and the answer is to stop the main thread being in the loop at
+all -- which is Stage 5.1.
+
+### The freeze frames are three different mechanisms, and I have been treating them as one
+
+This is the finding that reorganises the plan.  The three worst frames of run
+26 have almost nothing in common:
+
+| | frame 1911 | frame 3168 | frame 6914 |
+| --- | ---: | ---: | ---: |
+| frame | 1,376.9 ms | 1,113.3 ms | 437.2 ms |
+| `engine_render` | 1,371.1 ms | 1,040.3 ms | **52.5 ms** |
+| `Region::LoadLevel` main | 512.6 ms | **0.02 ms** | 0.00 ms |
+| main-thread `Sleep` | **434.9 ms** | 0.00 ms | 0.00 ms |
+| main-thread `EnterCriticalSection` | 0.00 ms | **50.2 ms** | 0.00 ms |
+| main-thread object wait | 0.00 ms | 0.05 ms | **56.2 ms** |
+| `texture_create` | 23.5 ms | **193.3 ms** | 1.9 ms |
+| archive inflate | 262.8 ms | 275.8 ms | 4.4 ms |
+| `arc_open` | 1,299 | 199 | -- |
+
+- **Frame 1911 is the zone transition**: a forced synchronous level load that
+  is 85% a `Sleep(1)` poll loop.  Stage 5.1 addresses this one and only this
+  one.
+- **Frame 3168 has no level load at all** -- 0.02 ms -- and still spends 1,040
+  ms in `Engine::Render`, with 193 ms of texture creation, 276 ms of archive
+  inflate on some thread, 50 ms of main-thread lock contention, and roughly
+  790 ms nothing accounts for.  A different mechanism entirely.
+- **Frame 6914 is not in `Engine::Render` at all** -- 52.5 ms of render inside
+  a 437 ms frame.  That is the §13-§17 class, the window message pump, closed
+  as a host question.
+
+So "the freeze frame" has been three things wearing the same number.  Every
+attribution in §21 through §24 was computed against whichever frame happened
+to be slowest in that run, and those were not the same frame.  **Any future
+claim about "the worst frame" has to say which class it means.**
+
+### Where that leaves the work
+
+**Stage 5.1 is now the best-founded item in the plan**, and better founded
+than when it was written:
+
+- its premise is measured three times over -- `Region::LoadLevel` is 100%
+  main-thread, and cost 505-514 ms on the worst frame of runs 10, 23, 24, 25
+  and 26;
+- the engine's own asynchronous entry point exists and both call sites are
+  already shaped for it;
+- and run 26 adds the part that was not known: **the load is mostly waiting.**
+  435 ms of the 513 ms is a `Sleep(1)` poll.  A load that is 85% idle is
+  nearly finished by the time the renderer is told to skip the region, so the
+  pop-in Stage 5 trades for should be brief rather than a visible hole.
+
+It is worth ~513 ms of a ~1,380 ms frame, on the zone-transition class only.
+It does nothing for frames 3168 or 6914.
+
+**And the remaining unknowns are now properly separated:**
+
+| class | biggest unexplained piece | next step |
+| --- | ---: | --- |
+| zone transition (1911) | ~390 ms after the load and the poll | Stage 5.1 first, then re-measure what is left |
+| no-load render hitch (3168) | ~790 ms | needs its own instrument; 193 ms of texture creation and 50 ms of main-thread lock contention are the only footholds |
+| pump (6914) | -- | closed, §17. Host question. |
 
 ## Cross-references worth acting on
 

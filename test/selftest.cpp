@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "arc_cache.h"
 #include "dxbc_patch.h"
 #include "bloom_hook.h"
 #include "frame_overlay.h"
@@ -478,6 +479,142 @@ void testDetour() {
     VirtualFree(image, 0, MEM_RELEASE);
 }
 
+// The archive block cache. It sits on the one path in this project where being
+// wrong is silent -- a block served from the wrong slot is a corrupt texture or
+// a corrupt level, not a crash -- so the tests here are about the key being
+// strict and the slab never handing back somebody else's bytes.
+tq::arccache::Key blockKey(unsigned n) {
+    tq::arccache::Key key = {};
+    key.archive = (const void*)0x10000000;
+    key.handle = (void*)0x40;
+    key.offset = n * 0x40000u;
+    key.compressed = 1000u + n;
+    key.uncompressed = 4096;
+    return key;
+}
+
+void fillBlock(BYTE* block, uint32_t bytes, unsigned n) {
+    for (uint32_t i = 0; i < bytes; ++i) block[i] = (BYTE)(i * 31u + n * 7u + 3u);
+}
+
+void testArchiveCache() {
+    wchar_t ini[MAX_PATH];
+    if (!GetFullPathNameW(L"tqflicker-arccache-selftest.ini", MAX_PATH, ini,
+                          nullptr))
+        return;
+    DeleteFileW(ini);
+
+    // ---- the option. The default is the whole safety story: it allocates
+    // nothing and leaves the block routine exactly as the game ships it.
+    tq::arccache::readOptions(ini);
+    check(!tq::arccache::configured() && !tq::arccache::verifying(),
+          "archive_cache_mb is off by default and allocates nothing");
+
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"0", ini);
+    tq::arccache::readOptions(ini);
+    check(!tq::arccache::configured(), "archive_cache_mb=0 is off");
+
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"8", ini);
+    tq::arccache::readOptions(ini);
+    check(tq::arccache::megabytes() == 8 && !tq::arccache::verifying(),
+          "archive_cache_mb=8 is eight megabytes, serving from the slab");
+
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"8VeRiFy",
+                               ini);
+    tq::arccache::readOptions(ini);
+    check(tq::arccache::megabytes() == 8 && tq::arccache::verifying(),
+          "archive_cache_mb=8verify asks for the measurement boot");
+
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"8 slots",
+                               ini);
+    tq::arccache::readOptions(ini);
+    check(!tq::arccache::configured(),
+          "a value that is not a size stays off rather than being guessed at");
+
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"9999",
+                               ini);
+    tq::arccache::readOptions(ini);
+    check(tq::arccache::megabytes() == 256,
+          "an absurd size is clamped, not taken literally in a 32-bit process");
+    DeleteFileW(ini);
+
+    const uint32_t bytes = 4096;
+    BYTE* block = (BYTE*)malloc(bytes);
+    BYTE* out = (BYTE*)malloc(bytes);
+    if (!block || !out) {
+        check(false, "allocate the archive cache test buffers");
+        free(block);
+        free(out);
+        return;
+    }
+
+    // ---- one megabyte is four slots, which is what makes the clock visible.
+    tq::arccache::configureForTest(1, false);
+    check(tq::arccache::start() && tq::arccache::running()
+          && tq::arccache::slotsForTest() == 4,
+          "one megabyte commits four slots of one block each");
+
+    fillBlock(block, bytes, 0);
+    tq::arccache::store(blockKey(0), block);
+    memset(out, 0, bytes);
+    check(tq::arccache::lookup(blockKey(0), out) && !memcmp(out, block, bytes),
+          "a stored block comes back byte for byte");
+
+    check(!tq::arccache::lookup(blockKey(1), out),
+          "a block that was never stored misses");
+
+    // Every field of the key is load bearing, and the two sizes are the two
+    // that a naive {archive, handle, offset} key would drop.
+    tq::arccache::Key sameOffset = blockKey(0);
+    sameOffset.compressed += 1;
+    check(!tq::arccache::lookup(sameOffset, out),
+          "a different compressed size is a different block, not a hit");
+    sameOffset = blockKey(0);
+    sameOffset.handle = (void*)0x41;
+    check(!tq::arccache::lookup(sameOffset, out),
+          "the same offset in a different file is not a hit");
+
+    // ---- the clock. Five distinct blocks into four slots: one is gone, the
+    // rest are intact, and nothing has been handed the wrong bytes.
+    for (unsigned n = 0; n < 5; ++n) {
+        fillBlock(block, bytes, n);
+        tq::arccache::store(blockKey(n), block);
+    }
+    unsigned resident = 0, wrong = 0;
+    for (unsigned n = 0; n < 5; ++n) {
+        memset(out, 0, bytes);
+        if (!tq::arccache::lookup(blockKey(n), out)) continue;
+        ++resident;
+        fillBlock(block, bytes, n);
+        if (memcmp(out, block, bytes)) ++wrong;
+    }
+    check(resident == 4 && wrong == 0,
+          "five blocks into four slots evicts one and corrupts none");
+
+    // ---- verify mode never serves, and catches a slab that disagrees.
+    tq::arccache::configureForTest(1, true);
+    check(tq::arccache::start() && tq::arccache::verifying(),
+          "the verification boot commits its slab too");
+    fillBlock(block, bytes, 9);
+    tq::arccache::store(blockKey(9), block);
+    check(!tq::arccache::lookup(blockKey(9), out),
+          "verify mode never serves a block, so the engine's own inflate runs");
+    tq::arccache::store(blockKey(9), block);
+    check(tq::arccache::mismatchesForTest() == 0 && tq::arccache::running(),
+          "a block that matches what the engine produced is counted, not flagged");
+    fillBlock(block, bytes, 10);
+    tq::arccache::store(blockKey(9), block);
+    check(tq::arccache::mismatchesForTest() == 1 && !tq::arccache::running(),
+          "a block that disagrees stops the cache for the rest of the session");
+
+    tq::arccache::stop();
+    check(!tq::arccache::lookup(blockKey(0), out) && !tq::arccache::running(),
+          "a stopped cache serves nothing");
+    tq::arccache::configureForTest(0, false);
+    free(block);
+    free(out);
+}
+
 // The engine trace is gated twice and measured once. The gate is what keeps a
 // shipping boot byte-identical to a build without any of this; the region-lock
 // thunk is the one hook that sits on a render-path call, so what it costs when
@@ -580,6 +717,29 @@ void testEngineProbe() {
     DeleteFileW(csv);
     tq::probe::resetForTest();
     tq::probe::readOptions(nullptr);
+    tq::engineprobe::readOptions(nullptr);
+    DeleteFileW(ini);
+
+    // The third way in, added with the block cache. archive_cache_mb is a fix
+    // rather than an instrument, so unlike every other hook in that file it
+    // installs with the performance probe off -- but the module check is not
+    // relaxed with it, and a build that is not the audited Engine.dll still
+    // gets nothing.
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"8", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled() && tq::arccache::configured()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "archive_cache_mb reaches install() with the probe off, and still"
+          " installs nothing into a module that is not Engine.dll");
+    // And it brings none of the instrument with it. engine_trace defaults to
+    // 1, so every group would say yes if the mask were consulted on its own;
+    // what makes them say no is the probe being off.
+    check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(4)
+          && !tq::engineprobe::wantsForTest(1024),
+          "a cache-only boot installs no trace group, whatever engine_trace says");
+    tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     DeleteFileW(ini);
     // ---- patchImport, which is how the game's own main loop is instrumented.
@@ -2460,6 +2620,7 @@ int main(int argc, char** argv) {
     testTimestampCapability(device, context);
     testProbe(device, context);
     testEngineProbe();
+    testArchiveCache();
     testFrameOverlay(device, context);
 
     int transformed = 0;

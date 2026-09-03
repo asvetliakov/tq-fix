@@ -182,6 +182,92 @@ ms in the worst frame — but exactly **one frame in 7,347** has a load costing
 over a millisecond, so it fixes the worst frame of a session and nothing
 else. Stage 6 is deleted.
 
+**Stage 4.1 is built, and the plan's design survived contact with the
+binary.** `src/arc_cache.{h,cpp}` and one detour that was already there.
+`findings.md` §18 is the record; three things are worth carrying forward here.
+
+- *The plan's key was right, and its structure note was one word off.*
+  §4.1 says `desc = *(void**)(entry+0x20) + blockIndex*12`, which is exactly
+  what `1011d101`/`1011d108` do — but R1's on-disk layout has `+0x20` as
+  `firstBlockIndex`, an integer. The engine rewrites that field to a pointer
+  when it opens the archive. Reading the container format as the runtime
+  structure would have built the key out of an integer treated as an address.
+- *The uncompressed branch cannot reach the cache at all.*
+  `Archive::ReadFromFile` tests the compressed bit at `1011d390` and branches
+  away before the block routine, so `arc-format.md`'s 6,880 uncompressed
+  dialog entries are not a hazard here. Worth knowing before 4.2, which
+  over-reads and therefore does have to care.
+- *`8verify` is cheaper than the plan imagined.* Rather than inflating into a
+  shadow buffer and comparing, it never serves and compares **on insert**: a
+  request whose key is already resident is compared against what the engine
+  just produced for it. Same proof, no second buffer, no thread-local
+  anything, and every request that would have been a hit becomes a test.
+
+It defaults to `0`, which allocates nothing and leaves the block routine
+byte-identical to today, and it is the one hook in `src/engine_probe.cpp` that
+installs with the performance probe off — because it is a fix rather than an
+instrument. It opens no other gate: the module, export and byte checks are
+unchanged, and four windows past the prologue are additionally required before
+anything is cached.
+
+**Runs 21 and 22 answered Stage 4.1, and the answer is that §4.1's opening
+premise was wrong.** `findings.md` §19 and §20.
+
+*Correct beyond doubt:* 914 blocks compared byte for byte across the two
+boots, 0 mismatches, 0 `arc_cache_skip` over 15,186 requests.
+
+*But the premise is measured false.* §4.1 opens by calling the 1.8x
+amplification what "a single-slot cache in front of one 2 GB entry" produces —
+i.e. re-inflation. With a 256 MiB cache holding 1,024 blocks resident, **91.8%
+of block requests are still for a block nothing has seen before.** The excess
+is partial consumption: a 218 KiB read at an arbitrary offset straddles 1.52
+blocks and discards the unused head and tail, and nothing comes back for them.
+No block cache of any size recovers that. §8 of `findings.md` carries the
+correction.
+
+*What reuse exists is burst-local and small.* 3.8% of blocks at 32 slots and
+8.2% at 1,024 — 32x the address space for 4.4 points — but concentrated where
+it hurts: 19.4% on the archive-heaviest frame against 8.2% overall. Computed
+value is ~136 ms off the worst frame of a session at 8 MiB, which stays over
+1.3 s regardless, because `Region::LoadLevel` and the ~950 ms nothing names
+are what dominate it.
+
+`archive_cache_mb` ships at `0`. Whether 8 MiB is worth switching on is a
+judgement call, not a measurement, and run 23
+(`cache/runs/run23-archive-cache-serving.ini`, `archive_cache_mb=8`) is the
+first boot that actually serves a block and so the first that measures rather
+than computes the win.
+
+**And run 23's frame anatomy reprices 4.2 and 4.3 downward.** The freeze frame
+is 1,310 ms: the *entire* archive path is 260 ms of it (20%),
+`Region::LoadLevel` is 509 ms (39%, Stage 5), and **795 ms (61%) is named by
+nothing in this plan**. 4.2 and 4.3 are competing for slices of the 260, and
+they overlap — both attack the same 580 µs a block, one by removing syscalls
+and one by removing zlib time, so whichever half is small makes the
+corresponding item worthless.
+
+The 795 ms now has a verified candidate: `FUN_1014d020`, the archive `File`
+constructor, allocates *two* buffers of up to 256 KiB through `operator new[]`
+per compressed entry opened and frees them on close — and frame 4311 opened
+1,299 files, up to 649 MiB of allocate/free in one frame in a 32-bit MSVC heap
+under Wine. **This plan already names that and declines it for want of
+evidence** (see the "not doing yet" note under Stage 4); frame 4311 is that
+evidence's shape, and the instrument for it is four bytes of import table.
+
+So the order is: run 24's two instruments, then whatever the heap says, then
+Stage 5.1 plus a widened preload distance (509 ms), then 4.2 only if the split
+says syscalls dominate, then 4.3 last or never. `findings.md` §21 and §22.
+
+**4.2 and 4.3 are now gated on one number that does not exist yet.**
+`engine_arc_inflate_us` brackets the whole block routine — the
+`SetFilePointerEx`, the `ReadFile` and the `uncompress` — so its 4,310 ms is
+read and inflate together. Mostly zlib points at 4.3; mostly syscall points at
+4.2, which given §14–§17 (one host round trip costing 126–212 ms) would be in
+character. **P8** — the `E8` at `0x1011d1d6`, already at offset 20 of
+`kArchiveInflateWindowBytes` and already byte-checked by `verify-sites.py` — is
+the instrument: one `detour::patchCall`, one column pair, no new reverse
+engineering. Write that before either 4.2 or 4.3.
+
 ---
 
 This plan acts on them. Five things are now established beyond doubt, all
@@ -677,7 +763,9 @@ everything below.
 
 Ordered by Run 2's read-time-vs-inflate-time split; both halves are worth doing.
 
-**4.1 A multi-block decompressed cache — do this one first.** Inline detour on
+**4.1 A multi-block decompressed cache — do this one first.** *(Built. See
+the Status note above and `findings.md` §18 for where this text and the
+binary disagreed.)* Inline detour on
 `FUN_1011d0e0` (`0x1011d0e0`). Key a cache entry on
 `{archive, archive[0xc] file HANDLE, desc[0] offset, desc[1] csize,
 desc[2] usize}` where `desc = *(void**)(entry+0x20) + blockIndex*12`. On a hit,
@@ -695,7 +783,10 @@ sizes in the key makes a wrong hit implausible; `archive_cache_mb=8verify`
 inflates anyway and `memcmp`s for one measurement boot, which is the honest way
 to buy confidence in that claim rather than asserting it.
 
-**4.2 Bounded compressed prefetch.** On a cache miss, read
+**4.2 Bounded compressed prefetch.** *(**STRUCK by run 24.** The syscall half of this item is worth 5 ms a session: `SetFilePointerEx` costs 1 µs a block
+and `ReadFile` is throughput-bound, 626 MiB in 1,043 ms. Batching moves the
+same bytes, and this design deliberately over-reads, so it would move more.
+`findings.md` §23.)* On a cache miss, read
 `min(prefetch_budget, fileSize - desc[0])` bytes from `desc[0]` into a
 per-thread staging buffer under one lock/seek/read, and inflate the requested
 block out of it; later misses inside that window skip the syscall entirely. For
@@ -710,7 +801,11 @@ requested block safe — it never leaves valid data, and a block is only ever
 inflated through its own descriptor — but it must still be clamped against the
 file size at the last block.
 
-**4.3 libdeflate for block decompression.** Reach for this only if 4.1 and 4.2
+**4.3 libdeflate for block decompression.** *(**Confirmed as the target by
+run 24**, which split the block routine 77% zlib / 23% read / 0.1% seek:
+3,494 ms of `uncompress` a session at 457 µs a block. It is the only archive
+item left with a number. Do it after Stage 5.1 — it is still the riskiest
+item in this plan.)* Reach for this only if 4.1 and 4.2
 leave inflate dominant — a cache hit costs 25 µs and the best possible inflate
 still costs hundreds. Vendor `libdeflate` under
 `third_party/libdeflate/` at a pinned revision with its MIT license, in the
@@ -750,9 +845,19 @@ the archive `File` constructor allocates per compressed entry — 512 KiB of hea
 churn per opened file in a fragmenting 32-bit MSVC heap — is cheap and tempting
 but needs its own evidence that fragmentation is biting.
 
+*(**The pooling idea is struck by run 24.** It got its evidence and the
+evidence acquitted the heap: `operator new[]` and `delete[]` across all of
+Engine.dll cost 173 ms a session, and 3.6 ms on a 1,534.8 ms freeze frame that
+opened 1,299 archive files and churned 150 MiB. Wine's heap is not slow. This
+is the right outcome for a "needs its own evidence" item, and it is recorded
+rather than deleted so the reasoning stays legible.)*
+
 **Config.** `[performance] archive_cache_mb = 0` (0 disables and allocates
 nothing; `8verify` for a verification boot), `archive_prefetch_kb = 0`, and
 `archive_decompress = original | libdeflate | libdeflate_verify`.
+
+`archive_cache_mb` shipped as written, clamped to 256 MiB; the other two are
+still unwritten.
 
 **Run 3** — boots in this order, same save and route each time: cache alone at
 8 MiB, then 32 MiB to find the knee; then cache + prefetch; then + libdeflate

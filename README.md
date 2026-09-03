@@ -73,6 +73,7 @@ peak_nits=auto
 [performance]
 streaming=optimized
 loose_texture_max=0
+archive_cache_mb=0
 timer_period_ms=0
 
 [debug]
@@ -95,6 +96,58 @@ found, which is the engine's own behaviour for a missing file. The redirect
 costs nothing at runtime beyond reading each loose file's 128-byte header, and
 with `[debug] trace=1` the first sixty-four redirects are named, with their
 dimensions, in the mod's trace log, followed by a total at shutdown.
+
+`archive_cache_mb` puts a decompressed-block cache in front of the game's own
+archive reads. Every `.arc` entry the game loads is stored as a chain of 256
+KiB zlib blocks, and the engine's cache for those is a single slot per open
+file -- so a read that crosses a block boundary, or that comes back to a block
+that slot has since lost, pays a fresh seek, a fresh `ReadFile` and a complete
+256 KiB inflate. Against `Resources/Levels.arc`, which is one 2 GB entry of
+7,646 blocks holding every level of every act, two measured sessions inflated
+1.88 GiB to serve 1.03 GiB in Eternal Embers and 1.14 GiB to serve 0.48 GiB in
+Greece -- 4.4 and 2.1 seconds of a hundred-second session, all of it inside the
+game's render pass.
+
+The value is a size in MiB, up to 256, held as a fixed slab of 256 KiB slots
+with a clock victim. At `0`, the default, nothing is allocated and the block
+routine is left exactly as the game ships it. A `verify` suffix --
+`archive_cache_mb=8verify` -- commits the slab but never serves from it: every
+block is read and inflated by the engine as usual and then compared, byte for
+byte, against what the cache holds for it. That run costs what an uncached run
+costs and proves the cache never returns a wrong block instead of asserting it;
+any disagreement disables the cache for the rest of the session and says so in
+`tqflicker-hdr.log`. It is worth one boot before trusting a cached one.
+
+**It buys less than the amplification above suggests, and that is measured
+rather than estimated.** Two verification boots on that route found the cache
+never returns a wrong block — 914 blocks compared byte for byte, no
+disagreements — and also found that only 3.8% of block requests at 8 MiB, and
+8.2% at 256 MiB, come back for a block the slab still holds. With a
+quarter-gigabyte cache resident, 91.8% of requests are for a block nothing has
+seen before: the amplification is mostly blocks being *partly consumed* and
+never asked for again, which no cache of any size recovers.
+
+If you want it on, `archive_cache_mb=8verify` with `[debug] trace=1` and no
+`performance_trace` is worth a few hours of ordinary play first: the cache
+installs on its own, never serves, and compares every block byte for byte
+against what the engine produced, so it proves itself on your own routes
+before it is trusted with them. Its log reports back off after the eighth, so
+a long session writes about a kilobyte.
+
+What reuse there is clusters in the frames that hurt — 19.4% of blocks in the
+archive-heaviest frame against 8.2% overall — and nearly all of it fits in 32
+slots, so `archive_cache_mb=8` captures most of the available benefit and
+larger values are close to pointless. Expect roughly a ninth off the single
+worst frame of a session and about 0.15% of wall clock. It defaults to `0`,
+and that default is a fair reflection of the measurement.
+
+The cache is keyed on the archive, the open file handle, and the block's
+offset, compressed size and decompressed size -- all five read out of the
+operands of the seek, the read and the inflate that consume them, and all five
+re-checked against the installed `Engine.dll` before anything is patched. With
+the performance probe on, `arc_cache_hit` against `engine_arc_blocks` is the
+result, `arc_cache_evict` says whether the slab is too small, and
+`arc_cache_bad` must be zero.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
@@ -244,6 +297,13 @@ last one is why a hitch row that used to say only "38 ms" can now name the
 load that caused it. Durations there are microseconds and end in `_us`, so
 `frames.py` counts them separately from the mod's own millisecond phases.
 
+The `arc_cache_*` columns beside them are the mod's, not the game's: they price
+`archive_cache_mb` against the `engine_arc_*` columns it exists to reduce.
+`engine_arc_blocks` keeps counting every block the engine asked for, hit or
+miss, so a cached session's amplification is still comparable to an uncached
+one's; `engine_arc_inflate_us` then covers only the blocks that were actually
+read and inflated.
+
 Those columns come from instrumentation written into `Engine.dll`'s own code,
 so they are gated twice: nothing is installed unless `performance_trace` is on
 **and** `engine_trace` is not `0`, which means a normal boot is byte-identical
@@ -255,8 +315,10 @@ at all and says so in `tqflicker-hdr.log`. `engine_trace=1` is everything;
 larger values are a mask -- `2` loads, `4` archive reads, `8` the fence, `16`
 the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the
 update/render brackets, `256` `Game.dll`'s simulation tick, `512` TQ.exe's
-main loop, `1024` the inside of the window message pump -- so a run that
-misbehaves can be narrowed without a rebuild.
+main loop, `1024` the inside of the window message pump, `2048`
+`Engine.dll`'s array allocator, `4096` the seek and read under the archive
+block routine, `8192` everything in `Engine.dll` that can block -- so a run
+that misbehaves can be narrowed without a rebuild.
 
 `timer_period_ms` is an experiment attached to that trace rather than a
 setting to leave on. Three quarters of the slow message retrievals measured on
@@ -268,8 +330,8 @@ other value (up to 1000) replaces the period `TQ.exe` asks for, so a run can
 test whether the stalls scale with the timer rate. It only takes effect while
 the engine trace is installed.
 
-The `512` group is the only one that patches nothing: it redirects three
-entries of TQ.exe's own import address table, so it is scoped to the one
+The `512`, `1024`, `2048`, `4096` and `8192` groups patch nothing at all: they
+redirect entries of an import address table, so each is scoped to the one
 module being measured and every other caller in the process -- the mod's own
 included -- keeps the real function.
 

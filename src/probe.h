@@ -153,6 +153,30 @@ enum Counter {
     // measured median texture that is ~340 MiB of views, and at the 4K cap's
     // maximum it would be 2.7 GiB, in a process that has about 3.
     CounterUploadLeasedMib,
+    // The archive block cache, from src/arc_cache.cpp. Mod work, on the
+    // engine's threads, which is why it counts through this channel and not
+    // through count().
+    //
+    // `arc_cache_hit` against `engine_arc_blocks` is the whole result: blocks
+    // the engine asked for, over blocks it had to read and inflate. The
+    // denominator keeps its old meaning deliberately -- a hit still counts as
+    // a block requested -- so the amplification figures from runs 10 and 17
+    // stay comparable to a cached run's.
+    //
+    // `arc_cache_bad` must be zero. It counts blocks whose cached copy did not
+    // match what the engine produced for the same key, which is the one
+    // outcome the `verify` mode exists to rule out; a single one disables the
+    // cache for the rest of the session and writes a line to the log.
+    // `arc_cache_skip` counts requests refused before they reached the slab --
+    // a descriptor claiming more than one block's worth -- and a non-zero
+    // reading there means the structure offsets are being read wrong.
+    CounterArcCacheHit,
+    CounterArcCacheHitUs,
+    CounterArcCacheStore,
+    CounterArcCacheEvict,
+    CounterArcCacheVerify,
+    CounterArcCacheBad,
+    CounterArcCacheSkip,
 
     // ---------------------------------------------------------------------
     // Engine.dll's own work, from src/engine_probe.cpp. Everything below is
@@ -324,6 +348,99 @@ enum Counter {
     // anything the game or its window has to do.
     CounterPumpPeekMiss,
     CounterPumpPeekMissUs,
+    // Engine.dll's array allocator, reached through its import table. Run 23
+    // broke the freeze frame down and found 795 ms of 1,310 -- 61% -- inside
+    // Engine::Render and named by nothing: not the level load, not resource
+    // loading, not the archive, not texture creation, not the mod, not the
+    // pump.
+    //
+    // The candidate is heap churn, and it is verified in the disassembly
+    // rather than guessed. FUN_1014d020, the archive `File` constructor,
+    // allocates *two* buffers of up to 256 KiB through `operator new[]`
+    // (Engine's IAT slot 0x2ac318) for every compressed entry opened, and
+    // frees them through `operator delete[]` (0x2ac304) when it closes. That
+    // frame opened 1,299 files: up to 649 MiB of allocate-and-free traffic in
+    // one frame, about 2,600 pairs, in a 32-bit MSVC heap under Wine.
+    //
+    // `_big` is the subset at or above 64 KiB, which is what separates "the
+    // engine makes a great many small allocations" from "the engine allocates
+    // a quarter-megabyte buffer two thousand times a frame". Only the second
+    // is fixable, by pooling the two scratch buffers.
+    CounterEngineHeapAlloc,
+    CounterEngineHeapAllocUs,
+    CounterEngineHeapAllocKib,
+    CounterEngineHeapBig,
+    CounterEngineHeapBigUs,
+    CounterEngineHeapFree,
+    CounterEngineHeapFreeUs,
+    // The two syscalls under the archive block routine, also through Engine's
+    // import table. `engine_arc_inflate_us` brackets the whole routine -- the
+    // seek, the read and the `uncompress` -- so its 580 microseconds a block
+    // is all three together and nothing says which. These two split it: the
+    // inflate is the subtraction.
+    //
+    // That is the number 4.2 and 4.3 are gated on. Mostly zlib points at
+    // libdeflate; mostly syscall points at the bounded prefetch, which given
+    // findings 14-17 -- where one host round trip cost 126-212 ms -- would be
+    // in character for this install.
+    //
+    // Engine.dll's other callers of these two are all in the same archive
+    // module (`FUN_1011bfd0` through `Archive::AddFileFromMemory`), so
+    // comparing `engine_io_read` against `engine_arc_blocks` is what says the
+    // attribution holds.
+    CounterEngineIoSeek,
+    CounterEngineIoSeekUs,
+    CounterEngineIoRead,
+    CounterEngineIoReadUs,
+    CounterEngineIoReadKib,
+    // Everything in Engine.dll that can block, reached through its import
+    // table. Run 24 killed the heap hypothesis -- `operator new[]` and
+    // `delete[]` cost 3.6 ms on a 1,534.8 ms freeze frame and 173 ms over a
+    // whole session -- and left 996 ms of that frame, 65% of it, still named
+    // by nothing.
+    //
+    // What has never been instrumented is the main thread *waiting*. The
+    // region lock was measured at zero contention, but only at three call
+    // sites; the fence was measured at one. Engine.dll's archive lock
+    // (`archive+0x60`), held across every block read, and every other
+    // critical section and wait in the module have been invisible. If the
+    // render thread force-loads a level while the loader thread holds the
+    // archive lock, that block is exactly the shape of the missing time.
+    //
+    // The critical-section hook times only *contended* acquisitions -- it
+    // tries first and takes a timestamp only on failure -- so an uncontended
+    // lock costs one interlocked operation and records nothing, which is what
+    // makes it affordable on a path this hot. These columns are disjoint from
+    // engine_region_lock_* and engine_fence_wait_*: those sites read a
+    // mod-owned cell rather than the import slot, so nothing is counted twice.
+    CounterEngineCsWait,
+    CounterEngineCsWaitUs,
+    CounterEngineObjWait,
+    CounterEngineObjWaitUs,
+    CounterEngineSleep,
+    CounterEngineSleepUs,
+    // The same three split by thread, which run 25 proved is the whole
+    // question. Its `engine_obj_wait_us` read 178.7 seconds and its
+    // `engine_sleep_us` 165.5 over a 96.3-second session -- both larger than
+    // wall clock, because they sum across every thread in the process and
+    // most of that is background threads sitting idle. Unattributed, those
+    // two columns cannot answer anything; `_main` is what makes them mean
+    // something, exactly as it does for the level and resource loads.
+    //
+    // The lead they carry is `Sleep`: 250 calls a frame in frames over 200 ms
+    // against 5.8 in frames under 20, and the four worst frames of the run
+    // carry 406, 653, 436 and 319 of them. That is a poll loop. If it is on
+    // the main thread it is the 958 ms nothing has named -- and the
+    // *requested* total beside the actual is what says whether the cost is
+    // the poll or the host's sleep granularity, which is the difference
+    // between a game bug and something `timeBeginPeriod` could reach.
+    CounterEngineCsWaitMain,
+    CounterEngineCsWaitMainUs,
+    CounterEngineObjWaitMain,
+    CounterEngineObjWaitMainUs,
+    CounterEngineSleepMain,
+    CounterEngineSleepMainUs,
+    CounterEngineSleepMainReqUs,
     CounterCount
 };
 

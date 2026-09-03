@@ -1,5 +1,6 @@
 #include "engine_probe.h"
 
+#include "arc_cache.h"
 #include "detour.h"
 #include "hdr.h"
 #include "probe.h"
@@ -119,22 +120,159 @@ const BYTE kReadFromFileBytes[] = {
 // --- One block read and inflated. Not exported, so identity rests entirely on
 // the bytes: the prologue is the same six bytes as three other targets, and
 // what makes this one itself is the call to zlib's uncompress 0xf6 in.
+//
+// The window runs to the end of the address arithmetic rather than stopping at
+// the prologue, because that arithmetic is the whole structure the block cache
+// keys on. Read it as the derivation it is:
+//
+//   this  = ecx                             Archive*
+//   entry = [ebp+8]   block = [ebp+0xc]   blockBuffer = [ebp+0x10]
+//   esi   = [ecx+0x2c] + entry*0x44        the entry record, stride 0x11*4
+//   edi   = [esi+0x20] + block*0xc         its block descriptor, stride 3*4
+//
+// So `mov eax,[ecx+0x2c]` names the entry table, `shl edx,4 / add edx,[ebp+8] /
+// lea esi,[eax+edx*4]` names the 0x44 stride, `mov eax,[esi+0x20]` names the
+// descriptor array, and `lea ecx,[ebx+ebx*2] / lea edi,[eax+ecx*4]` names the
+// 12-byte descriptor. None of those offsets is taken from a document.
 const DWORD kArchiveBlockRva = 0x11d0e0;
 const BYTE kArchiveBlockBytes[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
     0x83, 0xec, 0x0c,
     0x8b, 0x55, 0x08,                          // mov edx,[ebp+8]   entry index
-    0x8b, 0x41, 0x2c,                          // mov eax,[ecx+0x2c]
+    0x8b, 0x41, 0x2c,                          // mov eax,[ecx+0x2c] entry table
     0xc1, 0xe2, 0x04,                          // shl edx,4
     0x03, 0x55, 0x08,                          // add edx,[ebp+8]   -> index*0x11
     0x53,
-    0x8b, 0x5d                                 // mov ebx,[ebp+0xc] block index
+    0x8b, 0x5d, 0x0c,                          // mov ebx,[ebp+0xc] block index
+    0x56,
+    0x8d, 0x34, 0x90,                          // lea esi,[eax+edx*4] entry, 0x44
+    0x89, 0x4c, 0x24, 0x08,                    // [esp+8] = this
+    0x8b, 0x46, 0x20,                          // mov eax,[esi+0x20] descriptors
+    0x8d, 0x0c, 0x5b,                          // lea ecx,[ebx+ebx*2]
+    0x57,
+    0x8d, 0x3c, 0x88,                          // lea edi,[eax+ecx*4] desc, 0xc
+    0x89, 0x7c, 0x24, 0x10                     // [esp+0x10] = descriptor
 };
-// CALL 0x10065760 -- zlib uncompress, built __fastcall. The displacement is
-// relative and unrelocated, so comparing the five bytes at this exact address
-// is the same statement as "this call goes to the inflate".
-const DWORD kArchiveInflateCallRva = 0x11d1d6;
-const BYTE kArchiveInflateCallBytes[] = {0xe8, 0x85, 0x85, 0xf4, 0xff};
+
+// The seek, which names two more of the key's fields and the syscall that
+// consumes them: `push [edi]` is the descriptor's offset and `push [eax+0xc]`
+// is the open `.arc` file HANDLE, with eax reloaded from the saved `this`. The
+// trailing indirect call is SetFilePointerEx through Engine's IAT, and it is
+// relocated, so it is compared against the slot rather than literally.
+const DWORD kArchiveSeekWindowRva = 0x11d122;
+const BYTE kArchiveSeekWindowBytes[] = {
+    0x8b, 0x44, 0x24, 0x0c,                    // mov eax,[esp+0xc]  this
+    0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+    0xff, 0x37,                                // push [edi]        desc.offset
+    0xff, 0x70, 0x0c,                          // push [eax+0xc]    the HANDLE
+    0xff, 0x15, 0, 0, 0, 0                     // call SetFilePointerEx
+};
+const DWORD kSetFilePointerExSlotRva = 0x2ac190;
+const Relocation kArchiveSeekWindowRelocs[] = {{17, kSetFilePointerExSlotRva}};
+
+// The read. `push [eax+4]` off the reloaded descriptor is the compressed size,
+// `push [edi+4]` off the reloaded blockBuffer is the scratch the compressed
+// bytes land in, and `push [eax+0xc]` is the handle again.
+const DWORD kArchiveReadWindowRva = 0x11d13a;
+const BYTE kArchiveReadWindowBytes[] = {
+    0x6a, 0x00,
+    0x8d, 0x44, 0x24, 0x18, 0x50,              // lea eax,[esp+0x18]; push  read
+    0x8b, 0x44, 0x24, 0x18,                    // mov eax,[esp+0x18] descriptor
+    0xff, 0x70, 0x04,                          // push [eax+4]      desc.csize
+    0x8b, 0x44, 0x24, 0x18,                    // mov eax,[esp+0x18] this
+    0xff, 0x77, 0x04,                          // push [edi+4]      bb.compressed
+    0xff, 0x70, 0x0c,                          // push [eax+0xc]    the HANDLE
+    0xff, 0x15, 0, 0, 0, 0                     // call ReadFile
+};
+const DWORD kReadFileSlotRva = 0x2ac1a4;
+const Relocation kArchiveReadWindowRelocs[] = {{26, kReadFileSlotRva}};
+
+// The inflate, and the single strongest table in this file. In twenty-five
+// bytes it names every remaining field of the cache's key and its destination,
+// in the operands of the call that actually consumes them:
+//
+//   push [ecx+4]        desc.compressedSize   -> uncompress's sourceLen
+//   mov  eax,[ecx+8]    desc.uncompressedSize -> its destLen, written below
+//   push [edi+4]        blockBuffer[1]        -> its source
+//   mov  ecx,[edi+8]    blockBuffer[2]        -> its dest, which is the block
+//   call 0x10065760     zlib uncompress, built __fastcall
+//
+// The displacement is relative and unrelocated, so comparing these bytes at
+// this exact address is the same statement as "this call goes to the inflate",
+// which is what distinguishes this function from the three others that open
+// with `55 8b ec 83 e4 f8`.
+const DWORD kArchiveInflateWindowRva = 0x11d1c2;
+const BYTE kArchiveInflateWindowBytes[] = {
+    0xff, 0x71, 0x04,                          // push [ecx+4]     desc.csize
+    0x8b, 0x41, 0x08,                          // mov eax,[ecx+8]  desc.usize
+    0xff, 0x77, 0x04,                          // push [edi+4]     bb.compressed
+    0x8b, 0x4f, 0x08,                          // mov ecx,[edi+8]  bb.block
+    0x8d, 0x54, 0x24, 0x14,                    // lea edx,[esp+0x14]
+    0x89, 0x44, 0x24, 0x14,                    // [esp+0x14] = desc.usize
+    0xe8, 0x85, 0x85, 0xf4, 0xff               // call 0x10065760
+};
+
+// The epilogue, which is the contract a cache hit has to reproduce exactly:
+// store the block index into the caller's one-slot cache, return true in AL,
+// and pop twelve bytes of arguments. `FUN_1011d240` never looks at the return
+// value, but the stack discipline is not optional.
+const DWORD kArchiveBlockTailRva = 0x11d230;
+const BYTE kArchiveBlockTailBytes[] = {
+    0x89, 0x1f,                                // mov [edi],ebx    cached = block
+    0x5f, 0x5e,
+    0xb0, 0x01,                                // mov al,1
+    0x5b,
+    0x8b, 0xe5, 0x5d,
+    0xc2, 0x0c, 0x00                           // ret 0xc          three args
+};
+
+// The block size, which has exactly one writer in the whole image. A slot is
+// one block, so this is what says a slot is 256 KiB; the cache also re-reads
+// `archive[0x40]` at runtime and refuses to key anything whose archive says
+// otherwise.
+const DWORD kArchiveBlockSizeRva = 0x11ea94;
+const BYTE kArchiveBlockSizeBytes[] = {
+    0xc7, 0x46, 0x40, 0x00, 0x00, 0x04, 0x00   // mov [esi+0x40],0x40000
+};
+
+// --- Engine.dll's array allocator and the two syscalls under the block
+// routine, all four reached through the import table rather than by patching
+// code. The RVAs are identity assertions only; patchImport resolves by name.
+//
+// `??_U@YAPAXI@Z` is `operator new[](unsigned int)` and `??_V@YAXPAX@Z` is
+// `operator delete[](void*)`, both __cdecl, both MSVCR110's. `FUN_1014d020`
+// -- the archive `File` constructor -- calls the first twice per compressed
+// entry opened, for `min(size, blockSize)` each:
+//
+//   1014d0b5  ff 31           push [ecx]         min(compressedSize, 256 KiB)
+//   1014d0b7  ff 15 18c32a10  call [0x102ac318]  operator new[]
+//   1014d0bd  89 43 20        mov [ebx+0x20],eax
+//
+// and `Archive::FreeFileBuffer` (`0x1011dce0`) is literally
+// `PUSH EAX; CALL [0x102ac304]`.
+// The four things in Engine.dll that can block, so that the main thread
+// waiting on the loader thread stops being invisible. Slot RVAs are identity
+// assertions; patchImport resolves by name.
+const DWORD kSleepSlotRva = 0x2ac108;
+const DWORD kWaitForMultipleObjectsSlotRva = 0x2ac154;
+
+const char kNewArrayName[] = "??_U@YAPAXI@Z";
+const char kDeleteArrayName[] = "??_V@YAXPAX@Z";
+const DWORD kNewArraySlotRva = 0x2ac318;
+const DWORD kDeleteArraySlotRva = 0x2ac304;
+// At or above this, an allocation is one of the ones worth separating out --
+// the block scratch buffers are `min(size, 0x40000)` and the `File`'s own
+// decompressed scratch is the entry's full size.
+const unsigned kHeapBigBytes = 64 * 1024;
+
+// Offsets the four windows above establish, named once so the code that reads
+// them says where each came from.
+const unsigned kArchiveEntryTableOffset = 0x2c;
+const unsigned kArchiveHandleOffset = 0xc;
+const unsigned kArchiveBlockSizeOffset = 0x40;
+const unsigned kArchiveEntryStride = 0x44;
+const unsigned kArchiveEntryDescriptorsOffset = 0x20;
+const unsigned kArchiveDescriptorStride = 0xc;
 
 // --- Region::WaitForLoadingToFinish. Seven bytes: `cmp byte [ecx+0x78],1`,
 // `jz -6`, `ret`. The stolen bytes would contain that relative jump, so a
@@ -342,9 +480,17 @@ const unsigned kGroupFrame = 0x80;
 const unsigned kGroupGame = 0x100;
 const unsigned kGroupLoop = 0x200;
 const unsigned kGroupPump = 0x400;
+const unsigned kGroupHeap = 0x800;
+const unsigned kGroupArcIo = 0x1000;
+const unsigned kGroupBlocking = 0x2000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
+// Whether this install() is installing the trace at all. archive_cache_mb can
+// reach install() with the performance probe off, and without this every
+// wants() below would read the trace mask -- which defaults to 1 -- and put
+// the whole instrument in on a boot that asked only for the cache.
+bool g_tracing;
 
 LONG g_installed;
 unsigned g_installedHooks;
@@ -377,6 +523,14 @@ typedef void (__fastcall* EngineUpdateFn)(void* self, void* edx,
                                           const void* frustum, int flag);
 typedef void (__fastcall* EngineRenderFn)(void* self, void* edx);
 typedef void (__fastcall* GameUpdateFn)(void* self, void* edx, int delta);
+typedef void* (__cdecl* NewArrayFn)(size_t bytes);
+typedef void (__cdecl* DeleteArrayFn)(void* block);
+typedef BOOL (WINAPI* SetFilePointerExFn)(HANDLE, LARGE_INTEGER, PLARGE_INTEGER,
+                                          DWORD);
+typedef BOOL (WINAPI* ReadFileFn)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+typedef DWORD (WINAPI* WaitMultipleFn)(DWORD, const HANDLE*, BOOL, DWORD);
+typedef void (WINAPI* SleepFn)(DWORD);
+typedef DWORD (WINAPI* WaitFn)(HANDLE, DWORD);
 
 LoadLevelFn g_loadLevel;
 LoadResourceFn g_loadResource;
@@ -388,6 +542,13 @@ SweepFn g_sweep;
 EngineUpdateFn g_engineUpdate;
 EngineRenderFn g_engineRender;
 GameUpdateFn g_gameUpdate;
+NewArrayFn g_newArray;
+DeleteArrayFn g_deleteArray;
+SetFilePointerExFn g_setFilePointerEx;
+ReadFileFn g_readFile;
+WaitFn g_engineWait;
+WaitMultipleFn g_engineWaitMultiple;
+SleepFn g_engineSleep;
 unsigned g_renderTicks;
 
 Detour g_loadLevelDetour;
@@ -400,6 +561,14 @@ Detour g_waitForLoadingDetour;
 Detour g_engineUpdateDetour;
 Detour g_engineRenderDetour;
 Detour g_gameUpdateDetour;
+CallPatch g_newArrayPatch;
+CallPatch g_deleteArrayPatch;
+CallPatch g_seekPatch;
+CallPatch g_readFilePatch;
+CallPatch g_csPatch;
+CallPatch g_objWaitPatch;
+CallPatch g_objWaitMultiplePatch;
+CallPatch g_enginesleepPatch;
 CallPatch g_lockPatches[kLockSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
@@ -458,14 +627,97 @@ int __fastcall hookReadFromFile(void* self, void* edx, int entry, BYTE* dest,
     return g_readFromFile(self, edx, entry, dest, offset, size, blockBuffer);
 }
 
+// Walks the block routine's own address arithmetic -- the derivation spelled
+// out above kArchiveBlockBytes -- to recover the five fields the cache keys on
+// and the buffer the inflate would have written into.
+//
+// Every dereference is guarded, and the block size is checked against the
+// archive rather than assumed, so a pointer that is not an Archive fails to
+// describe rather than faulting. Refusing is free: the caller falls through to
+// the engine's own read and inflate, which is what happens today.
+bool describeBlock(void* self, unsigned entry, unsigned block,
+                   void* blockBuffer, tq::arccache::Key& key, BYTE** dest) {
+    const BYTE* archive = (const BYTE*)self;
+    if (!tq::detour::readable(archive, kArchiveBlockSizeOffset + 4)) return false;
+    if (*(const uint32_t*)(archive + kArchiveBlockSizeOffset)
+        != tq::arccache::kSlotBytes)
+        return false;
+
+    // 0x400000 entries is sixty times the 67,873 the install actually has, and
+    // it is what keeps entry * 0x44 inside 32 bits.
+    if (entry >= 0x400000u || block >= 0x400000u) return false;
+
+    const BYTE* entryTable =
+        *(const BYTE* const*)(archive + kArchiveEntryTableOffset);
+    const BYTE* record = entryTable + (SIZE_T)entry * kArchiveEntryStride;
+    if (!tq::detour::readable(record, kArchiveEntryStride)) return false;
+
+    const BYTE* descriptors =
+        *(const BYTE* const*)(record + kArchiveEntryDescriptorsOffset);
+    const BYTE* descriptor =
+        descriptors + (SIZE_T)block * kArchiveDescriptorStride;
+    if (!tq::detour::readable(descriptor, kArchiveDescriptorStride))
+        return false;
+
+    if (!tq::detour::readable(blockBuffer, 12)) return false;
+    BYTE* destination = *(BYTE**)((BYTE*)blockBuffer + 8);
+
+    key.archive = self;
+    key.handle = *(void* const*)(archive + kArchiveHandleOffset);
+    key.offset = ((const uint32_t*)descriptor)[0];
+    key.compressed = ((const uint32_t*)descriptor)[1];
+    key.uncompressed = ((const uint32_t*)descriptor)[2];
+    if (!key.uncompressed || key.uncompressed > tq::arccache::kSlotBytes)
+        return false;
+    if (!tq::detour::readable(destination, key.uncompressed)) return false;
+    *dest = destination;
+    return true;
+}
+
 int __fastcall hookArchiveBlock(void* self, void* edx, unsigned entry,
                                 unsigned block, void* blockBuffer) {
     if (!g_archiveBlock) return 0;
+
+    // engine_arc_blocks counts what the engine asked for, hit or miss, so the
+    // 1.8x and 2.3x amplification figures runs 10 and 17 measured stay the
+    // same measurement in a cached run. engine_arc_inflate_us below then
+    // covers only the blocks that were actually read and inflated.
+    tq::probe::engineCount(tq::probe::CounterEngineArcBlocks);
+
+    tq::arccache::Key key = {};
+    BYTE* dest = nullptr;
+    bool keyed = false;
+    if (tq::arccache::running()) {
+        keyed = describeBlock(self, entry, block, blockBuffer, key, &dest);
+        // A refusal is safe -- the engine's own read and inflate run, exactly
+        // as they do at archive_cache_mb=0 -- but it is not expected, so it
+        // gets a column of its own rather than being silent.
+        if (!keyed) tq::probe::engineCount(tq::probe::CounterArcCacheSkip);
+    }
+    if (keyed) {
+        const int64_t looked = tq::probe::now();
+        if (tq::arccache::lookup(key, dest)) {
+            // Everything the original does that anyone downstream can observe:
+            // FUN_1011d240's one-slot cache is told which block its scratch
+            // buffer now holds, and AL comes back 1. What is skipped is the
+            // seek, the read, the archive's own critical section and the
+            // inflate -- see kArchiveBlockTailBytes.
+            *(unsigned*)blockBuffer = block;
+            tq::probe::engineCount(tq::probe::CounterArcCacheHitUs,
+                                   tq::probe::microsecondsSince(looked));
+            tq::arccache::report();
+            return 1;
+        }
+    }
+
     const int64_t started = tq::probe::now();
     const int result = g_archiveBlock(self, edx, entry, block, blockBuffer);
-    tq::probe::engineCount(tq::probe::CounterEngineArcBlocks);
     tq::probe::engineCount(tq::probe::CounterEngineArcInflateUs,
                            tq::probe::microsecondsSince(started));
+    // The routine returns its bool in AL and leaves the rest of EAX holding
+    // the inflated length, so this reads the byte the caller would.
+    if (keyed && (result & 0xff)) tq::arccache::store(key, dest);
+    if (tq::arccache::running()) tq::arccache::report();
     return result;
 }
 
@@ -687,9 +939,7 @@ void __fastcall hookEngineRender(void* self, void* edx) {
                            tq::probe::microsecondsSince(started));
 }
 
-typedef void (WINAPI* SleepFn)(DWORD);
 typedef BOOL (WINAPI* GetMessageFn)(LPMSG, HWND, UINT, UINT);
-typedef DWORD (WINAPI* WaitFn)(HANDLE, DWORD);
 SleepFn g_loopSleep;
 GetMessageFn g_loopGetMessage;
 WaitFn g_loopWait;
@@ -889,6 +1139,139 @@ DWORD __stdcall hookLoopWait(HANDLE handle, DWORD milliseconds) {
     return result;
 }
 
+// Engine.dll's `operator new[]` and `operator delete[]`. The `!g_...` guard
+// is unreachable by construction rather than defensive: redirectImport
+// publishes the original before it patches the slot, and shutdown() restores
+// the slot before it clears the pointer, so there is no window in which the
+// hook is live and the target is null.
+//
+// Everything is counted; `_big` is timed separately as well, because the
+// question is not "does the engine allocate" but "does it allocate a
+// quarter-megabyte buffer thousands of times in one frame".
+void* __cdecl hookNewArray(size_t bytes) {
+    if (!g_newArray) return nullptr;
+    const int64_t started = tq::probe::now();
+    void* block = g_newArray(bytes);
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    tq::probe::engineCount(tq::probe::CounterEngineHeapAlloc);
+    tq::probe::engineCount(tq::probe::CounterEngineHeapAllocUs, elapsed);
+    tq::probe::engineCount(tq::probe::CounterEngineHeapAllocKib,
+                           (uint32_t)((bytes + 1023) >> 10));
+    if (bytes >= kHeapBigBytes) {
+        tq::probe::engineCount(tq::probe::CounterEngineHeapBig);
+        tq::probe::engineCount(tq::probe::CounterEngineHeapBigUs, elapsed);
+    }
+    return block;
+}
+
+void __cdecl hookDeleteArray(void* block) {
+    if (!g_deleteArray) return;
+    const int64_t started = tq::probe::now();
+    g_deleteArray(block);
+    tq::probe::engineCount(tq::probe::CounterEngineHeapFree);
+    tq::probe::engineCount(tq::probe::CounterEngineHeapFreeUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+// The seek and the read the block routine makes, so that
+// engine_arc_inflate_us -- which brackets all three -- can have the inflate
+// recovered from it by subtraction.
+BOOL WINAPI hookSetFilePointerEx(HANDLE file, LARGE_INTEGER distance,
+                                 PLARGE_INTEGER newPointer, DWORD method) {
+    if (!g_setFilePointerEx) return FALSE;
+    const int64_t started = tq::probe::now();
+    const BOOL result = g_setFilePointerEx(file, distance, newPointer, method);
+    tq::probe::engineCount(tq::probe::CounterEngineIoSeek);
+    tq::probe::engineCount(tq::probe::CounterEngineIoSeekUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
+}
+
+BOOL WINAPI hookReadFile(HANDLE file, LPVOID buffer, DWORD bytes,
+                         LPDWORD read, LPOVERLAPPED overlapped) {
+    if (!g_readFile) return FALSE;
+    const int64_t started = tq::probe::now();
+    const BOOL result = g_readFile(file, buffer, bytes, read, overlapped);
+    tq::probe::engineCount(tq::probe::CounterEngineIoRead);
+    tq::probe::engineCount(tq::probe::CounterEngineIoReadUs,
+                           tq::probe::microsecondsSince(started));
+    tq::probe::engineCount(tq::probe::CounterEngineIoReadKib,
+                           (bytes + 1023u) >> 10);
+    return result;
+}
+
+// Every critical section in Engine.dll, not just the three render-path sites
+// the region-lock group covers. Contended acquisitions only: TryEnter first,
+// and a timestamp is taken solely when it fails, so an uncontended lock costs
+// one interlocked operation and records nothing. That is what makes this
+// affordable on a path the module takes constantly -- including the archive's
+// own `archive+0x60`, held across every block read and never measured.
+//
+// Disjoint from engine_region_lock_* by construction: patchCall repointed
+// those three sites at a mod-owned cell, so they no longer read this slot.
+void __stdcall hookEngineEnterCriticalSection(LPCRITICAL_SECTION section) {
+    if (TryEnterCriticalSection(section)) return;
+    const int64_t started = tq::probe::now();
+    EnterCriticalSection(section);
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    tq::probe::engineCount(tq::probe::CounterEngineCsWait);
+    tq::probe::engineCount(tq::probe::CounterEngineCsWaitUs, elapsed);
+    if (onMainThread()) {
+        tq::probe::engineCount(tq::probe::CounterEngineCsWaitMain);
+        tq::probe::engineCount(tq::probe::CounterEngineCsWaitMainUs, elapsed);
+    }
+}
+
+// Both waits fold into one pair of columns, and both are split by thread:
+// unattributed they sum across every thread in the process and read larger
+// than wall clock, which is what run 25 found.
+void countObjectWait(uint32_t elapsed) {
+    tq::probe::engineCount(tq::probe::CounterEngineObjWait);
+    tq::probe::engineCount(tq::probe::CounterEngineObjWaitUs, elapsed);
+    if (onMainThread()) {
+        tq::probe::engineCount(tq::probe::CounterEngineObjWaitMain);
+        tq::probe::engineCount(tq::probe::CounterEngineObjWaitMainUs, elapsed);
+    }
+}
+
+DWORD WINAPI hookEngineWait(HANDLE handle, DWORD milliseconds) {
+    if (!g_engineWait) return WAIT_FAILED;
+    const int64_t started = tq::probe::now();
+    const DWORD result = g_engineWait(handle, milliseconds);
+    countObjectWait(tq::probe::microsecondsSince(started));
+    return result;
+}
+
+DWORD WINAPI hookEngineWaitMultiple(DWORD count, const HANDLE* handles,
+                                    BOOL all, DWORD milliseconds) {
+    if (!g_engineWaitMultiple) return WAIT_FAILED;
+    const int64_t started = tq::probe::now();
+    const DWORD result = g_engineWaitMultiple(count, handles, all, milliseconds);
+    countObjectWait(tq::probe::microsecondsSince(started));
+    return result;
+}
+
+// The requested total beside the actual, for the main thread only. A poll
+// loop that asks for a millisecond four hundred times and is handed two and a
+// half each time is a host-granularity problem and `timeBeginPeriod` can
+// reach it; one that asks for four hundred milliseconds is the game's own and
+// cannot be fixed from here. The two columns say which immediately, and this
+// is the same shape as the loop_sleep_req_us pair added in run 13.
+void WINAPI hookEngineSleep(DWORD milliseconds) {
+    if (!g_engineSleep) return;
+    const int64_t started = tq::probe::now();
+    g_engineSleep(milliseconds);
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    tq::probe::engineCount(tq::probe::CounterEngineSleep);
+    tq::probe::engineCount(tq::probe::CounterEngineSleepUs, elapsed);
+    if (onMainThread()) {
+        tq::probe::engineCount(tq::probe::CounterEngineSleepMain);
+        tq::probe::engineCount(tq::probe::CounterEngineSleepMainUs, elapsed);
+        tq::probe::engineCount(tq::probe::CounterEngineSleepMainReqUs,
+                               milliseconds * 1000u);
+    }
+}
+
 void __fastcall hookGameUpdate(void* self, void* edx, int delta) {
     if (!g_gameUpdate) return;
     const int64_t started = tq::probe::now();
@@ -901,7 +1284,12 @@ void __fastcall hookGameUpdate(void* self, void* edx, int delta) {
 // ---------------------------------------------------------------------------
 // Install.
 
+// The trace's own gate, decided once per install() so that wants() below
+// cannot be asked the question before it has been answered.
+void decideTracing() { g_tracing = tq::probe::enabled() && g_traceMask != 0; }
+
 bool wants(unsigned group) {
+    if (!g_tracing) return false;
     return (g_traceMask & kGroupAll) != 0 || (g_traceMask & group) != 0;
 }
 
@@ -974,28 +1362,85 @@ bool installLoads(HMODULE engine) {
     return true;
 }
 
-bool installArchive(HMODULE engine) {
-    void* target = resolve(engine, kReadFromFileName, kReadFromFileRva);
-    if (target)
-        tq::detour::attach(
-            g_readFromFileDetour, engine, target,
-            signature(kReadFromFileBytes, sizeof(kReadFromFileBytes)), 6,
-            (const void*)&hookReadFromFile, (void**)&g_readFromFile);
-    note("Archive::ReadFromFile", g_readFromFile != nullptr);
+// The three windows a cache hit's correctness rests on, over and above the two
+// that establish the hook's identity: the seek and the read, which name the
+// handle and the descriptor's three fields in the operands of the syscalls
+// that consume them, and the epilogue, which is the contract a hit reproduces.
+// The block size has exactly one writer in the image, and that is checked too.
+//
+// These are required only when the cache is on. The instrument on its own
+// needs the function to *be* the block routine; the cache additionally needs
+// every offset it reads to be the offset the routine reads.
+bool archiveStructureVerified(HMODULE engine) {
+    struct Window {
+        const char* what;
+        DWORD rva;
+        const BYTE* bytes;
+        SIZE_T size;
+        const Relocation* relocations;
+        unsigned relocationCount;
+    };
+    const Window windows[] = {
+        {"seek", kArchiveSeekWindowRva, kArchiveSeekWindowBytes,
+         sizeof(kArchiveSeekWindowBytes), kArchiveSeekWindowRelocs, 1},
+        {"read", kArchiveReadWindowRva, kArchiveReadWindowBytes,
+         sizeof(kArchiveReadWindowBytes), kArchiveReadWindowRelocs, 1},
+        {"epilogue", kArchiveBlockTailRva, kArchiveBlockTailBytes,
+         sizeof(kArchiveBlockTailBytes), nullptr, 0},
+        {"block size", kArchiveBlockSizeRva, kArchiveBlockSizeBytes,
+         sizeof(kArchiveBlockSizeBytes), nullptr, 0},
+    };
+    for (unsigned i = 0; i < sizeof(windows) / sizeof(*windows); ++i) {
+        const Window& w = windows[i];
+        if (tq::detour::matches(engine, (BYTE*)engine + w.rva,
+                                signature(w.bytes, w.size, w.relocations,
+                                          w.relocationCount)))
+            continue;
+        tq::hdr::log("Archive cache: the %s window at %p does not match --"
+                     " refusing to cache\r\n", w.what,
+                     (void*)((BYTE*)engine + w.rva));
+        return false;
+    }
+    return true;
+}
 
-    // The block routine is not exported, so it is verified twice: its own
-    // twenty-four byte prologue, and the call to zlib's uncompress that is the
-    // only thing distinguishing it from three functions with the same opening.
+bool installArchive(HMODULE engine, bool trace, bool cache) {
+    if (trace) {
+        void* target = resolve(engine, kReadFromFileName, kReadFromFileRva);
+        if (target)
+            tq::detour::attach(
+                g_readFromFileDetour, engine, target,
+                signature(kReadFromFileBytes, sizeof(kReadFromFileBytes)), 6,
+                (const void*)&hookReadFromFile, (void**)&g_readFromFile);
+        note("Archive::ReadFromFile", g_readFromFile != nullptr);
+    }
+
+    // The block routine is not exported, so identity rests entirely on the
+    // bytes: its own forty-seven byte prologue and address arithmetic, and the
+    // call to zlib's uncompress that is the only thing distinguishing it from
+    // three functions with the same opening.
     BYTE* block = (BYTE*)engine + kArchiveBlockRva;
     const bool anchored = tq::detour::matches(
-        engine, (BYTE*)engine + kArchiveInflateCallRva,
-        signature(kArchiveInflateCallBytes, sizeof(kArchiveInflateCallBytes)));
+        engine, (BYTE*)engine + kArchiveInflateWindowRva,
+        signature(kArchiveInflateWindowBytes,
+                  sizeof(kArchiveInflateWindowBytes)));
     if (anchored)
         tq::detour::attach(
             g_archiveBlockDetour, engine, block,
             signature(kArchiveBlockBytes, sizeof(kArchiveBlockBytes)), 6,
             (const void*)&hookArchiveBlock, (void**)&g_archiveBlock);
     note("archive block inflate", g_archiveBlock != nullptr);
+
+    // Nothing is committed until the site is proven. A refusal anywhere here
+    // leaves the game byte-identical to archive_cache_mb=0, which is the
+    // default, and says which check refused.
+    if (cache) {
+        if (!g_archiveBlock)
+            tq::hdr::log("Archive cache: the block routine is not hooked --"
+                         " nothing to cache in front of\r\n");
+        else if (archiveStructureVerified(engine))
+            tq::arccache::start();
+    }
     return true;
 }
 
@@ -1134,7 +1579,7 @@ bool redirectImport(CallPatch& patch, HMODULE executable, const char* dll,
                                 replacement))
         return true;
     *original = nullptr;
-    tq::hdr::log("Engine trace: TQ.exe's %s import does not hold %p\r\n",
+    tq::hdr::log("Engine trace: the %s import does not hold %p\r\n",
                  name, target);
     return false;
 }
@@ -1214,6 +1659,96 @@ bool installPump(HMODULE engine) {
     return installed != 0;
 }
 
+// Both of these patch four bytes of a data table and no code at all, and are
+// scoped to Engine.dll -- the mod's own allocations and the game's other
+// modules keep the real functions. The RVA beside each name is an identity
+// assertion: patchImport resolves by name, and this says the slot it found is
+// the slot the audit recorded.
+bool importedSlotHolds(HMODULE engine, const char* dll, const char* name,
+                       DWORD slotRva) {
+    HMODULE provider = GetModuleHandleA(dll);
+    void* exported = provider ? (void*)GetProcAddress(provider, name) : nullptr;
+    void* const* slot = (void* const*)((BYTE*)engine + slotRva);
+    void* bound = tq::detour::readable(slot, sizeof(*slot)) ? *slot : nullptr;
+    if (exported && exported == bound) return true;
+    tq::hdr::log("Engine trace: %s slot at +%#lx holds %p, %s exports %p\r\n",
+                 name, (unsigned long)slotRva, bound, dll, exported);
+    return false;
+}
+
+bool installHeap(HMODULE engine) {
+    unsigned installed = 0;
+    if (importedSlotHolds(engine, "MSVCR110.dll", kNewArrayName,
+                          kNewArraySlotRva))
+        installed += redirectImport(g_newArrayPatch, engine, "MSVCR110.dll",
+                                    kNewArrayName, (void**)&g_newArray,
+                                    (const void*)&hookNewArray) ? 1u : 0u;
+    if (importedSlotHolds(engine, "MSVCR110.dll", kDeleteArrayName,
+                          kDeleteArraySlotRva))
+        installed += redirectImport(g_deleteArrayPatch, engine, "MSVCR110.dll",
+                                    kDeleteArrayName, (void**)&g_deleteArray,
+                                    (const void*)&hookDeleteArray) ? 1u : 0u;
+    tq::hdr::log("Engine trace: array allocator %u/2 imports redirected\r\n",
+                 installed);
+    if (installed) ++g_installedHooks;
+    return installed != 0;
+}
+
+bool installArchiveIo(HMODULE engine) {
+    unsigned installed = 0;
+    if (importedSlotHolds(engine, "kernel32.dll", "SetFilePointerEx",
+                          kSetFilePointerExSlotRva))
+        installed += redirectImport(g_seekPatch, engine, "kernel32.dll",
+                                    "SetFilePointerEx",
+                                    (void**)&g_setFilePointerEx,
+                                    (const void*)&hookSetFilePointerEx) ? 1u : 0u;
+    if (importedSlotHolds(engine, "kernel32.dll", "ReadFile",
+                          kReadFileSlotRva))
+        installed += redirectImport(g_readFilePatch, engine, "kernel32.dll",
+                                    "ReadFile", (void**)&g_readFile,
+                                    (const void*)&hookReadFile) ? 1u : 0u;
+    tq::hdr::log("Engine trace: archive I/O %u/2 imports redirected\r\n",
+                 installed);
+    if (installed) ++g_installedHooks;
+    return installed != 0;
+}
+
+// Installs last, and that ordering is required rather than tidy: the region
+// lock and the fence groups read this module's EnterCriticalSection and
+// WaitForSingleObject import slots to check they still hold kernel32's
+// exports, and would refuse if this group had already redirected them.
+bool installBlocking(HMODULE engine) {
+    unsigned installed = 0;
+    if (importedSlotHolds(engine, "kernel32.dll", "EnterCriticalSection",
+                          kEnterCriticalSectionSlotRva)
+        && tq::detour::patchImport(
+               g_csPatch, engine, "kernel32.dll", "EnterCriticalSection",
+               (const void*)&EnterCriticalSection,
+               (const void*)&hookEngineEnterCriticalSection))
+        ++installed;
+    if (importedSlotHolds(engine, "kernel32.dll", "WaitForSingleObject",
+                          kWaitForSingleObjectSlotRva))
+        installed += redirectImport(g_objWaitPatch, engine, "kernel32.dll",
+                                    "WaitForSingleObject",
+                                    (void**)&g_engineWait,
+                                    (const void*)&hookEngineWait) ? 1u : 0u;
+    if (importedSlotHolds(engine, "kernel32.dll", "WaitForMultipleObjects",
+                          kWaitForMultipleObjectsSlotRva))
+        installed += redirectImport(g_objWaitMultiplePatch, engine,
+                                    "kernel32.dll", "WaitForMultipleObjects",
+                                    (void**)&g_engineWaitMultiple,
+                                    (const void*)&hookEngineWaitMultiple)
+                                        ? 1u : 0u;
+    if (importedSlotHolds(engine, "kernel32.dll", "Sleep", kSleepSlotRva))
+        installed += redirectImport(g_enginesleepPatch, engine, "kernel32.dll",
+                                    "Sleep", (void**)&g_engineSleep,
+                                    (const void*)&hookEngineSleep) ? 1u : 0u;
+    tq::hdr::log("Engine trace: blocking %u/4 imports redirected\r\n",
+                 installed);
+    if (installed) ++g_installedHooks;
+    return installed != 0;
+}
+
 bool installFrame(HMODULE engine) {
     void* target = resolve(engine, kEngineUpdateName, kEngineUpdateRva);
     if (target)
@@ -1263,10 +1798,22 @@ void readOptions(const wchar_t* iniPath) {
         ? GetPrivateProfileIntW(L"performance", L"timer_period_ms", 0, iniPath)
         : 0;
     g_timerPeriodMs = period > 0 && period <= 1000 ? (unsigned)period : 0u;
+    // The block cache rides on this file's one hook into the archive path, so
+    // it reads its option here -- but it is a fix rather than an instrument,
+    // and install() lets it in without the trace.
+    tq::arccache::readOptions(iniPath);
 }
 
 bool install(HMODULE engine) {
-    if (!engine || !tq::probe::enabled() || !g_traceMask) return false;
+    if (!engine) return false;
+    // Two gates, and the cache opens neither of them: the trace still needs
+    // the probe on and a non-zero mask, and stays byte-identical to a build
+    // without this file otherwise. What archive_cache_mb adds is a third way
+    // in that installs exactly one hook and no instrumentation -- because it
+    // is a game-behaviour change and has to work on a boot with the probe off.
+    const bool cache = tq::arccache::configured();
+    decideTracing();
+    if (!g_tracing && !cache) return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
     if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
@@ -1281,7 +1828,8 @@ bool install(HMODULE engine) {
 
     g_installedHooks = 0;
     if (wants(kGroupLoads)) installLoads(engine);
-    if (wants(kGroupArchive)) installArchive(engine);
+    if (wants(kGroupArchive) || cache)
+        installArchive(engine, wants(kGroupArchive), cache);
     if (wants(kGroupFence)) installFence(engine);
     if (wants(kGroupLock)) installRegionLock(engine);
     if (wants(kGroupSweeps)) installSweeps(engine);
@@ -1290,9 +1838,14 @@ bool install(HMODULE engine) {
     if (wants(kGroupGame)) installGame();
     if (wants(kGroupLoop)) installLoop();
     if (wants(kGroupPump)) installPump(engine);
+    if (wants(kGroupHeap)) installHeap(engine);
+    if (wants(kGroupArcIo)) installArchiveIo(engine);
+    if (wants(kGroupBlocking)) installBlocking(engine);
 
-    tq::hdr::log("Engine trace: mask=0x%x hooks=%u main thread id at %p\r\n",
-                 g_traceMask, g_installedHooks, (const void*)g_mainThreadId);
+    tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, hooks=%u, main thread"
+                 " id at %p\r\n", g_tracing ? "on" : "off", g_traceMask,
+                 cache ? "requested" : "off", g_installedHooks,
+                 (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
     InterlockedExchange(&g_installed, 0);
     return false;
@@ -1300,8 +1853,29 @@ bool install(HMODULE engine) {
 
 void shutdown() {
     reportMessages();
+    // Safe to run before the block hook is unpatched: stop() clears the slab
+    // pointer under its own lock and only releases the pages afterwards, and
+    // both lookup and store re-check it inside that lock, so a call already in
+    // flight finds an empty cache rather than freed memory. (Titan Quest never
+    // reaches this at all, which is why the cache reports during the session.)
+    tq::arccache::stop();
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::restoreCall(g_enginesleepPatch);
+    g_engineSleep = nullptr;
+    tq::detour::restoreCall(g_objWaitMultiplePatch);
+    g_engineWaitMultiple = nullptr;
+    tq::detour::restoreCall(g_objWaitPatch);
+    g_engineWait = nullptr;
+    tq::detour::restoreCall(g_csPatch);
+    tq::detour::restoreCall(g_readFilePatch);
+    g_readFile = nullptr;
+    tq::detour::restoreCall(g_seekPatch);
+    g_setFilePointerEx = nullptr;
+    tq::detour::restoreCall(g_deleteArrayPatch);
+    g_deleteArray = nullptr;
+    tq::detour::restoreCall(g_newArrayPatch);
+    g_newArray = nullptr;
     tq::detour::restoreCall(g_dispatchPatch);
     g_dispatchMessage = nullptr;
     tq::detour::restoreCall(g_peekPatch);
@@ -1357,6 +1931,7 @@ void shutdown() {
     g_loadLevel = nullptr;
     g_mainThreadId = nullptr;
     g_installedHooks = 0;
+    g_tracing = false;
     InterlockedExchange(&g_installed, 0);
 }
 
@@ -1366,6 +1941,10 @@ void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
     hookEnterCriticalSection(section);
 }
 void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
+bool wantsForTest(unsigned group) {
+    decideTracing();
+    return wants(group);
+}
 #endif
 
 }  // namespace engineprobe

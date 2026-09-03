@@ -69,6 +69,8 @@ const char* const kCounterNames[CounterCount] = {
     "upload_unmap_inline_us", "upload_release_us",
     "loose_open", "loose_probe", "loose_probe_us", "loose_reject_oversize",
     "arc_open", "upload_leased_mib",
+    "arc_cache_hit", "arc_cache_hit_us", "arc_cache_store", "arc_cache_evict",
+    "arc_cache_verify", "arc_cache_bad", "arc_cache_skip",
     // Engine.dll's own work. Durations are `_us` here too, and for the same
     // reason: frames.py must not charge the game's loading to the mod.
     "engine_level_load", "engine_level_load_us", "engine_level_load_main",
@@ -95,7 +97,18 @@ const char* const kCounterNames[CounterCount] = {
     "loop_sound", "loop_sound_us", "loop_quests", "loop_quests_us",
     "loop_pump", "loop_pump_us",
     "pump_peek", "pump_peek_us", "pump_dispatch", "pump_dispatch_us",
-    "pump_peek_miss", "pump_peek_miss_us"
+    "pump_peek_miss", "pump_peek_miss_us",
+    "engine_heap_alloc", "engine_heap_alloc_us", "engine_heap_alloc_kib",
+    "engine_heap_big", "engine_heap_big_us",
+    "engine_heap_free", "engine_heap_free_us",
+    "engine_io_seek", "engine_io_seek_us",
+    "engine_io_read", "engine_io_read_us", "engine_io_read_kib",
+    "engine_cs_wait", "engine_cs_wait_us",
+    "engine_obj_wait", "engine_obj_wait_us",
+    "engine_sleep", "engine_sleep_us",
+    "engine_cs_wait_main", "engine_cs_wait_main_us",
+    "engine_obj_wait_main", "engine_obj_wait_main_us",
+    "engine_sleep_main", "engine_sleep_main_us", "engine_sleep_main_req_us"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");

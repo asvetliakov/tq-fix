@@ -40,6 +40,20 @@ namespace engineprobe {
 //      loop that does work rather than return a pointer
 //1024  inside the pump: PeekMessageA and DispatchMessageA, which are
 //      Engine.dll's imports rather than the executable's
+//2048  Engine.dll's operator new[] and operator delete[]. Run 23 broke the
+//      freeze frame down and found 61% of it named by nothing; the archive
+//      File constructor allocates two buffers of up to 256 KiB per compressed
+//      entry opened, and that frame opened 1,299 of them.
+//4096  the seek and the read under the archive block routine, so the inflate
+//      can be recovered from engine_arc_inflate_us by subtraction -- the
+//      number 4.2 and 4.3 are gated on
+//8192  everything in Engine.dll that can block: every critical section
+//      (contended acquisitions only), both waits, and Sleep. Run 24 killed
+//      the heap candidate and left 996 ms of a 1,534.8 ms frame unnamed; the
+//      main thread waiting on the loader thread has never been measured
+//      outside three lock sites and one fence. Installs last, because the
+//      region-lock and fence groups check these same slots still hold
+//      kernel32's exports.
 void readOptions(const wchar_t* iniPath);
 
 // [performance] timer_period_ms, an experiment rather than a fix.
@@ -69,6 +83,10 @@ void shutdown();
 // with the trace off installed nothing at all.
 unsigned installedForTest();
 void setTraceMaskForTest(unsigned mask);
+// Whether install() would install one trace group, decided the way install()
+// decides it. archive_cache_mb can reach install() with the performance probe
+// off, and this is what says the trace does not come with it.
+bool wantsForTest(unsigned group);
 // The region-lock thunk, so the off-game test can drive it both contended and
 // not. It enters the section exactly as EnterCriticalSection would.
 void enterCriticalSectionForTest(LPCRITICAL_SECTION section);

@@ -2,8 +2,9 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Both are current as of the Stage 3
-work on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Both are current as of run 26 on
+branch `stutter-mitigation`. **Start with "The order of work" and "Stage 5.1,
+ready to build" near the end — everything above them is history.**
 
 ## Read these first
 
@@ -12,9 +13,11 @@ work on branch `stutter-mitigation`.
    measured away.
 2. `research/streaming/findings.md` — §4–§7 for the probe's blindness, the
    archive `File` class and the verified patch sites; **§8–§17 for everything
-   Stage 3 measured**, which is where the current picture lives.
+   Stage 3 measured**, which is where the current picture lives; **§18 for the
+   block routine**, read end to end, which is what Stage 4.1 is built on.
 3. `research/streaming/arc-format.md` — the container format and what was
-   checked across all 135 archives. R1 there is what Stage 4.1 is built on.
+   checked across all 135 archives. Read R1 for the container, not for the
+   runtime structures: §18 records one field the engine rewrites at load.
 
 ## The install this is built for
 
@@ -44,6 +47,8 @@ if it objects, recreate `Settings/` containing just those.
 | `7af497d`, `2c10504`, `b7352d7` | The rest of the loop, and the message pump split. Eleven imports of TQ.exe and two of `Engine.dll`. |
 | `53773b3`, `60950cf`, `e49d274` | Greece; the message histogram; the timer experiment and its `[performance] timer_period_ms` switch. |
 | `96527e6` | The pump closed: the timer is not the game's, and the re-arm path is refused. |
+| `6d760c2` | `verify-sites.py`, which reads every byte table out of the source and compares it to the installed binaries. |
+| *this session* | **Stage 4.1** — `src/arc_cache.{h,cpp}`, `[performance] archive_cache_mb`, seven `arc_cache_*` columns, five more verified windows in the block routine. Then six measurement runs (21–26) and four more instrument groups: the array allocator (`2048`), the archive syscalls (`4096`), everything that blocks (`8192`), and the `_main` split on all three. Findings §18–§25. |
 
 Verification is `npm run doctor && npm run build && npm run selftest`.
 
@@ -169,11 +174,16 @@ reasoning; they are worth reading before re-running anything.
 | 18 | The message histogram: `WM_TIMER` is 76% of slow retrievals. |
 | 19 | `SetTimer` is never called while installed. |
 | 20 | The timer has no window — the re-arm experiment cannot work. |
+| 21 | **The block cache is correct** — 286 blocks compared byte for byte, 0 mismatches, 0 skips. And 99.6% of stores evicted a live block, so its 3.8% hit rate measures 32 slots, not reuse. |
+| 22 | **The ceiling.** 256 MiB / 1,024 slots: 8.2% session, 19.4% on the heaviest frame, against 3.8% / 17.3% at 8 MiB. 32x the memory buys 2 points where it matters. The 1.8x is partial consumption, not re-inflation. |
+| 23 | **Serving.** `engine_arc_inflate_us` 4,310 → 4,180 ms; a hit costs **1.4 µs**, not the 25 assumed. And the freeze frame broken down: 61% of it is named by nothing, with a verified candidate. |
+| 24 | **The heap is innocent** — 173 ms a session, 3.6 ms on the freeze frame. And the block routine splits **77% zlib / 23% ReadFile / 0.1% seek**, the opposite of the prediction: 4.2 is dead, 4.3 is the only archive item left with a number. 996 ms of the frame still unnamed. |
+| 25 | **The archive lock is innocent too** — 0 contended acquisitions on the freeze frame, 222 ms a session across every critical section in Engine.dll. The waits/sleeps were built without a `_main` split and read larger than wall clock. But **`Sleep` runs 250×/frame in frames over 200 ms against 5.8 normally** — a poll loop. |
+| 26 | **The main thread polls with `Sleep(1)`** — 350 calls / 435 ms inside a 513 ms forced level load. Granularity is only 1.24×, so `timeBeginPeriod` is worth ~85 ms, not the lever. **And the freeze frames are three different mechanisms, not one.** |
 
-## Next: Stage 4.1 — the only thing left with both a number and a fix
+## Stage 4.1: built, measured, and marginal
 
-The archive block cache, and it is now the only thing left worth building.
-Measured in two acts:
+The archive block cache. What it was sized against, measured in two acts:
 
 | | blocks | inflated | requested | amplification | inflate |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -184,23 +194,422 @@ It attacks `Engine::Render`, which is the half that is ours, and the base game
 wastes proportionally more than the expansion — which is what a one-entry
 cache in front of a 2 GB file does when the reads are smaller.
 
-The design is §4.1 of the plan and R1 of `arc-format.md`: an inline detour on
-the block routine `FUN_1011d0e0` — already hooked and verified for
-`engine_arc_blocks` / `engine_arc_inflate_us`, so the site needs no new
-reverse engineering — keyed on `{archive, file handle, block offset,
-compressed size, uncompressed size}`, a fixed slab in 256 KiB slots with a
-clock victim, and a lock held only across lookup and insert, never across the
-`ReadFile` or the inflate.
+`src/arc_cache.{h,cpp}` is it: a fixed slab of 256 KiB slots with a clock
+victim, keyed on `{archive, file handle, block offset, compressed size,
+uncompressed size}`, behind the detour on `FUN_1011d0e0` that was already
+there for `engine_arc_blocks`. The lock is held across the lookup and the copy
+out and across the insert, and never across the `ReadFile` or the inflate.
+`archive_cache_mb` defaults to `0`, which allocates nothing and leaves the
+block routine byte-identical to today.
 
-Two things the plan asks for that should not be dropped: `archive_cache_mb`
-defaults to `0`, which allocates nothing and is byte-identical to today; and
-`8verify` inflates anyway and `memcmp`s for one measurement boot, so the first
-run *proves* the cache never returns a wrong block rather than asserting it.
+**Read `findings.md` §18 before touching any of it.** The block routine was
+re-read end to end against the pinned binary rather than taken from §6/§7, and
+three things came out of that which the documents did not say:
 
-Stage 5 stays parked: its premise is confirmed — `Region::LoadLevel` is 100%
-main-thread and cost 505.7 ms in the worst frame — but exactly **one frame in
-7,347** has a load costing over a millisecond, so it fixes the worst frame of
-a session and nothing else. Stage 4.2 and 4.3 stay gated on what 4.1 leaves.
+- `entry+0x20` is a **pointer** at runtime where the on-disk file record has
+  `firstBlockIndex`, an integer. The engine rewrites it when it opens the
+  archive. Building the key from `arc-format.md`'s layout would have
+  dereferenced an index.
+- The uncompressed branch never reaches the block routine at all —
+  `Archive::ReadFromFile` branches on the compressed bit at `1011d390` — so
+  the 6,880 uncompressed dialog entries are not a hazard for 4.1. They will be
+  for 4.2.
+- A hit's whole observable contract is `mov [edi],ebx` and `mov al,1`, from
+  the epilogue at `1011d230`. It also takes the archive's critical section
+  zero times, which is a contention win nobody costed.
+
+`8verify` came out differently from the plan and better: it never serves, and
+compares **on insert** against what the engine just produced for a key that is
+already resident. Every request that would have been a hit becomes a proof, at
+the cost of an uncached run, with no shadow buffer and no thread-local state.
+
+Five new windows in that routine are byte-verified — the forty-seven byte
+address derivation, the seek, the read, the inflate and the epilogue, plus the
+block-size writer at `1011ea94` — and `verify-sites.py` additionally checks
+every offset `arc_cache.cpp` dereferences with against the *operand* that uses
+it. Perturbing one constant fails the tool; that was tested.
+
+**Runs 21 and 22 have been run, and Stage 4.1 is answered.** `findings.md`
+§19 and §20 are the record. Both were `verify` boots, so **no block has ever
+actually been served**.
+
+*It is correct, and that is not in doubt.* Across the two runs: **914 blocks
+compared byte for byte, 0 mismatches, 0 `arc_cache_skip` over 15,186
+requests.** `describeBlock` never once refused — so §18's offsets are right at
+runtime on every archive the route touched, not merely right in the byte
+tables. Run 22 exercised 32x as many distinct keys as run 21.
+
+*Its value is small, and the plan's premise was wrong.*
+
+| | 8 MiB / 32 slots | 256 MiB / 1,024 slots |
+| --- | ---: | ---: |
+| would-be hits, session | 3.8% | **8.2%** |
+| frames > 200 ms | 13.3% | 14.4% |
+| heaviest frame | 17.3% | **19.4%** |
+| evictions | 99.6% of stores | 85.4% |
+
+**32x the address space buys 4.4 points of session hit rate and 2.1 points
+where it matters.** With 1,024 blocks resident, 91.8% of requests are still
+for a block nothing has seen before — so §8's claim that the 1.8x is "the
+single-slot cache re-inflating what it has already inflated" is **measured
+false**, and §8 now says so. The excess is partial consumption: a 218 KiB read
+at an arbitrary offset straddles 1.52 blocks and throws away the unused head
+and tail, and nothing comes back for them.
+
+What reuse exists is **burst-local** and lands where it hurts — 19.4% on the
+archive-heaviest frame against 8.2% overall — but nearly all of it is inside a
+window of a few dozen blocks, which is why 32 slots gets 17.3% of that frame
+and 1,024 gets 19.4%.
+
+Computed value, at 562 µs a block: **~136 ms off the worst frame of a session
+for 8 MiB**, ~152 ms for 256 MiB. About a ninth of a 1,488 ms frame, which
+stays over 1.3 s either way. Session-wide it is 0.15%.
+`proc_avail_va_mib` never fell below 3,458 MiB with 256 MiB committed, so
+address space was never the limit — the locality was.
+
+**The decision is yours and it is genuinely close.** 8 MiB is free, proven,
+and takes a ninth off the one frame a session that actually reads as a freeze;
+it also does not change the experience. It ships at `0` either way.
+
+**Run 23 served blocks for the first time.** `engine_arc_inflate_us` 4,310 →
+4,180 ms, 291 hits, and **a hit costs 1.4 µs rather than the 25 assumed** (420
+µs over 291 hits) — so §20's estimate was pessimistic by fifteen times on the
+per-hit cost, though the verdict stands because the limit is the hit *rate*.
+Three runs: **1,205 blocks compared byte for byte, 0 mismatches, 0 skips over
+22,684 requests.** `archive_cache_mb=8` is correct, nearly free, and worth
+~130 ms a session with ~140 of it on the worst frame. It ships at `0`; turning
+it on is a judgement call, not a measurement.
+
+## Run 23's frame anatomy, and a candidate that did not survive
+
+Run 23's frame 4311, **1,310.2 ms** — the zone transition — is the first
+complete anatomy of the hitch this project exists to fix:
+
+```
+engine_render               1,303.9 ms    99.5% of the frame
+  |- Region::LoadLevel        508.8 ms    38.8%   (100% main thread)
+  |    |- LoadResource        366.1 ms
+  |         |- read+inflate   259.8 ms            (1,468 blocks, 254 hits)
+  |- texture_create            25.2 ms            (715 textures)
+  +- UNNAMED                  795.1 ms    60.7% of the frame
+```
+
+**The whole archive path is 260 ms of 1,310.** 4.1 is done, and 4.2 and 4.3
+are arguing over a fifth of this frame. **The level load is 509 ms and wholly
+main-thread**, which is Stage 5 and is worth more than all of Stage 4.
+**And 795 ms — 61% — is named by nothing**, and has been the largest
+unexplained cost in this project since run 8.
+
+**It now has a verified candidate.** `FUN_1014d020`, the archive `File`
+constructor, allocates *two* buffers of up to 256 KiB via `operator new[]`
+(`0x102ac318`) for every compressed entry opened, and frees them on close.
+Frame 4311 opened **1,299** of them — up to **649 MiB of `new[]`/`delete[]` in
+one frame**, ~2,600 alloc/free pairs, in a 32-bit MSVC heap under Wine. The
+plan already names this and declines it for want of evidence; frame 4311 is
+that evidence's shape.
+
+**Run 24 answered both instruments, and the answers were a deletion and a
+reversal.** `findings.md` §23.
+
+*The heap is innocent.* `operator new[]` and `delete[]` across all of
+Engine.dll cost **173 ms a session and 3.6 ms on the 1,534.8 ms freeze frame**
+— 7,324 allocations and 6,471 frees, 150 MiB of churn, for three and a half
+milliseconds. Wine's heap is not slow. §21's candidate is gone and **pooling
+the archive `File`'s scratch buffers is struck from the plan.**
+
+*And I had the read/inflate split backwards.* I predicted syscalls on the
+strength of §14–§17's 126–212 ms host round trips. Wrong:
+
+| | session | per block | share |
+| --- | ---: | ---: | ---: |
+| whole block routine | 4,543 ms | 594 µs | 100% |
+| **zlib `uncompress`** | **3,494 ms** | **457 µs** | **76.9%** |
+| `ReadFile` | 1,043 ms | 136 µs | 23.0% |
+| `SetFilePointerEx` | 5 ms | 1 µs | 0.1% |
+
+`engine_io_read` counted 7,761 against `engine_arc_blocks`' 7,646, which is the
+attribution check. File I/O under CrossOver is **not** the pathology the
+message pump is: the seek is free, and `ReadFile` moved 626 MiB in 1,043 ms
+(~600 MB/s), so it pays for bytes rather than round trips.
+
+- **4.2, the bounded prefetch, is dead and struck.** Its pitch was 86 syscall
+  pairs per texture; the syscall half is worth 5 ms a session, batching moves
+  the same bytes, and 4.2 deliberately over-reads so it would move more.
+- **4.3, libdeflate, is the only archive item left with a number**: 3,494 ms a
+  session, 189 ms on the freeze frame, and libdeflate is typically 2–3× faster.
+  Still the riskiest item in the plan, but no longer a coin flip.
+
+## Run 24 left the frame more unexplained, not less
+
+```
+frame 1906, 1,534.8 ms
+  engine_render                1,529.0 ms   99.6%
+    |- Region::LoadLevel         505.7 ms   (100% main thread)
+    |    |- LoadResource         404.7 ms
+    |         |- read + inflate  311.2 ms   (122 read, 189 zlib)
+    |- texture_create             23.4 ms
+    |- heap alloc + free           3.6 ms
+    +- STILL UNNAMED             996.4 ms   64.9%
+```
+
+A 908 ms frame from the same run has `Region::LoadLevel` at **0.01 ms** and
+still carries 758 ms unnamed — so the missing time is not a side effect of
+level loading.
+
+**The obvious unmeasured thing: every instrument here times the main thread
+*doing* something. Nothing has ever timed it waiting.** The region lock read
+zero contention at three call sites; the fence 1.6 ms at one. **Engine.dll's
+archive lock `archive+0x60` is held across every one of 7,646 block reads a
+session — 136 µs of `ReadFile` each — and has never been instrumented.** If
+the render thread force-loads a level inside that window it blocks, invisibly.
+Right shape, roughly right size.
+
+**Runs 25 and 26 closed the waiting question.** `findings.md` §24 and §25.
+
+*Locks are innocent at whole-module scope.* `engine_cs_wait` on run 25's
+freeze frame: 0 contended acquisitions, 0.00 ms; 222 ms a session across every
+critical section in Engine.dll, the archive's own `archive+0x60` included.
+§8's per-site region-lock zero now generalises: **lock contention is not a
+mechanism in this game on this machine.**
+
+*Run 25's waits/sleeps were built without a `_main` split* and read larger
+than wall clock (183 s of object wait in a 96 s session) because they summed
+across every thread. My error; §24 records it. Run 26 added the split.
+
+*The main thread does poll, and it is the game's own loop.*
+
+| | all threads | **main thread** |
+| --- | ---: | ---: |
+| `engine_obj_wait` | 183,036 ms | **158 ms** |
+| `engine_sleep` | 164,060 ms | **518 ms** |
+
+```
+frame 1911, 1,376.9 ms
+  engine_render                1,371.1 ms
+    |- Region::LoadLevel         512.6 ms   (100% main thread)
+    |- main-thread Sleep         434.9 ms   350 calls, 350 ms requested
+    |- texture_create             23.5 ms
+    |- heap / locks / waits        3.6 ms / 0.0 / 0.0
+```
+
+**350 `Sleep(1)` calls on the main thread in one frame** — 84% of the whole
+session's main-thread sleeping. The forced level load is 85% *waiting*.
+
+*The granularity lever is small.* 418 calls asked 418 ms and got 518 ms —
+**1.24×**, not the 2–15× §24 hoped for. `timeBeginPeriod` (a `winmm` export,
+in the library this mod *is*) would recover ~100 ms a session and ~85 ms of
+the freeze frame. Nearly free, worth a switch eventually, not the fix.
+
+## The finding that reorganises the plan: the freeze is three mechanisms
+
+Run 26's three worst frames have almost nothing in common:
+
+| | frame 1911 | frame 3168 | frame 6914 |
+| --- | ---: | ---: | ---: |
+| frame | 1,376.9 ms | 1,113.3 ms | 437.2 ms |
+| `engine_render` | 1,371.1 ms | 1,040.3 ms | **52.5 ms** |
+| `Region::LoadLevel` main | 512.6 ms | **0.02 ms** | 0.00 ms |
+| main-thread `Sleep` | **434.9 ms** | 0.00 ms | 0.00 ms |
+| main-thread `EnterCriticalSection` | 0.00 ms | **50.2 ms** | 0.00 ms |
+| main-thread object wait | 0.00 ms | 0.05 ms | **56.2 ms** |
+| `texture_create` | 23.5 ms | **193.3 ms** | 1.9 ms |
+| `arc_open` | 1,299 | 199 | — |
+
+- **1911 — the zone transition.** Forced synchronous load, 85% a `Sleep(1)`
+  poll. **Stage 5.1 addresses this one and only this one.**
+- **3168 — a render hitch with no level load at all** (0.02 ms) and still
+  1,040 ms in `Engine::Render`: 193 ms texture creation, 276 ms inflate,
+  50 ms main-thread lock contention, ~790 ms unaccounted. Its own mechanism,
+  its own instrument needed.
+- **6914 — not in `Engine::Render` at all** (52.5 of 437 ms). The §13–§17
+  message-pump class. Closed as a host question.
+
+**"The worst frame" has been three different frames wearing the same number**,
+and every attribution in §21–§24 was computed against whichever happened to be
+slowest that run. Any future claim about it must say which class it means.
+
+## A pattern in my own errors, worth naming
+
+§21 predicted heap churn. §23 predicted syscalls over zlib. §23 predicted lock
+contention. §24 predicted sleep granularity. **All four were mechanisms
+verified in the disassembly, plausible in shape, and wrong about magnitude.**
+Each cost one boot to kill because the instrument went in before the fix. That
+discipline is the reason to keep resisting the urge to build first.
+
+## The order of work, as it now stands
+
+1. **Stage 5.1 — build it next. It is the best-founded item in the plan.**
+   See the section below; the reverse engineering is done and verified.
+2. **Then widen the game's preload distance.** Async alone gives pop-in,
+   widening alone is worse (measured by the reporter), the two together are
+   preloading without pop-in.
+3. **Instrument frame 3168's class** — a render hitch with no level load.
+   ~790 ms unaccounted, and the only footholds are 193 ms of texture creation
+   and 50 ms of main-thread lock contention.
+4. **4.3 (libdeflate)** — 3,494 ms a session of zlib at 457 µs a block.
+   Riskiest item in the plan; after 5.1.
+5. **`timeBeginPeriod` behind a switch** — ~100 ms a session. Nearly free,
+   nearly pointless. Whenever.
+6. ~~4.2, bounded prefetch~~ — **struck**, run 24.
+7. ~~Pooling the archive scratch buffers~~ — **struck**, run 24.
+8. ~~The archive block cache beyond 8 MiB~~ — **struck**, run 22.
+
+**Deferred at the reporter's request:** `cache/runs/play-with-cache-verify.ini`
+and `play-with-cache.ini` — the long-play validation and then serving. To be
+done once the project is otherwise finished, since hour-long sessions are a
+poor fit for the measure-fix loop. `archive_cache_mb` stays at `0` until then.
+
+**Stage 5 is no longer parked, and the reason it was parked has been
+answered.** The old objection was that exactly one frame in 7,347 has a
+`Region::LoadLevel` costing over a millisecond, so it fixes the worst frame of
+a session and nothing else. That is still true — and after six more runs it is
+now the *best* remaining trade in the plan, because everything else has been
+measured smaller: the cache is worth 140 ms, `timeBeginPeriod` 85 ms, and
+libdeflate ~110 ms on the same frame, against 5.1's ~513 ms. "The worst frame
+of a session" is also the only frame the reporter actually notices.
+
+Run 26 added what was not known when it was parked: **the forced load is 85%
+a `Sleep(1)` poll loop**, so it is mostly waiting, not working — which both
+explains why it is so expensive and predicts that the pop-in will be brief.
+
+## Stage 5.1, ready to build: everything verified, nothing written
+
+I started this and reverted it at the reporter's request so a fresh session
+begins clean. **The reverse engineering below was done against the pinned
+`Engine.dll` this session and is recorded so it does not have to be redone —
+but re-verify it anyway before writing bytes, per the conventions.**
+
+### The two call sites
+
+Both are byte-identical apart from the call displacement, read out of the
+pinned image (not the audit export):
+
+```
+0x10167847  GraphicsDeferredRendererX::AddElementsInBox
+0x1017d8b7  GraphicsForwardRenderer::AddElementsInBox
+
+  85 ff                  test edi,edi
+  0f 84 dd 00 00 00      jz epilogue
+  6a 00                  push 0            the `false` flag both sites pass
+  8b cf                  mov ecx,edi       Region*
+  e8 <rel32>             call Region::LoadLevel        <- offset 12
+  80 7f 74 00            cmp byte [edi+0x74],0
+  c7 47 6c 00 00 00 00   mov dword [edi+0x6c],0        unload countdown
+  0f 85 <rel32>          jnz epilogue      region skipped while loading
+```
+
+30 bytes, call at **offset 12**. Displacements: `e8 68 46 0a 00` (deferred)
+and `e8 f8 e5 08 00` (forward); both resolve to `0x1020bec0`,
+`?LoadLevel@Region@GAME@@QAE_N_N@Z`. `detour::patchCall` handles `E8` sites by
+rewriting the displacement, and `expectedTarget` is the safety check.
+
+`MOV` does not touch flags, so `mov dword [edi+0x6c],0` runs on the skip path
+too: a region deferred rather than loaded still has its unload countdown reset
+and cannot be evicted while the load is in flight.
+
+### The asynchronous entry point, and the one trap in it
+
+`?BackgroundLoadLevel@Region@GAME@@QAEX_N0@Z`, RVA `0x20be60`, 85 bytes,
+`__thiscall`, returns void, two bools, `RET 0x8`:
+
+```
+1020be60  8b 41 50     mov eax,[ecx+0x50]
+1020be63  8a 54 24 04  mov dl,[esp+4]        only the FIRST bool is read
+1020be6a  85 c0        test eax,eax
+1020be6c  74 0d        jz  proceed
+1020be6e  84 d2        test dl,dl
+1020be70  74 3d        jz  EPILOGUE          <-- does nothing and returns
+1020be72  80 b8 3d 6a 00 00 00  cmp byte [eax+0x6a3d],0
+1020be79  75 34        jnz EPILOGUE
+1020be7b  80 79 74 00  cmp byte [ecx+0x74],0   already loading? bail
+1020be81  80 79 75 00  cmp byte [ecx+0x75],0
+1020be87  83 79 50 00  cmp dword [ecx+0x50],0
+1020be8d  c6 41 75 01  mov byte [ecx+0x75],1   ... or
+1020be93  c6 41 74 01  mov byte [ecx+0x74],1
+             then queues the work (call 0x10051fc0 / 0x10051660)
+1020beb2  c2 08 00     ret 0x8
+```
+
+Two things follow, and **the first is the trap**:
+
+1. **With `region[0x50]` non-null and a `false` flag — exactly what both call
+   sites pass — this function returns having done nothing.** It does not set
+   `[0x74]`, so the caller's `JNZ epilogue` would not fire and the renderer
+   would draw an unloaded region. **Those must go to the original
+   `Region::LoadLevel`.** This is why the plan's §5.1 says "if `region[0x50]
+   != 0` call the original unchanged"; the disassembly is the reason.
+2. **It guards its own re-entry** via `[0x74]` and `[0x75]`, so the thunk
+   needs no in-flight check of its own — the plan's suggested
+   `region[0x74] | [0x75] | [0x78]` test is redundant.
+
+### The thunk
+
+Same ABI as `Region::LoadLevel`: `__thiscall(bool)` → GCC `__fastcall` with a
+dead `edx` argument, one stack argument, callee-pop. That is the file's
+existing `LoadLevelFn` typedef.
+
+```
+int __fastcall hookAddElementsLoadLevel(void* region, void* edx, int flag) {
+    if (!g_asyncLevelLoad || !g_backgroundLoadLevel
+        || *(void* const*)((BYTE*)region + 0x50) != nullptr) {
+        count(CounterEngineAsyncSync);
+        return g_regionLoadLevel(region, edx, flag);   // the export
+    }
+    g_backgroundLoadLevel(region, edx, 0, 0);
+    count(CounterEngineAsyncLoad);
+    return 1;
+}
+```
+
+Call the resolved **export address** rather than the trace's trampoline, so
+the thunk works with the probe off; if the trace *is* installed the call still
+lands in `hookLoadLevel` and is counted, which is what we want. `patchCall`
+retargets the call site, not the function, so there is no recursion. Reading
+`region+0x50` needs no guard — the engine reads it unconditionally at the top
+of both functions.
+
+### The switch, and the fourth way into `install()`
+
+`[performance] async_level_load = 0` (off, the default). Like
+`archive_cache_mb` it is a fix rather than an instrument, so it must reach
+`install()` with the performance probe off:
+
+```
+const bool cache = tq::arccache::configured();
+const bool async = g_asyncLevelLoad;
+decideTracing();
+if (!g_tracing && !cache && !async) return false;
+...
+if (async) installAsyncLoad(engine);
+```
+
+`wants()` already refuses every trace group when `g_tracing` is false — that
+gate was added this session and the self-test covers it, so a cache-only or
+async-only boot installs no instrumentation.
+
+Two counters, so a run can tell the switch engaged: `engine_async_load`
+(regions deferred) and `engine_async_sync` (fell through because
+`region[0x50]` was non-null).
+
+### What it is worth, and what it is not
+
+**~513 ms of a ~1,380 ms frame, on the zone-transition class only** (§25's
+frame 1911). Nothing for the no-load render hitch or the pump class.
+
+**The pop-in should be brief**, and that is a measurement rather than a hope:
+run 26 found the forced load is 85% a `Sleep(1)` poll — 435 ms of waiting in a
+513 ms call — so the loader thread is nearly finished by the time the renderer
+is told to skip the region.
+
+### Also to do
+
+- `verify-sites.py`: add both windows, assert `E8` at offset 12 in each, and
+  assert `?BackgroundLoadLevel@Region@GAME@@QAEX_N0@Z` resolves to `0x20be60`.
+- `README.md`: document `async_level_load` and the pop-in trade.
+- `test/selftest.cpp`: assert the switch defaults off and installs nothing.
+- Two run inis: `async_level_load=0` (baseline, confirms the build changed
+  nothing) then `=1`. And the reporter should be told to watch for regions
+  appearing late, since that is the trade being made.
 
 ## Conventions
 
@@ -217,7 +626,9 @@ a session and nothing else. Stage 4.2 and 4.3 stay gated on what 4.1 leaves.
 - Re-verify bytes against the pinned binaries before writing them, even when
   a document already records them. `55 8b ec 83 e4 f8` is shared by four of
   the targets, so a six-byte prologue match proves nothing: verify 16–24
-  bytes, steal 6–7.
+  bytes, steal 6–7. And re-verify *structure offsets* the same way: read the
+  operand that uses the field, not a layout table. `verify-sites.py` now does
+  both, and it is the thing to extend when a table is added.
 - Engine duration columns end in `_us`, never `_ms`, or `tools/frames.py`
   charges the game's time to the mod.
 - Prefer `detour::patchImport` to patching code. Twelve of the fourteen

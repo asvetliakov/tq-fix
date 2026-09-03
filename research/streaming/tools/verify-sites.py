@@ -24,8 +24,10 @@ GAME = os.environ.get("TQ_GAME_DIR") or os.path.expanduser(
     "~/Library/Application Support/CrossOver/Bottles/Titan Quest/drive_c/"
     "GOG Games/Titan Quest - Anniversary Edition")
 SRC = os.path.join(HERE, "..", "..", "..", "src", "engine_probe.cpp")
+CACHE_H = os.path.join(HERE, "..", "..", "..", "src", "arc_cache.h")
 
 src = open(SRC).read()
+cache_src = open(CACHE_H).read()
 flat = re.sub(r'"\s*\n\s*"', '', src)          # joined string literals
 failures = []
 
@@ -37,8 +39,12 @@ def ok(good, what):
     return good
 
 
-def const(name):
-    return int(re.search(r"const DWORD %s = (0x[0-9a-fA-F]+);" % name, src).group(1), 0)
+def const(name, text=None):
+    """A `const DWORD/unsigned/uint32_t <name> = <n>;` from the source."""
+    text = src if text is None else text
+    m = re.search(r"const (?:DWORD|unsigned|uint32_t) %s = (0x[0-9a-fA-F]+|\d+);"
+                  % name, text)
+    return int(m.group(1), 0)
 
 
 def table(name):
@@ -49,7 +55,9 @@ def table(name):
 
 NAMED_RVA = {"kEnterCriticalSectionSlotRva": 0x2ac17c,
              "kLeaveCriticalSectionSlotRva": 0x2ac178,
-             "kWaitForSingleObjectSlotRva": 0x2ac188}
+             "kWaitForSingleObjectSlotRva": 0x2ac188,
+             "kSetFilePointerExSlotRva": 0x2ac190,
+             "kReadFileSlotRva": 0x2ac1a4}
 
 
 def relocs(name):
@@ -86,6 +94,94 @@ def window(pe, label, bytes_name, at, reloc_name):
        % (label, pe.base + at, len(want), "" if not why else "  -- " + "; ".join(why)))
 
 
+def check_archive_cache(engine):
+    """The offsets src/arc_cache.cpp keys on, against the operands that use them.
+
+    The cache reads five fields out of structures the game never names, and
+    every one of them is an immediate inside an instruction in the block
+    routine. This is where the C++ constants and the instruction stream are
+    made to agree: nothing here trusts the byte tables to *mean* anything, it
+    reads the operand out of the table and compares it to the constant
+    describeBlock() dereferences with.
+    """
+    print("\nArchive cache offsets, against the operands that use them")
+    prologue = table("kArchiveBlockBytes")
+    seek = table("kArchiveSeekWindowBytes")
+    read = table("kArchiveReadWindowBytes")
+    inflate = table("kArchiveInflateWindowBytes")
+    tail = table("kArchiveBlockTailBytes")
+    size = table("kArchiveBlockSizeBytes")
+
+    # mov eax,[ecx+0x2c] -- the archive's entry table
+    ok(prologue[12:14] == [0x8b, 0x41]
+       and prologue[14] == const("kArchiveEntryTableOffset"),
+       "entry table at archive+%#x  (mov eax,[ecx+%#x])"
+       % (const("kArchiveEntryTableOffset"), prologue[14]))
+
+    # shl edx,4 / add edx,[ebp+8] / lea esi,[eax+edx*4] -- stride (16+1)*4
+    stride_ok = (prologue[15:18] == [0xc1, 0xe2, 0x04]
+                 and prologue[18:21] == [0x03, 0x55, 0x08]
+                 and prologue[26:29] == [0x8d, 0x34, 0x90])
+    ok(stride_ok and ((1 << prologue[17]) + 1) * 4 == const("kArchiveEntryStride"),
+       "entry record stride %#x  (shl %d / add / lea [eax+edx*4])"
+       % (const("kArchiveEntryStride"), prologue[17]))
+
+    # mov eax,[esi+0x20] -- this entry's block descriptors
+    ok(prologue[33:35] == [0x8b, 0x46]
+       and prologue[35] == const("kArchiveEntryDescriptorsOffset"),
+       "descriptors at entry+%#x  (mov eax,[esi+%#x])"
+       % (const("kArchiveEntryDescriptorsOffset"), prologue[35]))
+
+    # lea ecx,[ebx+ebx*2] / lea edi,[eax+ecx*4] -- descriptor stride 3*4
+    ok(prologue[36:39] == [0x8d, 0x0c, 0x5b]
+       and prologue[40:43] == [0x8d, 0x3c, 0x88]
+       and const("kArchiveDescriptorStride") == 12,
+       "descriptor stride %d  (lea [ebx+ebx*2] / lea [eax+ecx*4])"
+       % const("kArchiveDescriptorStride"))
+
+    # push [eax+0xc] in both the seek and the read -- the open .arc HANDLE
+    ok(seek[12:14] == [0xff, 0x70]
+       and seek[14] == const("kArchiveHandleOffset")
+       and read[21:23] == [0xff, 0x70]
+       and read[23] == const("kArchiveHandleOffset"),
+       "file handle at archive+%#x  (push [eax+%#x], seek and read)"
+       % (const("kArchiveHandleOffset"), seek[14]))
+
+    # push [edi] -- the descriptor's offset, its first dword
+    ok(seek[10:12] == [0xff, 0x37], "descriptor offset at +0  (push [edi])")
+
+    # push [ecx+4] / mov eax,[ecx+8] -- the two sizes, as uncompress's
+    # sourceLen and destLen
+    ok(inflate[0:3] == [0xff, 0x71, 0x04] and inflate[3:6] == [0x8b, 0x41, 0x08],
+       "descriptor sizes at +4 and +8  (uncompress sourceLen and destLen)")
+
+    # mov ecx,[edi+8] -- the buffer the inflate writes, which is the block
+    ok(inflate[9:12] == [0x8b, 0x4f, 0x08],
+       "the inflate writes blockBuffer+8, which is what a hit fills")
+
+    # mov [edi],ebx / mov al,1 / ret 0xc -- the contract a hit reproduces
+    ok(tail[0:2] == [0x89, 0x1f], "a hit must write blockBuffer+0 = block index")
+    ok(tail[4:6] == [0xb0, 0x01], "a hit must return 1 in AL")
+    ok(tail[10:13] == [0xc2, 0x0c, 0x00], "the routine pops three stack arguments")
+
+    # mov [esi+0x40],0x40000 -- the only writer of the block size
+    ok(size[0:2] == [0xc7, 0x46] and size[2] == const("kArchiveBlockSizeOffset"),
+       "block size at archive+%#x" % const("kArchiveBlockSizeOffset"))
+    coded = struct.unpack_from("<I", bytes(size), 3)[0]
+    ok(coded == const("kSlotBytes", cache_src),
+       "a cache slot is %#x bytes, which is the block size the engine sets"
+       % coded)
+
+    # the two relocated dwords are the syscalls whose operands name the fields
+    imports = engine.imports()
+    for slot, want in (("kSetFilePointerExSlotRva", "SetFilePointerEx"),
+                       ("kReadFileSlotRva", "ReadFile")):
+        rva = const(slot)
+        got = imports.get(engine.base + rva)
+        ok(got is not None and got[1] == want,
+           "Engine.dll+%#x is KERNEL32!%s" % (rva, want))
+
+
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
     game = PE(os.path.join(GAME, "Game.dll"))
@@ -104,7 +200,13 @@ def main():
             ("kEnqueueBytes", "kEnqueueRva", "kEnqueueRelocs"),
             ("kReadFromFileBytes", "kReadFromFileRva", None),
             ("kArchiveBlockBytes", "kArchiveBlockRva", None),
-            ("kArchiveInflateCallBytes", "kArchiveInflateCallRva", None),
+            ("kArchiveSeekWindowBytes", "kArchiveSeekWindowRva",
+             "kArchiveSeekWindowRelocs"),
+            ("kArchiveReadWindowBytes", "kArchiveReadWindowRva",
+             "kArchiveReadWindowRelocs"),
+            ("kArchiveInflateWindowBytes", "kArchiveInflateWindowRva", None),
+            ("kArchiveBlockTailBytes", "kArchiveBlockTailRva", None),
+            ("kArchiveBlockSizeBytes", "kArchiveBlockSizeRva", None),
             ("kWaitForLoadingBytes", "kWaitForLoadingRva", None),
             ("kFenceWindowBytes", "kFenceWindowRva", "kFenceWindowRelocs"),
             ("kSweepWindowABytes", "kSweepWindowARva", None),
@@ -159,6 +261,10 @@ def main():
         ok(a[off] == 0xe8, "sweep window A, offset %d, E8" % off)
     for off in (3, 14, 28):
         ok(b[off] == 0xe8, "sweep window B, offset %d, E8" % off)
+    inflate = table("kArchiveInflateWindowBytes")
+    ok(inflate[20] == 0xe8, "archive inflate window, offset 20, E8")
+
+    check_archive_cache(engine)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}
@@ -172,8 +278,36 @@ def main():
               "?ProcessMessages@EWindow@GAME@@QAE_NXZ",
               "?FixupCharacterCollisions@InterpenetrationManager@GAME@@QAEXABVGameCamera@2@@Z"]:
         ok(n in exe_imports and ('"%s"' % n) in flat, "TQ.exe imports %s" % n[:58])
-    for n in ["PeekMessageA", "DispatchMessageA"]:
+    for n in ["PeekMessageA", "DispatchMessageA", "SetFilePointerEx", "ReadFile",
+              "WaitForMultipleObjects"]:
         ok(n in engine_imports and ('"%s"' % n) in flat, "Engine.dll imports %s" % n)
+
+    # The four import instruments added for the heap and archive-I/O groups
+    # assert an RVA beside the name they resolve by; check both agree, and that
+    # the decorated allocator names are the ones MSVCR110 actually exports.
+    print("\nImport slots the heap and archive-I/O groups assert")
+    imports = engine.imports()
+    for name_const, rva_const, dll in [
+            ("kNewArrayName", "kNewArraySlotRva", "MSVCR110.dll"),
+            ("kDeleteArrayName", "kDeleteArraySlotRva", "MSVCR110.dll")]:
+        name = cstr(name_const)
+        rva = const(rva_const)
+        got = imports.get(engine.base + rva)
+        ok(got is not None and got[1] == name and got[0].lower() == dll.lower(),
+           "Engine.dll+%#x is %s!%s" % (rva, dll, name))
+    for name, rva_const in [("SetFilePointerEx", "kSetFilePointerExSlotRva"),
+                            ("ReadFile", "kReadFileSlotRva"),
+                            ("Sleep", "kSleepSlotRva"),
+                            ("WaitForMultipleObjects",
+                             "kWaitForMultipleObjectsSlotRva"),
+                            ("EnterCriticalSection",
+                             "kEnterCriticalSectionSlotRva"),
+                            ("WaitForSingleObject",
+                             "kWaitForSingleObjectSlotRva")]:
+        rva = const(rva_const)
+        got = imports.get(engine.base + rva)
+        ok(got is not None and got[1] == name,
+           "Engine.dll+%#x is KERNEL32!%s" % (rva, name))
 
     print("\n%s" % ("ALL SITES VERIFIED" if not failures
                     else "%d FAILURE(S)" % len(failures)))
