@@ -90,8 +90,9 @@ The archive copies of those same assets total 6.4% of the size. Setting
 `loose_texture_max=4096` keeps every 4K and smaller asset from the pack and
 takes the rest from the archive; a texture with no archive copy is simply not
 found, which is the engine's own behaviour for a missing file. The redirect
-costs nothing at runtime beyond reading each loose file's 32-byte header, and
-the first sixty-four redirects are named in `tqflicker-hdr.log`.
+costs nothing at runtime beyond reading each loose file's 128-byte header, and
+with `[debug] trace=1` the first sixty-four redirects are named, with their
+dimensions, in the mod's trace log, followed by a total at shutdown.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
