@@ -84,6 +84,7 @@ trace=0
 performance_trace=0
 engine_trace=1
 draw_timing=0
+stutter_marker=0
 ```
 
 `loose_texture_max` refuses a loose texture whose base level is larger than
@@ -318,23 +319,27 @@ the point shadow passes, grass, SMAA and bloom. GPU regions are timed with
 timestamp queries read back several frames later without ever flushing, so
 nothing waits on the GPU.
 
-Rows go to `tqflicker-frames.csv` beside `TQ.exe`, written by a worker that
-appends rather than rewriting. At `performance_trace=1` only frames slower
-than 20 ms are written, each carrying a final `unusual` column naming how far
-every field sat from its own median over the preceding sixty frames -- which is
-the part that names the cause; the file grows by a few hundred bytes per hitch,
-so this mode is cheap enough to leave on. `performance_trace=full` writes every
-frame instead, about 12 KB a second, for a measurement session. At `0`, the
-default, nothing is measured, allocated, or written; what remains compiled in
-is one branch per instrumented call site.
+Rows go to `tqflicker-frames.csv` beside `TQ.exe`, written by a worker through
+one file handle retained for the session. Ordinary rows are appended in 250 ms
+batches; a half-full 64 KiB buffer wakes the writer early. Do not change this
+back to an open/write/close per row: run 44 showed those repeated opens
+contending with the game thread's USER calls in wineserver and manufacturing
+the pump tail the trace was meant to measure. At `performance_trace=1` only
+frames slower than 20 ms are written, each carrying a final `unusual` column
+naming how far every field sat from its own median over the preceding sixty
+frames -- which is the part that names the cause; the file grows by a few
+hundred bytes per hitch, so this mode is cheap enough to leave on.
+`performance_trace=full` writes every frame instead, about 40 KB a second with
+the current columns, for a measurement session. At `0`, the default, nothing
+is measured, allocated, or written; what remains compiled in is one branch per
+instrumented call site.
 
 `tools/frames.py cache/run.csv` summarizes one or more runs: the frame-time
-distribution split into menu, loading screen and play, the hitch count, and a
-ranking of which phase dominated the hitches and what it cost above its own
-baseline. It splits at the first frame that draws the world -- `draw_indexed`
-of 500 or more -- because the loading screen draws one indexed primitive a
-frame and lasts nine to fourteen seconds, so a whole-file median describes
-neither half.
+distribution split into menu, the load-game frame, loading screen, first world
+frame, and play, plus the hitch count and a ranking of which phase dominated
+the hitches and what it cost above its own baseline. World entry is the first
+frame with `draw_indexed` of 500 or more; the loading screen draws one indexed
+primitive a frame, so a whole-file median describes none of those five parts.
 
 `draw_timing=1` adds two columns, `draw_submit_ms` and `map_resource_ms`,
 bracketing the game's own `Draw`/`DrawIndexed` and `Map` -- the driver call
@@ -348,6 +353,18 @@ split the residual in `research/streaming/findings.md` §35: on the in-play
 stutter frame, 29-54% of `Engine::Render` is left over after the game's own
 resource loader and every other named cost, and these two columns say whether
 that time is inside the D3D11 calls or in the game's code between them.
+
+`stutter_marker=1` adds a `stutter_marker` column. Press `F12` immediately
+after you notice a stutter; you do not need to catch it while it is happening.
+The marker recognizes the F12 key-down when the game's existing message pump
+retrieves it, adding no second input poll. A value of `1` is therefore a
+reaction-time anchor rather than a claim that the marked row itself stuttered.
+`tools/frames.py` reports every frame of 40 ms or more in the preceding two
+seconds, newest first, with its distance from the marker and its render/pump
+split. The marker does nothing without `performance_trace`, and a
+`# stutter_marker=F12` CSV header distinguishes an armed run with no presses
+from one where the marker was disabled. Marked rows are written even in the
+hitches-only trace mode.
 
 While the performance trace is on, the `engine_*` columns report Titan Quest's
 own resource work rather than the mod's: forced level loads and how much of

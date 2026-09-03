@@ -1804,16 +1804,20 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           "probe creates no device objects while it is off");
 
     WritePrivateProfileStringW(L"debug", L"performance_trace", L"0", ini);
+    WritePrivateProfileStringW(L"debug", L"stutter_marker", L"1", ini);
     tq::probe::readOptions(ini);
-    check(!tq::probe::enabled(), "performance_trace=0 leaves the probe off");
+    check(!tq::probe::enabled() && !tq::probe::stutterMarkerEnabled(),
+          "performance_trace=0 leaves the probe and marker off");
 
     WritePrivateProfileStringW(L"debug", L"performance_trace", L"1", ini);
     tq::probe::readOptions(ini);
-    check(tq::probe::enabled() && !tq::probe::logsEveryFrame(),
-          "performance_trace=1 records hitching frames only");
+    check(tq::probe::enabled() && !tq::probe::logsEveryFrame()
+          && tq::probe::stutterMarkerEnabled(),
+          "performance_trace=1 records hitching frames and arms its marker");
     tq::probe::resetForTest();
 
     WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
+    WritePrivateProfileStringW(L"debug", L"stutter_marker", L"1", ini);
     tq::probe::readOptions(ini);
     tq::probe::setOutputPath(csv);
     check(tq::probe::enabled() && tq::probe::logsEveryFrame(),
@@ -1825,13 +1829,15 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     tq::probe::addPhase(tq::probe::PhaseGrassPresent, start);
     tq::probe::count(tq::probe::CounterGrassSeedQueued);
     tq::probe::count(tq::probe::CounterDraw, 7);
+    tq::probe::markStutter();
     tq::probe::endFrame(16.7f);
     float measured = tq::probe::phaseMillisecondsForTest(0, tq::probe::PhaseGrassPresent);
     check(measured >= 2.0f && measured < 500.0f,
           "probe times a phase with the high-resolution clock");
     check(tq::probe::counterForTest(0, tq::probe::CounterDraw) == 7
-          && tq::probe::counterForTest(0, tq::probe::CounterGrassSeedQueued) == 1,
-          "probe counts what the frame was asked to do");
+          && tq::probe::counterForTest(0, tq::probe::CounterGrassSeedQueued) == 1
+          && tq::probe::counterForTest(0, tq::probe::CounterStutterMarker) == 1,
+          "probe counts local, engine and marker events");
     check(tq::probe::phaseMillisecondsForTest(0, tq::probe::PhaseBloom) == 0.0f,
           "a phase that did not run stays at zero");
 
@@ -1861,6 +1867,16 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     tq::probe::addPhase(tq::probe::PhaseGrassPresent, hitchStart);
     tq::probe::endFrame(48.0f);
     for (unsigned i = 0; i < 16; ++i) tq::probe::endFrame(16.7f);
+
+    // Run 44 caught the writer opening the CSV once per emitted frame. Under
+    // CrossOver those opens share wineserver with the render thread's
+    // PeekMessage calls and can manufacture the pump stalls being measured.
+    // Multiple batches must therefore reuse exactly one session handle.
+    Sleep(300);
+    for (unsigned i = 0; i < 16; ++i) tq::probe::endFrame(16.7f);
+    Sleep(300);
+    check(tq::probe::logFileOpensForTest() == 1,
+          "the probe reuses one CSV handle across writer batches");
 
     char summary[80] = {};
     tq::probe::summarize(summary, sizeof(summary));
@@ -1910,13 +1926,17 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     }
 
     tq::probe::shutdown();
+    check(!tq::probe::stutterMarkerEnabled(),
+          "shutting down the probe disarms the stutter marker");
     long size = 0;
     char* csvText = readTextFile(csv, &size);
     bool header = csvText
                && strstr(csvText, "# performance_trace=full") == csvText
                && strstr(csvText, "# draw_timing=") != nullptr
+               && strstr(csvText, "# stutter_marker=F12") != nullptr
                && strstr(csvText, "draw_submit_ms") != nullptr
                && strstr(csvText, "map_resource_ms") != nullptr
+               && strstr(csvText, "stutter_marker") != nullptr
                && strstr(csvText, "frame,ms") != nullptr
                && strstr(csvText, "grass_present_ms") != nullptr
                && strstr(csvText, "gpu_shadow_dir_ms") != nullptr

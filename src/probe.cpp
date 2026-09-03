@@ -116,7 +116,8 @@ const char* const kCounterNames[] = {
     "engine_obj_wait_main", "engine_obj_wait_main_us",
     "engine_sleep_main", "engine_sleep_main_us", "engine_sleep_main_req_us",
     "engine_async_load", "engine_async_sync",
-    "engine_portal_async_load", "engine_portal_async_sync"
+    "engine_portal_async_load", "engine_portal_async_sync",
+    "stutter_marker"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");
@@ -145,6 +146,11 @@ Mode g_mode = ModeOff;
 // Held separately from detail::drawTiming so the header can record what was
 // asked for even on a boot where the probe then failed to arm.
 bool g_drawTimingRequested = false;
+// Useful only beside a frame record, so this is an instrument rather than a
+// performance switch. The game's existing message-pump hook observes the key;
+// there is deliberately no GetAsyncKeyState call here because run 40 showed
+// that a second Win32 input query can itself block for 100-230 ms under Wine.
+bool g_stutterMarkerRequested = false;
 // What counts as a hitch. Fixed rather than configurable: it exists to make
 // rows self-selecting, not to be tuned per run.
 const float g_hitchMs = 20.0f;
@@ -195,8 +201,15 @@ SRWLOCK g_logLock = SRWLOCK_INIT;
 HANDLE g_logThread;
 HANDLE g_logFlush;
 HANDLE g_logStop;
+// Kept open for the lifetime of the writer. Opening and closing this file for
+// every full-trace frame made the logger spend long stretches in
+// NtCreateFile, contending with the render thread's USER calls in wineserver.
+HANDLE g_logFile = INVALID_HANDLE_VALUE;
 volatile LONG g_logStarted;
 bool g_headerWritten;
+#ifdef TQ_SELFTEST
+unsigned g_logFileOpens;
+#endif
 
 // The last hitch's dominant phase, for the overlay line.
 int g_lastHitchPhase = -1;
@@ -218,15 +231,21 @@ FrameRecord* recordAt(unsigned index) {
 void appendLogReserved(const char* text, unsigned reserved) {
     if (!g_log || !text) return;
     unsigned length = (unsigned)strlen(text);
+    bool flushSoon = false;
     if (!g_exiting) AcquireSRWLockExclusive(&g_logLock);
     if (g_logBytes + length + reserved < kLogBytes) {
         memcpy(g_log + g_logBytes, text, length);
         g_logBytes += length;
+        // The writer's 250 ms timeout is the normal batch boundary. Wake it
+        // early only for capacity; signalling every frame turns full tracing
+        // into an asynchronous open/write/close loop fast enough to perturb
+        // the very server calls it measures.
+        flushSoon = g_logBytes >= kLogBytes / 2;
     } else {
         ++g_logDropped;
     }
     if (!g_exiting) ReleaseSRWLockExclusive(&g_logLock);
-    if (g_logFlush && !g_exiting) SetEvent(g_logFlush);
+    if (flushSoon && g_logFlush && !g_exiting) SetEvent(g_logFlush);
 }
 
 void appendLog(const char* text) { appendLogReserved(text, 512); }
@@ -246,13 +265,17 @@ void flushLog() {
     if (!g_exiting) ReleaseSRWLockExclusive(&g_logLock);
     if (!pending || !bytes) { free(pending); return; }
 
-    HANDLE file = CreateFileW(g_csvPath, FILE_APPEND_DATA, FILE_SHARE_READ,
-                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
+    if (g_logFile == INVALID_HANDLE_VALUE) {
+        g_logFile = CreateFileW(g_csvPath, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+#ifdef TQ_SELFTEST
+        if (g_logFile != INVALID_HANDLE_VALUE) ++g_logFileOpens;
+#endif
+    }
+    if (g_logFile != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
-        WriteFile(file, pending, bytes, &written, nullptr);
-        CloseHandle(file);
+        WriteFile(g_logFile, pending, bytes, &written, nullptr);
     }
     free(pending);
 }
@@ -298,6 +321,11 @@ void writeHeader() {
     // was holding a stopwatch".
     snprintf(line, sizeof(line), "# draw_timing=%s\r\n",
              detail::drawTiming ? "1" : "0");
+    appendLog(line);
+    // A zero marker column is otherwise ambiguous: no press and an unarmed
+    // marker have the same row value.
+    snprintf(line, sizeof(line), "# stutter_marker=%s\r\n",
+             g_stutterMarkerRequested ? "F12" : "0");
     appendLog(line);
     int n = snprintf(line, sizeof(line), "frame,ms");
     for (unsigned i = 0; i < PhaseCount && n > 0 && n < (int)sizeof(line); ++i)
@@ -408,7 +436,8 @@ void emitRecord(const FrameRecord& record, bool flushWhenFull = false) {
     // Only a hitch row earns the baseline pass: computing 39 medians-of-60 on
     // the render thread for every ordinary frame of a full-mode run would put
     // the instrument inside its own measurements.
-    if (record.milliseconds > g_hitchMs)
+    if (record.milliseconds > g_hitchMs
+        || record.counters[CounterStutterMarker])
         describeUnusual(record, unusual, sizeof(unusual), &topPhase, &topDelta);
     if (n > 0 && n < (int)sizeof(line))
         snprintf(line + n, sizeof(line) - n, ",%s\r\n", unusual);
@@ -437,7 +466,8 @@ void emitDue() {
         if (record->gpuResolved) ++g_gpuResolvedFrames;
         else if (g_gpuReady) ++g_gpuTimedOutFrames;
         ++g_emitCursor;
-        if (g_mode == ModeFull || record->milliseconds > g_hitchMs) {
+        if (g_mode == ModeFull || record->milliseconds > g_hitchMs
+            || record->counters[CounterStutterMarker]) {
             writeHeader();
             emitRecord(*record);
         }
@@ -483,6 +513,7 @@ void readOptions(const wchar_t* iniPath) {
     detail::drawTiming = false;
     g_mode = ModeOff;
     g_drawTimingRequested = false;
+    g_stutterMarkerRequested = false;
     if (!iniPath) return;
     wchar_t value[32];
     GetPrivateProfileStringW(L"debug", L"performance_trace", L"0", value, 32,
@@ -500,6 +531,8 @@ void readOptions(const wchar_t* iniPath) {
     GetPrivateProfileStringW(L"debug", L"draw_timing", L"0", value, 32,
                              iniPath);
     g_drawTimingRequested = !_wcsicmp(value, L"1") || !_wcsicmp(value, L"on");
+    g_stutterMarkerRequested = GetPrivateProfileIntW(
+        L"debug", L"stutter_marker", 0, iniPath) != 0;
 
     if (!g_csvPath[0]) {
         // Beside the executable, like every other file this mod writes.
@@ -524,6 +557,15 @@ void readOptions(const wchar_t* iniPath) {
     ensureWriter();
     detail::active = true;
     detail::drawTiming = g_drawTimingRequested;
+}
+
+bool stutterMarkerEnabled() {
+    return detail::active && g_stutterMarkerRequested;
+}
+
+void markStutter() {
+    if (stutterMarkerEnabled())
+        engineCount(CounterStutterMarker);
 }
 
 void setOutputPath(const wchar_t* csvPath) {
@@ -734,7 +776,8 @@ void drainRing(bool flushAsItGoes) {
             FrameRecord* record = recordAt(g_emitCursor);
             ++g_emitCursor;
             if (!record) continue;
-            if (g_mode == ModeFull || record->milliseconds > g_hitchMs) {
+            if (g_mode == ModeFull || record->milliseconds > g_hitchMs
+                || record->counters[CounterStutterMarker]) {
                 writeHeader();
                 emitRecord(*record, flushAsItGoes);
             }
@@ -772,6 +815,10 @@ void shutdown() {
             g_logThread = nullptr;
         }
         flushLog();
+        if (g_logFile != INVALID_HANDLE_VALUE) {
+            CloseHandle(g_logFile);
+            g_logFile = INVALID_HANDLE_VALUE;
+        }
         if (g_logStop) { CloseHandle(g_logStop); g_logStop = nullptr; }
         if (g_logFlush) { CloseHandle(g_logFlush); g_logFlush = nullptr; }
         free(g_log);
@@ -786,12 +833,16 @@ void shutdown() {
         InterlockedExchange(&g_engineCounters[i], 0);
     g_frameIndex = g_emitCursor = 0;
     g_renderThread = 0;
+    g_stutterMarkerRequested = false;
     g_logBytes = g_logDropped = 0;
     g_headerWritten = false;
     g_exiting = false;
     g_gpuResolvedFrames = g_gpuTimedOutFrames = 0;
     g_lastHitchPhase = -1;
     g_lastHitchDelta = 0.0f;
+#ifdef TQ_SELFTEST
+    g_logFileOpens = 0;
+#endif
 }
 
 #ifdef TQ_SELFTEST
@@ -820,6 +871,8 @@ float phaseForTest(unsigned framesBack, Phase phase) {
                         ? recordAt(g_frameIndex - 1 - framesBack) : nullptr;
     return record && phase < PhaseCount ? record->phaseMs[phase] : 0.0f;
 }
+
+unsigned logFileOpensForTest() { return g_logFileOpens; }
 
 void resetForTest() {
     shutdown();

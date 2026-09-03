@@ -822,6 +822,7 @@ bool g_asyncLevelLoad;
 // wants() below would read the trace mask -- which defaults to 1 -- and put
 // the whole instrument in on a boot that asked only for the cache.
 bool g_tracing;
+bool g_pumpTracing;
 
 LONG g_installed;
 unsigned g_installedHooks;
@@ -1793,7 +1794,11 @@ BOOL peekAroundTimer(LPMSG message, HWND window, UINT remove) {
 BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
                                UINT last, UINT remove) {
     if (!g_peekMessage) return FALSE;
-    const int64_t started = tq::probe::now();
+    // The marker must reuse the game's input retrieval. Run 40 polled
+    // GetAsyncKeyState separately at each Present and created a new class of
+    // 100-230 ms stalls in the otherwise unbracketed part of the frame.
+    const bool timePeek = g_pumpTracing;
+    const int64_t started = timePeek ? tq::probe::now() : 0;
     BOOL result;
     // Only the unfiltered peek is touched. A caller that already asked for a
     // range knows what it wants, and splitting it would change which messages
@@ -1811,6 +1816,13 @@ BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
     } else {
         result = g_peekMessage(message, window, first, last, remove);
     }
+    if (result && message
+        && (message->message == WM_KEYDOWN || message->message == WM_SYSKEYDOWN)
+        && message->wParam == VK_F12
+        && (message->lParam & (LPARAM(1) << 30)) == 0)
+        tq::probe::markStutter();
+    if (!timePeek) return result;
+
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
     tq::probe::engineCount(tq::probe::CounterPumpPeek);
     tq::probe::engineCount(tq::probe::CounterPumpPeekUs, elapsed);
@@ -2389,7 +2401,8 @@ bool installLoop() {
     return installed != 0;
 }
 
-bool installPump(HMODULE engine) {
+bool installPump(HMODULE engine, bool tracePump) {
+    g_pumpTracing = tracePump;
     unsigned installed = 0;
     // PeekMessageA carries the filter as well as the timing, so it goes in for
     // either reason; DispatchMessageA is pure instrument and stays behind the
@@ -2397,7 +2410,7 @@ bool installPump(HMODULE engine) {
     installed += redirectImport(g_peekPatch, engine, "user32.dll",
                                 "PeekMessageA", (void**)&g_peekMessage,
                                 (const void*)&hookPeekMessage) ? 1u : 0u;
-    if (g_tracing)
+    if (tracePump)
         installed += redirectImport(g_dispatchPatch, engine, "user32.dll",
                                     "DispatchMessageA",
                                     (void**)&g_dispatchMessage,
@@ -2660,19 +2673,22 @@ void readOptions(const wchar_t* iniPath) {
 
 bool install(HMODULE engine) {
     if (!engine) return false;
-    // Two gates, and neither the cache nor the asynchronous load opens them:
+    // The trace has two gates, and none of the independently requested paths
+    // opens them:
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
     // archive_cache_mb and async_level_load add are third and fourth ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
     // wants() below refuses every trace group when g_tracing is false, so
-    // neither of them brings the instrument along.
+    // none of them brings the rest of the instrument along. The marker is the
+    // fifth way in and installs only the existing PeekMessage import wrapper.
     const bool cache = tq::arccache::configured();
     const bool async = g_asyncLevelLoad;
     const bool pumpFilter = g_pumpTimerMinMs != 0;
+    const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
-    if (!g_tracing && !cache && !async && !pumpFilter) return false;
+    if (!g_tracing && !cache && !async && !pumpFilter && !marker) return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
     if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
@@ -2707,7 +2723,8 @@ bool install(HMODULE engine) {
     if (wants(kGroupFrame)) installFrame(engine);
     if (wants(kGroupGame)) installGame();
     if (wants(kGroupLoop)) installLoop();
-    if (wants(kGroupPump) || pumpFilter) installPump(engine);
+    const bool tracePump = wants(kGroupPump);
+    if (tracePump || pumpFilter || marker) installPump(engine, tracePump);
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
@@ -2816,6 +2833,7 @@ void shutdown() {
     g_chainModuleCount = 0;
     g_installedHooks = 0;
     g_tracing = false;
+    g_pumpTracing = false;
     InterlockedExchange(&g_installed, 0);
 }
 

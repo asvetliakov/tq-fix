@@ -3893,6 +3893,416 @@ this line is actually in, and it is worth saying plainly rather than filing the
 pump as closed for a second time: it is closed as a *lever*, twice tested, but
 the attribution behind the closure no longer stands on the evidence available.
 
+## 41. Run 40: the felt-stutter marker works, and its first implementation perturbed the run
+
+This was the first run in the project that recorded a human observation rather
+than selecting an event afterward with `max()`. The reporter pressed F12 after
+felt stutters. All **15 markers** landed in play; none landed in the menu,
+load-game frame, loading screen, or first world frame.
+
+The reaction-time concern was real but not a problem. For the first ten clear
+matches, the likely event ended 330-581 ms before the marker (apart from a
+keypress that landed 7 ms after a 230 ms frame), and the event onset was
+roughly 0.5-0.7 s before it. The marker is therefore an anchor for a backwards
+window, not a label on the same row.
+
+### What the presses appeared to select
+
+| felt class in play | likely event frames | markers |
+| --- | --- | ---: |
+| `PeekMessageA` / pump | 2848, 4392, 4788, 5028 | 4 |
+| outside every existing main-loop bracket | 3277, 3372, 3680, 4503, 4660, 5792, 6021, 6078, 6163/6175, 6417 | 10 |
+| outdoor-transition render burst | 6035-6046 | 1 |
+
+Two unmarked events after the final press -- frame 6517 in the pump and frame
+6564 outside the brackets -- fit the reporter's immediate note that they had
+probably missed one or two. That makes the observation method useful. It does
+**not** make the apparent 10/4/1 class mix valid, because the instrument had an
+observer effect.
+
+### The marker probably created the new residual class
+
+The first implementation called `GetAsyncKeyState(VK_F12)` once from
+`probe::endFrame`. Run 40 then produced **12 play frames of at least 100 ms**
+with `Engine::Render` under 60 ms and the pump under 10 ms. The same predicate
+finds 0, 2, 0, 1 and 1 frames in runs 34, 35, 36, 37 and 39.
+
+The frame clock makes the failure mode exact. `recordFrame()` samples `now`,
+then calls `endFrame()`, where the extra input query ran, and only afterward
+stores that earlier `now` as the next boundary. A slow `GetAsyncKeyState` call
+is therefore charged to the following row while sitting outside every engine
+and main-loop bracket. The only per-frame change in run 40 has exactly the
+shape and location of the new stalls. Until a clean repeat removes them, this
+is a strong causal inference rather than a completed control.
+
+Run 40 is consequently **withdrawn as a baseline**. Its F12 rows remain valid
+records of when the reporter reacted, and they show that pump stalls can be
+felt, but most of its newly dominant residual stalls were probably made by the
+marker itself.
+
+### Corrected marker and the next run
+
+The per-frame input poll is gone. The marker now recognizes
+`WM_KEYDOWN`/`WM_SYSKEYDOWN` for F12 in the result of the game's existing
+`PeekMessageA` import hook, ignores autorepeat, and adds no second Win32 input
+call. With `engine_trace=0` it installs only that existing import wrapper; with
+the performance probe off it installs nothing.
+
+Run 41 repeats the observation, not a mitigation A/B. If the residual events
+return to the 0-2/run baseline, it confirms the observer effect and the new
+marker can answer which *normal* class is felt. Only after that is it worth
+adding the sent-message instrument: `PeekMessageA` can run inter-thread
+`SendMessage` handlers inline before it checks the posted queue, so an empty
+154-185 ms peek still does not identify what consumed the time.
+
+### What the old 3x pump rate means now
+
+The 7.1-20.9/minute number is a one-minute tail count, not a stable rate.
+Runs 34, 36, 37 and 39 spend a much narrower 5.5-6.4 seconds/minute in the
+pump, while the count moves when a heavy-tailed sample crosses a hard 60 ms
+line. Run 35 also raises exposure from about 111 to 150 peeks/second because
+turning four visual features off raises frame rate; its 20.1 events of at
+least 50 ms per minute are 22.4 per 10,000 peeks, versus 9.4 in run 34.
+Exposure explains part, not all, of the range; the remaining arrivals are
+bursty and the sample is short. This explains why the tail count cannot measure
+a modest A/B. It does **not** explain what work runs inside a slow peek, and it
+does not restore the host attribution withdrawn in §40.
+
+## 42. Run 41: the passive marker is clean, and the frequent felt class is the pump
+
+**Corrected forward by §45:** the passive key path is clean relative to run
+40's polling query, but `performance_trace=full` was not clean. Its worker
+opened and closed the CSV after nearly every emitted frame, creating
+wineserver contention with the pump it was measuring. The F12 presses are
+real reactions; the claim that their pump candidates describe the unobserved
+game is withdrawn.
+
+Same live configuration and the same F12 workflow as run 40, with one change:
+the marker no longer calls `GetAsyncKeyState`. It recognizes F12 when the
+game's existing `PeekMessageA` retrieves the key event.
+
+### The observer effect is confirmed
+
+| play predicate | runs 34, 35, 36, 37, 39 | run 40 polling marker | run 41 passive marker |
+| --- | --- | ---: | ---: |
+| frame >=100 ms, render <60 ms, pump <10 ms | 0, 2, 0, 1, 1 | **12** | **0** |
+
+The new residual class vanished completely. The inference in §41 is now a
+completed control: the per-frame `GetAsyncKeyState` query created those stalls,
+and the event-based marker does not.
+
+### What the reporter actually marked
+
+Run 41 has 8 markers, all in the **play** part of the session. Seven follow
+166-209 ms frames that spend 140-196 ms in `PeekMessageA`:
+
+| event frame | frame | `pump_peek` | event onset to F12 |
+| ---: | ---: | ---: | ---: |
+| 3174 | 191.0 ms | 165.5 ms | 613 ms |
+| 3428 | 166.2 ms | 139.7 ms | 760 ms |
+| 3994 | 168.2 ms | 159.7 ms | 702 ms |
+| 4241 | 202.5 ms | 194.0 ms | 698 ms |
+| 4394 | 174.5 ms | 162.2 ms | 642 ms |
+| 5209 | 209.4 ms | 195.7 ms | 554 ms |
+| 5718 | 195.2 ms | 176.5 ms | 539 ms |
+
+The eighth marker follows the outdoor-transition render burst: frame 6319 is
+368.0 ms with 359.9 ms in `Engine::Render`, followed by a 144.4 ms render
+frame. The marker comes 636 ms after that pair ends. This is class B from §35,
+not the frequent scattered complaint.
+
+There were plausible misses, as the reporter expected: pump frames 4161 and
+4314, a mixed update/pump frame at 6508, and a 251.6 ms render frame at 6721
+whose GPU grass span is 230.3 ms. The 984.9 ms maximum nominally inside the
+tool's `play` tail is not ordinary play: on frame 6833 `game_collisions` drops
+to zero, and all 147 remaining frames draw at most 47 indexed primitives. It
+is the frame that leaves the world and has no marker.
+
+### This settles relevance, not cause
+
+The pump is now tied to what the reporter feels, rather than selected by a CSV
+maximum: 7 of 8 captured reactions point to it. But `pump_peek_us` still wraps
+two different things. `PeekMessageA` first dispatches pending nonqueued
+messages sent to the thread and only then checks the posted queue. A 150 ms
+call returning empty can therefore contain a 150 ms window procedure; the
+return value says nothing about that hidden work.
+
+Run 42 adds the missing split without changing pump behaviour. A
+thread-specific `WH_CALLWNDPROC` / `WH_CALLWNDPROCRET` pair runs only while
+the game's existing `PeekMessageA` call is on the stack. The CSV adds
+`pump_sent_wndproc`, `pump_sent_wndproc_us`, and a one-time
+`pump_sent_hook=1` installation proof. If `pump_sent_wndproc_us` owns the
+marked pump frames, the cause is a synchronous sent-message handler on native
+Windows and Wine alike. If it stays near zero, the time is below the window
+procedure and the sent-message hypothesis is rejected.
+
+## 43. Run 42: the felt pump stalls are not sent-message window procedures
+
+**Corrected forward by §44:** the proposed per-peek `GetThreadTimes` split is
+not a valid instrument under CrossOver. Its own server calls captured the
+stalls and moved them out of `pump_peek_us`.
+
+**Corrected forward again by §45:** the sent-window-procedure split still
+rejects that handler as the owner of the observed time, but the observed pump
+tail is contaminated by the full-trace CSV writer. It cannot be called the
+normal game's felt class.
+
+The installation proof is present exactly once and the two thread hooks saw
+5,484 window-procedure entries, so zero cannot mean that the instrument failed
+to arm. They measured 2,588.0 ms across the complete session and 1,791.5 ms in
+the **play** part. Inline sent-message handling is real and common here.
+
+It does not own the slow tail. Run 42 has 13 F12 markers, all in **play**.
+Nine have a likely pump event in the same reaction-time window established by
+run 41:
+
+| event frame | frame | `pump_peek` | sent wndproc | event onset to F12 |
+| ---: | ---: | ---: | ---: | ---: |
+| 3663 | 170.8 ms | 164.3 ms | 2.1 ms | 515 ms |
+| 3883 | 108.6 ms | 103.6 ms | 0.0 ms | 649 ms |
+| 4427 | 201.9 ms | 189.4 ms | 2.6 ms | 516 ms |
+| 4804 | 196.3 ms | 183.8 ms | 1.0 ms | 450 ms |
+| 4886 | 141.8 ms | 130.0 ms | 2.1 ms | 726 ms |
+| 5084 | 159.0 ms | 143.7 ms | 1.2 ms | 513 ms |
+| 5192 | 160.3 ms | 146.3 ms | 0.0 ms | 541 ms |
+| 5565 | 130.3 ms | 123.0 ms | 3.7 ms | 568 ms |
+| 5902 | 146.4 ms | 138.6 ms | 1.8 ms | 712 ms |
+
+Those nine frames spend 1,322.8 ms in `PeekMessageA` and only 14.4 ms, **1.1%**,
+in sent window procedures. The maximum sent-handler span among them is 3.7 ms.
+The other 98.9% is below those handlers. Curiously, sent handlers are 22.0% of
+all play-part peek time, so the ordinary cheap path contains much more of this
+work proportionally than the felt stalls do. The proposed explanation is
+therefore rejected, not merely unobserved.
+
+The other four markers anchor an early-play render/Present cluster, a 108 ms
+frame outside the existing render and pump brackets, a 49 ms render candidate,
+and the 423 + 196 ms outdoor-transition render pair. The last is class B from
+§35. The 1,127 ms maximum in the nominal play tail is frame 6414, where
+`game_collisions` becomes zero and the following frames draw only the menu/UI;
+it is the world-exit transition, not ordinary play, and has no marker.
+
+### The instrument did not recreate run 40
+
+Run 42's **play** part makes 107.5 peeks/s and spends 7.46 s/min in them, close
+to run 41's 111.5 peeks/s and 7.23 s/min. The run-40 residual predicate --
+frame at least 100 ms, render below 60 ms and pump below 10 ms -- finds two
+frames, inside the 0-2 range of runs 34-39 rather than run 40's twelve. The
+thread hooks did not produce a new stall class visible at this resolution.
+
+### What is actually known now
+
+The frequent felt class is wall time accrued while the main thread is inside
+`PeekMessageA`. It is not explicit `DispatchMessageA`, not an inline sent
+window procedure, and run 39 proves it can occur on a call that returns empty
+while this run proves it can dominate frames whose final empty poll is only
+0-12 us. That is a stack location, not yet a cause. It still does not justify
+calling the stall Wine, CrossOver, USER32, or the host; the same symptom is
+reported on native Windows and no measurement here attributes the time to one
+of those implementations.
+
+The next split is active versus off-CPU time, not another pump mitigation.
+Run 43 brackets each measured peek with `GetThreadTimes` and records the game
+thread's user and kernel execution time. `pump_thread_sample` must equal
+`pump_peek`, and `pump_thread_query_us` records the instrument's own overhead.
+High wall time with comparable thread CPU means active work below the window
+procedure hooks; high wall time with little thread CPU means the thread waited
+or was descheduled while the API remained on its stack.
+
+## 44. Run 43: the stall moves to any added CrossOver server call
+
+**Corrected forward by §45:** the shared server call did not encounter an
+unexplained external delay. Run 44 found a concrete source of server
+contention inside this mod: the full-trace CSV writer opened and closed the
+file after almost every frame.
+
+Run 43 did not measure the planned active/off-CPU split. It found a more basic
+instrumentation failure, with complete coverage: `pump_thread_sample` is
+12,966 for exactly 12,966 peeks over the **complete session**. During the
+**play** part it is 7,400 for 7,400. The API worked every time.
+
+Its two timing queries around each peek cost 5,369.0 ms during 67.154 seconds
+of **play**, or **4.80 seconds per minute**. Eleven play frames put at least
+50 ms in `pump_thread_query_us`, including nine at 111-219 ms. At the same
+time there were **zero** play frames with 50 ms in `pump_peek_us`; its total
+fell to 3.02 seconds per minute. The long wall-time samples moved from the API
+being measured to the API added to measure it.
+
+Eight of the nine F12 markers in **play** line up with those query stalls. The
+ninth lines up with the 372 + 154 ms outdoor-transition render pair. One event
+makes the observer effect especially direct: the reporter reacted to a 218 ms
+query stall at frame 4861; retrieving that F12 press at frame 4880 was followed
+by another 187 ms query stall in the same frame; the next marker then follows
+frame 4880. The diagnostic generated the event that generated the next mark.
+
+This is the same failure shape as run 40's per-frame `GetAsyncKeyState`, but
+run 43 names the time instead of leaving it residual. The CPU-time columns do
+not answer the intended question: the expensive query is outside the interval
+whose thread CPU it reports.
+
+### What moved, and what did not
+
+The exact CrossOver Preview 27.0.0.40921 binaries used by the live bottle were
+checked after the run. `GetThreadTimes` calls
+`NtQueryInformationThread(ThreadTimes)`, whose Unix implementation enters
+`_wine_server_call`. `NtUserPeekMessage` also enters `_wine_server_call` while
+retrieving messages. That shared boundary explains why adding the nominally
+unrelated timing query can capture the same 100-200 ms wall-time class here.
+
+It does **not** explain why Titan Quest stutters on native Windows. Therefore
+the defensible conclusion is narrower: on this CrossOver run,
+`pump_peek_us` named whichever synchronous server call happened to encounter
+the delay, not work intrinsic to `PeekMessageA`. The CrossOver manifestation
+and the reported Windows manifestation may share an upstream game event, or
+may be different mechanisms with the same feel. This dataset cannot choose.
+Calling the overall stutter a Wine bug would repeat the attribution error in
+§40.
+
+The per-peek CPU queries are removed. `QueryThreadCycleTime` is not a valid
+substitute: it would add another synchronous OS query on the same hot path and
+repeat the experiment under a different API name. Any next causal observation
+must run outside the game thread. A macOS stack sample of the game process and
+`wineserver-x86` during the clean passive-marker route is the least invasive
+available next step; it can show whether the server is active or idle while
+the client is stuck without inserting another server request into every frame.
+
+## 45. Run 44: the full-trace writer was manufacturing the pump tail
+
+Run 44 kept the passive F12 marker and removed both the invalid thread-time
+queries and the completed sent-window-procedure hooks. It simultaneously ran
+macOS `sample` against the actual CrossOver Preview 27.0.0.40921 game task and
+the ARM64 wineserver that held this run's installed `winmm.dll`. The archived
+CSV is `tqflicker-frames.run44.csv`, SHA-256
+`f9ebfc24ad25ca3e63a8567e0e5773c2cfd740b9f54ee86e2809a03ffad3c90b`.
+
+The five session parts are menu frames 0-16515 (163.163 s), load-game frame
+16516 (1.831 s), loading screen frames 16517-17282 (10.290 s), first world
+frame 17283 (0.917 s), and play frames 17284-21151 (65.900 s). All eight F12
+markers are in play. Six have an unambiguous 98-209 ms pump candidate ending
+362-574 ms before the reaction. One follows a 69.9 ms GPU-bound frame, itself
+immediately after a 58.1 ms frame with 47.7 ms in the pump. The last follows
+the 408 + 169 ms outdoor-transition render pair. This repeats the shape of
+runs 41-42, but it does not validate their causal interpretation.
+
+### The sampled thread is the probe's own writer
+
+The aggregate reports cannot align an individual stack with an F12 marker;
+`sample` condenses time order, and running two samplers was intrusive enough
+that only 5,826 game samples and 8,544 server samples were collected during a
+nominal 120 s at 10 ms. They nevertheless expose a structural bug that does
+not depend on marker alignment:
+
+- The game task's unnamed thread 4307584 spent 3,994 of 5,823 samples in
+  `NtWaitForMultipleObjects`, then 1,726 in
+  `cxcompatdb -> NtCreateFile -> wine_server_call`, with `NtWriteFile` and
+  `NtClose` beside them.
+- That is the exact control flow of `probe.cpp`'s logger: wait on its stop and
+  flush events with a 250 ms timeout, call `CreateFileW(OPEN_ALWAYS,
+  FILE_APPEND_DATA)`, `WriteFile`, and `CloseHandle`.
+- `appendLogReserved` signalled the flush event after every appended row.
+  Full mode emits every frame, so the nominally asynchronous writer executed
+  an open/write/close cycle as fast as the render thread could produce rows.
+- The matching wineserver spent 3,010 of 8,544 samples at the actual macOS
+  `open()` inside its file-create request path. Its binary instruction at
+  runtime `0x1002b5858` is a call to `_open`; the following sampled PC
+  `0x1002b585c` stores its return value.
+- The game main thread was sampled 369 times in
+  `NtUserPeekMessage -> wine_server_call -> read`. Run 43 already showed that
+  the long delay moves to whichever main-thread server call is added around
+  Peek. The logger supplies the missing competing request.
+
+The strongest reading is therefore that full tracing created or amplified
+the CrossOver pump tail by queueing the main thread's final empty Peek behind
+the probe worker's repeated file opens. This explains why a call returning no
+message can be slow without a window procedure, and why run 43 moved the
+delay into `GetThreadTimes`. It also withdraws the conclusion that runs 41-44
+isolated Titan Quest's normal stutter. They isolated a stutter the reporter
+really felt while the broken observer was active.
+
+It does **not** explain the reporter's native-Windows stutter, and it is not a
+claim that the uninstrumented game is smooth. That stutter remains
+unisolated. The CrossOver-only queueing mechanism is an observer defect, not
+the game's root cause.
+
+### The threefold rate was exposure plus small, clustered counts
+
+Recomputing only collision-active full-scene play, runs 34, 35, 36, 37, 39,
+41, 42 and 44 contain respectively 7, 22, 11, 15, 9, 10, 12 and 7 frames with
+at least 50 ms in Peek, out of 7,202, 9,590, 6,922, 6,562, 5,770, 7,299,
+6,836 and 6,780 peeks. A common per-peek probability fits those counts:
+16.33 events per 10,000 peeks, chi-squared 8.10 for seven degrees of freedom.
+No run is more than 1.60 expected standard deviations from that model.
+
+Run 35 raised two exposures at once. Restricting the comparison to
+collision-active full-scene frames below 60 ms, visuals-off run 35 produced
+96.2 logged frames/s versus run 34's 61.4, because full tracing writes one row
+per frame; it also made 157.1 peeks/s versus 115.2. The remaining arrivals are
+clustered along the route: ten-second bucket variance is 1.74 times the mean
+across the eight runs. Multiplying different exposure by ordinary fluctuation
+in only 7-22 threshold crossings produces the apparent 3x per-minute range.
+It was never a stable effect estimate.
+
+This is now a causal explanation for why the measured pump rate is unstable,
+not an explanation of the uninstrumented game's stutter. The decisive control
+is run 45: retain one CSV handle for the session, flush ordinary rows in 250 ms
+batches, run the passive-marker route without an external sampler, and see
+what the reporter marks when this source of wineserver contention is gone.
+
+## 46. Run 45: removing the writer defect removes the felt micro-stutter class
+
+Run 45 is the control specified in §45: normal graphics and performance
+settings, passive F12 marker, full tracing through one retained CSV handle and
+250 ms batches, and no external sampler. The archived CSV is
+`tqflicker-frames.run45.csv`, SHA-256
+`b1f7f67b00797386713e92cd8bc521ddf44cd6c0c57f05134191754672595d33`.
+It contains every frame from 0 through 7331 with no dropped rows.
+
+The reporter's judgement arrived before the CSV was read: **the frequent
+micro-stutters felt gone, leaving only the loading burst-stutter**. That
+qualitative result is the primary observation. The trace independently has
+the same split.
+
+The five session parts are menu frames 0-1874 (17.670 s), load-game frame 1875
+(1.542 s), loading screen frames 1876-2967 (9.604 s), first world frame 2968
+(0.721 s), and play frames 2969-7331 (66.345 s). Both F12 markers are in
+**play** and follow the outdoor-transition render/resource/GPU burst:
+
+- Marker 6737 follows frames 6713 (260.559 ms), 6714 (131.997 ms), and 6722
+  (46.290 ms). Frame 6713 spends 251.922 ms in `Engine::Render`, including
+  164.431 ms of main-thread resource loads and 67.623 ms of archive inflate;
+  the resolved GPU interval is 353.809 ms, including 236.973 ms of directional
+  shadows. The next frame spends another 115.604 ms in render.
+- Marker 6851 follows frames 6809 (96.926 ms) and 6810 (73.736 ms). Frame 6809
+  spends 86.098 ms in render, including 71.725 ms of main-thread resource
+  loads and 48.810 ms of archive inflate; its resolved GPU interval is
+  146.165 ms, including 125.352 ms of directional shadows. The next frame
+  spends another 61.533 ms in render.
+
+Those components overlap rather than add, and F12 records a delayed reaction,
+so neither press identifies one exact causal frame. It does identify the felt
+class: both presses follow a multi-frame outdoor loading/render burst, and
+neither follows a pump stall.
+
+The corrected writer removes the old slow-Peek population completely. There
+is no frame with 50 ms in `PeekMessageA` anywhere in run 45. In the 2,475
+collision-active full-scene play frames there are 4,994 Peek calls; the
+largest aggregate Peek time in any such frame is 3.671 ms. The common-rate
+model from §45 predicts 8.2 crossings of 50 ms in that exposure. The old eight
+runs contained 7-22; run 45 contains zero. Even outside the comparison set,
+the largest Peek aggregate is 40.701 ms in the **loading screen** and 11.832
+ms in **play**.
+
+This validates §45's causal diagnosis of the measured CrossOver pump tail:
+the full-trace writer was manufacturing it by contending through wineserver,
+and the user's reported micro-stutters were real reactions to that observer
+defect. It also validates the retained-handle/batched-writer fix as necessary
+measurement infrastructure. It still does **not** explain or claim to fix the
+historical native-Windows stutter. On the present CrossOver route, however,
+the only felt residue run 45 isolates is the already-known outdoor-transition
+class: synchronous game resource work plus a simultaneous enhanced-shadow GPU
+burst. Do not run another message-pump A/B unless that class reappears with the
+corrected writer.
+
 
 ## Cross-references worth acting on
 

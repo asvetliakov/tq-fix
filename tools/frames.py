@@ -58,7 +58,7 @@ MENU_COLUMN = "game_collisions"
 
 
 def sections(rows, every_frame):
-    """Split a full-session file into menu / loading screen / play.
+    """Split a full-session file into the five observable session parts.
 
     Returns [(label, rows), ...], one entry when the file gives no reason to
     split. A hitches-only file is never split: its rows are the hitches, so a
@@ -67,17 +67,29 @@ def sections(rows, every_frame):
     """
     if not every_frame:
         return [("whole file", rows)]
-    play = next((i for i, row in enumerate(rows)
-                 if number(row, PLAY_COLUMN) >= PLAY_DRAW), None)
-    if play is None or play == 0:
+    world = next((i for i, row in enumerate(rows)
+                  if number(row, PLAY_COLUMN) >= PLAY_DRAW), None)
+    if world is None or world == 0:
         return [("whole file", rows)]
-    menu = next((i for i, row in enumerate(rows)
-                 if number(row, MENU_COLUMN) > 0), None)
-    if menu is None or not 0 < menu < play:
-        return [("before play", rows[:play]), ("in play", rows[play:])]
-    return [("menu", rows[:menu]),
-            ("loading screen", rows[menu:play]),
-            ("in play", rows[play:])]
+    collisions = next((i for i, row in enumerate(rows[:world])
+                       if number(row, MENU_COLUMN) > 0), None)
+
+    # The load-game frame is the large synchronous Region::LoadLevel before
+    # collision simulation starts. Restricting the search to that prefix keeps
+    # a later loading-screen timeout from stealing the label. Older files have
+    # no collision column; for those, the largest pre-world frame is the best
+    # marker available and is still kept separate from the first world frame.
+    load_limit = collisions if collisions is not None and collisions > 0 else world
+    load_game = max(range(load_limit), key=lambda i: number(rows[i], "ms"))
+    if load_game == 0:
+        return [("before play", rows[:world]),
+                ("first world frame", rows[world:world + 1]),
+                ("play", rows[world + 1:])]
+    return [("menu", rows[:load_game]),
+            ("load-game frame", rows[load_game:load_game + 1]),
+            ("loading screen", rows[load_game + 1:world]),
+            ("first world frame", rows[world:world + 1]),
+            ("play", rows[world + 1:])]
 
 
 def percentile(values, fraction):
@@ -182,6 +194,45 @@ def summarize(path):
                   f" {percentile(times, 0.99):>7.1f}ms {max(times):>8.1f}ms"
                   f" {elapsed:>8.0f}ms"
                   f" {mine / elapsed * 100 if elapsed else 0:>6.1f}%")
+
+    marked = [row for row in rows if number(row, "stutter_marker") > 0]
+    if marked:
+        part_for_frame = {}
+        for label, part in parts:
+            for row in part:
+                part_for_frame[int(row["frame"])] = label
+        print("\n  stutter markers (F12; candidates are before the reaction)")
+        for row in marked:
+            frame = int(row["frame"])
+            at = rows.index(row)
+            print(f"    marker frame {frame:<7}"
+                  f" {part_for_frame.get(frame, 'whole file'):<17}"
+                  f" {number(row, 'ms'):7.1f} ms")
+            candidates = []
+            window = []
+            age = 0.0
+            for candidate_index in range(at, -1, -1):
+                if candidate_index < at:
+                    age += number(rows[candidate_index + 1], "ms")
+                if age > 2000.0:
+                    break
+                candidate = rows[candidate_index]
+                window.append((candidate, age))
+                if number(candidate, "ms") >= 40.0:
+                    candidates.append((candidate, age))
+            if not candidates:
+                candidates = [max(window,
+                                  key=lambda item: number(item[0], "ms"))]
+            for candidate, age in candidates[:12]:
+                onset = age + number(candidate, "ms")
+                print(f"      candidate {int(candidate['frame']):<7}"
+                      f" ended {age:5.0f} ms before marker;"
+                      f" onset-to-marker {onset:5.0f} ms:"
+                      f" frame {number(candidate, 'ms'):6.1f} ms,"
+                      f" render {number(candidate, 'engine_render_us') / 1000:6.1f} ms,"
+                      f" pump {number(candidate, 'pump_peek_us') / 1000:6.1f} ms,"
+                      f" sent-wndproc"
+                      f" {number(candidate, 'pump_sent_wndproc_us') / 1000:6.1f} ms")
 
     print("\n  the mod's share, by phase")
     for name, value in sorted(per_phase.items(), key=lambda item: -item[1]):

@@ -40,6 +40,8 @@ namespace engineprobe {
 //      loop that does work rather than return a pointer
 //1024  inside the pump: PeekMessageA and DispatchMessageA, which are
 //      Engine.dll's imports rather than the executable's
+//      The F12 stutter marker also reuses the PeekMessageA import, even with
+//      engine_trace=0, so it never adds a second Win32 input query per frame.
 //2048  Engine.dll's operator new[] and operator delete[]. Run 23 broke the
 //      freeze frame down and found 61% of it named by nothing; the archive
 //      File constructor allocates two buffers of up to 256 KiB per compressed

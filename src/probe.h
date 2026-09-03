@@ -344,14 +344,14 @@ enum Counter {
     // the hitch time, and the worst frames are 119-214 ms of pump with
     // everything else at nothing. The function itself is nine instructions --
     // PeekMessageA(PM_REMOVE), TranslateMessage, DispatchMessageA, looping
-    // until the queue drains -- so there are exactly two places the time can
-    // be, and they mean opposite things.
+    // until the queue drains -- so the function has two visible calls. But
+    // PeekMessage can itself dispatch a third kind of work: a nonqueued sent
+    // message's receiving window procedure, which the counters below split.
     //
-    // Many cheap peeks means a message flood, and the count says so.  One
-    // expensive peek means the host is not answering, which under CrossOver
-    // is a wineserver round trip and not the game's problem at all.  Time in
-    // dispatch means the game's own window procedure, which is the one case
-    // that is the game's problem and the one that could be fixed here.
+    // Many cheap peeks means a message flood, and the count says so. One
+    // expensive peek can be time below USER32 or a sent-message window
+    // procedure run inline; its return value cannot distinguish them. Time in
+    // explicit dispatch is another window-procedure path.
     //
     // These hook Engine.dll's import table rather than the executable's; the
     // pump belongs to Engine.dll, which is why TQ.exe's GetMessageA read zero.
@@ -359,11 +359,10 @@ enum Counter {
     CounterPumpPeekUs,
     CounterPumpDispatch,
     CounterPumpDispatchUs,
-    // The peek split by what it returned. PeekMessage does not block, so a
-    // slow one is the call itself being slow, not a wait for a message to
-    // arrive -- and if the slow ones are the peeks that found the queue
-    // EMPTY, that is conclusive: the cost is the round trip to ask, not
-    // anything the game or its window has to do.
+    // The peek split by what it returned. An empty result is not conclusive:
+    // PeekMessage dispatches pending nonqueued SendMessage traffic before it
+    // checks the posted queue, so a window procedure may have run inline even
+    // when no message is returned.
     CounterPumpPeekMiss,
     CounterPumpPeekMissUs,
     // [performance] pump_timer_min_ms. An empty poll costs 1 us and a
@@ -490,6 +489,10 @@ enum Counter {
     // level change. Sharing a column with them would hide exactly that.
     CounterEnginePortalAsyncLoad,
     CounterEnginePortalAsyncSync,
+    // A human observation, not an inferred hitch class. With
+    // [debug] stutter_marker=1, an F12 key-down returned by the game's message
+    // pump marks the Present interval in which it was retrieved.
+    CounterStutterMarker,
     CounterCount
 };
 
@@ -521,6 +524,12 @@ extern bool drawTiming;
 }
 
 inline bool enabled() { return detail::active; }
+
+// The marker is consumed from the game's existing WM_KEYDOWN path. Keeping
+// this separate from enabled() lets the pump hook do no marker work unless the
+// run asked for it, and avoids adding a second Win32 input poll every frame.
+bool stutterMarkerEnabled();
+void markStutter();
 
 // True when the draw and map hooks should take a clock pair. Implies enabled().
 inline bool drawTimingEnabled() { return detail::drawTiming; }
@@ -646,6 +655,9 @@ float phaseMillisecondsForTest(unsigned framesBack, Phase phase);
 bool gpuResolvedForTest(unsigned framesBack);
 uint32_t counterForTest(unsigned framesBack, Counter counter);
 float phaseForTest(unsigned framesBack, Phase phase);
+// The async sink must batch rows through one persistent file handle. This
+// exposes that invariant without making the production path observable.
+unsigned logFileOpensForTest();
 void resetForTest();
 #endif
 

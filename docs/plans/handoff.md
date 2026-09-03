@@ -2,12 +2,48 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 39** on
-branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current as of **run 45**, with
+the invalid thread-CPU instrument removed and the corrected full-trace writer
+validated by its control run, on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**Run 45 result -- read findings §46 first.** With one retained CSV handle and
+250 ms batches, the old slow-Peek population disappeared: zero frames reached
+50 ms in `PeekMessageA` anywhere in the run, and collision-active full-scene
+play made 4,994 Peek calls with a 3.671 ms maximum per frame. Before the CSV
+was read, the reporter said the frequent micro-stutters felt gone and only the
+loading burst-stutter remained. Both F12 presses are in play and follow the
+outdoor-transition render/resource/GPU burst. The broken full-trace writer was
+therefore the source of the measured CrossOver pump class. This validates the
+observer fix, not a general explanation of Titan Quest's historical
+native-Windows stutter.
+
+**Run 44 correction -- read findings §45 before using the brief below.** The
+external sample found that `performance_trace=full` was manufacturing or
+amplifying the pump tail: its worker opened, appended, and closed the CSV after
+almost every frame, while those file opens and the main thread's Peek calls
+shared wineserver. The prior claim that runs 41-44 isolated the normal game's
+frequent felt class is withdrawn. Their F12 presses are real reactions, but
+they happened with the broken observer active. Titan Quest's native-Windows
+stutter remains unisolated.
+
+**Run 43 correction -- read findings §44 before using the older history.** The
+F12 reaction marker found 15 felt events in play, but its first implementation
+called `GetAsyncKeyState` once per frame and probably created most of a new
+unbracketed stall class. Run 40 is withdrawn as a baseline. The marker now
+passively recognizes F12 in the game's existing `PeekMessageA` result. Run 41
+confirmed the observer effect and then tied 7 of 8 captured felt events to
+166-209 ms pump stalls; the eighth was the outdoor-transition render burst.
+Run 42 tied another 9 of 13 likely reactions to pump stalls, then rejected its
+sent-message hypothesis: only 14.4 ms of 1,322.8 ms in those events ran inside
+sent window procedures. Run 43 then showed that adding `GetThreadTimes` around
+each peek moves the stall into that new CrossOver server call: eight of nine
+markers followed its 111-219 ms query stalls and no peek reached 50 ms. The
+CPU instrument is withdrawn. Do not interpret run 40's apparent 10 residual /
+4 pump / 1 outdoor-transition split as the normal game.
 
 **The reporter has asked for a fresh-eyes review of everything, and the request
 is well founded.** Over runs 34-39 this project made a correct measurement and
@@ -41,21 +77,22 @@ stutter the reporter actually feels. What has been isolated is:
   minute of play, which vary 3x between identical runs, respond to nothing
   tried, and whose attribution the reporter's Windows testimony contradicts.
 
-The third is the only candidate with the right *frequency* to be a stutter
-someone complains about after every run. It is also the one whose explanation
-is weakest. **Start there, and start by doubting §14-§17 and §40 rather than by
-building on them.**
+The third had the right *frequency* to be a stutter someone complains about
+after every run, but §45 identifies that frequency as observer-contaminated
+and §46's corrected-writer control removes it. **Run 45 leaves the
+outdoor-transition loading/render burst as the only felt class on this route.**
 
 ### Three concrete things nobody has tried
 
-1. **Nobody has ever asked the reporter *when* it stutters.** Every claim in
+1. **Before run 40, nobody had asked the reporter *when* it stutters.** Every claim in
    this project about "the stutter" is inferred from `max()` over a CSV, and
    §34 and §35 are two separate occasions where that inference picked a frame
    the reporter was not even looking at the game for. The mod owns the message
    pump and already has a hotkey path (`bloom_toggle`). **A keypress that
-   writes a marker column into the frame record would tie a felt stutter to a
-   frame index for the first time**, and it is perhaps thirty lines. Every
-   attribution in §34-§40 would have been checkable against it.
+   writes a marker column into the frame record ties a felt stutter to a frame
+   index for the first time. **This is built, but the first polling version
+   perturbed run 40; use only the passive event-based version. Run 45 validates
+   that version with the corrected writer.**
 2. **`PeekMessageA` runs inter-thread `SendMessage` handlers inline, on
    Windows as much as under Wine.** A blocking `PeekMessage` that returns
    *nothing* -- run 39 frames 3721 and 5289, 154 and 185 ms with
@@ -65,13 +102,12 @@ building on them.**
    reporter's Windows testimony where "CrossOver's event path" does not. It
    has never been looked at; `hookDispatchMessage` only sees `DispatchMessageA`,
    which is not the path a sent message takes.
-3. **The stall rate varies 3x between runs of the same route with no relevant
-   setting changed** -- 7.1, 10.1, 11.1, 16.5 and 20.9 a minute across runs
-   34, 36, 39, 37 and 35. Nothing in this project has explained that variance,
-   and it is larger than every effect the last six runs tried to measure. Until
-   it is explained, no A/B on this route can resolve anything smaller than 3x,
-   and several of the conclusions above were drawn from smaller differences
-   than that.
+3. **The apparent 3x stall rate is now explained.** Full tracing generated one
+   file-open request per emitted frame and one main-thread empty Peek per frame.
+   Run 35's faster visuals-off path increased both exposures. Across eight
+   runs the 7-22 slow-Peek counts fit one common per-peek probability, while
+   arrivals cluster within the route. A one-minute threshold count was never a
+   stable effect estimate; §45 has the full calculation.
 
 ---
 
@@ -80,8 +116,12 @@ between here and it is history and should be read as such.
 
 ## Read these first
 
-1. `research/streaming/findings.md` **§40** (the pump, closed as a lever twice
-   and with its attribution withdrawn), **§39, §38, §37** (the shadow series
+1. `research/streaming/findings.md` **§46, §45, §44, §43, §42, §41** (the
+   corrected-writer control, the full-trace writer defect, the migrating
+   CrossOver server-call stall, the rejected sent-message cause, the
+   now-contaminated felt-stutter runs, and the withdrawn polling-marker run),
+   then **§40** (the pump, closed as a
+   lever twice and with its attribution withdrawn), **§39, §38, §37** (the shadow series
    and the correction to §36), **§36** (marked withdrawn in place), **§35**
    (the corrected world-entry marker and the four-part session). Then **§34**,
    which §35 corrects, **§31 and §33** for how Stage 5 ended, and **§25** for
@@ -523,19 +563,36 @@ discipline is the reason to keep resisting the urge to build first.
 **This section is the most-rewritten thing in the file and has been wrong at
 every version.** Read the brief at the top before it.
 
-1. **Isolate the stutter the reporter actually feels, and stop inferring it.**
-   The marker keypress in the brief. Nothing else in this list is worth doing
-   before it, because three of the last four things this list called "the
-   target" were not what the reporter was reporting.
-2. **Explain the 3x run-to-run variance in the pump stall rate** before running
-   another A/B on this route. It is larger than every effect runs 34-39 tried
-   to measure.
-3. **The pump, reopened on a different mechanism.** Inter-thread `SendMessage`
-   dispatch inside `PeekMessageA`, which is platform-independent and fits the
-   reporter's testimony. §14-§17 and §40 assumed a host round trip and never
-   looked at this; §40's own data (a 185 ms peek that returned nothing)
-   contradicts the round-trip reading.
-4. **The mod's own GPU cost — the one lever this project owns, and it works.**
+1. **The current felt classes are finally separated.** Run 45 removed the
+   observer defect; the reporter felt no frequent micro-stutters, the old
+   slow-Peek tail vanished, and both remaining F12 reactions followed the
+   outdoor-transition render/resource/GPU burst. Never restore run 40's
+   per-frame `GetAsyncKeyState`; it manufactured a second residual class.
+2. **Do not run another pump A/B.** The retained-handle, 250 ms batched writer
+   is now required measurement infrastructure. If frequent micro-stutters
+   recur with that writer, capture them with passive F12 and treat them as a
+   new observation; do not revive runs 41-44's contaminated attribution.
+3. **The apparent 3x pump-event count is explained.** It combined per-frame
+   writer and Peek exposure with only 7-22 clustered threshold crossings.
+   Across eight runs the counts fit one common slow-event probability per
+   Peek. Do not use the old per-minute count to resolve a modest route A/B.
+4. **Inline inter-thread `SendMessage` is rejected for the contaminated pump
+   class.** Run 42's likely felt pump
+   events spend 1,322.8 ms inside `PeekMessageA`, of which only 14.4 ms is in
+   sent window procedures. The hooks armed and observed 5,484 calls, so this
+   is not a missing-instrument zero.
+5. **Do not repeat run 44's coarse sampler as a route A/B.** It condensed away
+   time order and independently suspended the game task and ARM64 wineserver.
+   Its structural writer finding is valid without event alignment; any future
+   external stack trace needs a common timeline, such as one
+   `spindump -timeline -onlyTarget -proc` capture, and only for a newly
+   reproducible class under the corrected writer.
+6. **The remaining felt class is the outdoor-transition burst.** Run 45's two
+   marked bursts contain 164.4 and 71.7 ms of main-thread resource loads,
+   while their resolved GPU intervals contain 237.0 and 125.4 ms of
+   directional shadows. These overlap; do not add them. This is the same
+   two-axis class separated in §§37-39, not a pump event.
+7. **The mod's own GPU cost — the one lever this project owns, and it works.**
    Enhanced shadows are 8.09 ms and grass 4.47 ms of a 25.4 ms steady GPU
    frame at 5120x1440, and the outdoor transition is 421 + 182 ms of which the
    directional shadow pass is 351.6 ms. `shadow_map_scale=2` takes the
@@ -543,16 +600,16 @@ every version.** Read the brief at the top before it.
    shadow distance** (§38). `shadow_split=0.325` is worth far more (263 + 86)
    and is **refused**: it exists to fix shadow distance, which is the feature
    (§39, the reporter's call). Grass has never been priced on its own.
-5. **The game's synchronous resource load**, 147-336 ms on the transition
+8. **The game's synchronous resource load**, 147-336 ms on the transition
    frame, inside `Engine::Render` on the main thread. Real, the game's, and
    nothing short of the archive work already measured out touches it.
-6. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
+9. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
    item in the plan for the smallest remaining return. **Struck** unless the
    loading screen becomes the target.
-7. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
+10. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
    in-play stutter frame in nineteen runs.
-8. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
-9. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
+11. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
+12. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
    struck, runs 22 and 24.
 
 **Switches that are built, verified, inert and worth nothing on this route.**
@@ -568,6 +625,12 @@ disproved §36's reading of it. In-play p50 is unchanged with it on (13.7 ms
 against a 13.5-14.3 ms band), so it is affordable. `tools/frames.py` now splits
 the session into menu / loading screen / play on `draw_indexed >= 500` and
 reports the two D3D columns as the game's time, not the mod's.
+The passive `stutter_marker` recognizes F12 in the existing message stream;
+the sent-window-procedure columns are a probe-only causal split. Run 43's
+thread-CPU columns are withdrawn because their queries moved the stall. Run
+44 then found that the CSV writer itself was an observer: it now retains one
+session handle and flushes ordinary rows in 250 ms batches. Run 45 validates
+that correction: no 50 ms Peek frames and no reported frequent micro-stutters.
 
 **Two traps this project has fallen into twice each, both now documented.**
 `game_collisions` is not world entry (§35). Whole-session p50 -- and then whole
@@ -586,15 +649,19 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   playable configuration:
   `cp cache/runs/live-config.ini "$GAME/tqflicker.ini"`.
 - **The CSVs live in the game directory** as
-  `tqflicker-frames.runN.csv`, runs 9-39, plus `tqflicker-debug.runN.log` for
+  `tqflicker-frames.runN.csv`, runs 9-45, plus `tqflicker-debug.runN.log` for
   runs 9-33. **Runs 34-39 have no debug log** because they ran with `trace=0`;
   if the message histogram or the slow-caller tables are wanted, a run needs
   `[debug] trace=1`.
-- **Runs 34-39 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
-  and only run 39 has `pump_timer_full` / `pump_timer_split`. Earlier CSVs are
+- **Runs 34-45 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
+  only run 39 has `pump_timer_full` / `pump_timer_split`, runs 40-45 have the
+  F12 marker, run 42 has the sent-window-procedure split, and only run 43 has
+  the withdrawn thread-CPU/query columns, run 44 has the external
+  `sample` reports under `cache/samples/`, and run 45 is the corrected-writer
+  control. Earlier CSVs are
   missing those columns off the end rather than shifted -- `tools/frames.py`
   and `csv.DictReader` handle it.
-- **The route is scripted and identical in all twenty-four full runs**: menu,
+- **The route is scripted and identical in all twenty-five full runs**: menu,
   load-game, a 9-16 s loading screen, an outdoor stretch, an indoor stretch, an
   outdoor stretch, exit. World entry is the first frame with
   `draw_indexed >= 500`; the in-play transition stutter lands at
