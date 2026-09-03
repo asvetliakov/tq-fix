@@ -121,9 +121,27 @@ enum Counter {
     // is two COM releases, which under DXMT free the texture's device memory,
     // and one UnmapViewOfFile over a view of the whole source file. These say
     // which, rather than leaving it to be argued.
+    // upload_unmap_us is the worker's time; the _inline_ pair is what still
+    // had to be paid on the render thread because the queue was full. Run 5
+    // measured 1.03 s of UnmapViewOfFile inside Present, 92-98% of every worst
+    // stream_step frame, so the inline columns are the ones that must stay at
+    // zero for the move to have worked.
     CounterUploadUnmap,
     CounterUploadUnmapUs,
+    CounterUploadUnmapInline,
+    CounterUploadUnmapInlineUs,
     CounterUploadReleaseUs,
+    // The loose-file size gate. A texture pack can ship assets far larger than
+    // anything the game itself contains -- this install has 984 over 4096 on a
+    // side, up to 16384x16384 -- and those are what make a mapped view
+    // expensive to tear down and a synchronous create expensive to do at all.
+    CounterLooseProbe,
+    CounterLooseProbeUs,
+    CounterLooseRejectOversize,
+    // Opens the archive source served. A redirect is only correct if the file
+    // the loose source refused turns up here instead, so this is the other
+    // half of the evidence rather than a curiosity.
+    CounterArcOpen,
     CounterCount
 };
 

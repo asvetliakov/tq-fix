@@ -90,6 +90,17 @@ void substituteLocked(UINT count, ID3D11ShaderResourceView** slots);
 // callback on the render thread.
 void advance(ID3D11DeviceContext* context);
 
+// Recovers a texture container's base-level dimensions from its first bytes,
+// for both shapes this game ships: a "TEX" container, whose payload begins
+// with a DDS-style header twelve bytes in, and a bare DDS. Returns false for
+// anything that is not one, which is what lets a caller run this over every
+// file a source opens without knowing which are textures.
+//
+// Here rather than beside the hook that uses it because it is pure, and
+// scripts/selftest-offgame.sh links this translation unit.
+bool textureDimensions(const void* header, size_t bytes, UINT* width,
+                       UINT* height);
+
 // The largest mip the low-detail view starts at: the first mip at or below
 // 512 on both axes, or the last one if none is.
 UINT lowMipFor(const D3D11_TEXTURE2D_DESC* desc);

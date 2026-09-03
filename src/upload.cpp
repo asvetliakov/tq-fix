@@ -63,6 +63,29 @@ UINT chunkBytesForTargetMs() {
     return (UINT)(kib * 1024.0);
 }
 
+bool textureDimensions(const void* header, size_t bytes, UINT* width,
+                       UINT* height) {
+    const BYTE* b = (const BYTE*)header;
+    if (!b || bytes < 32) return false;
+    // A TEX container is "TEX", a version byte, two dwords, then the payload.
+    // The payload's own magic is four bytes beginning "DDS" -- the observed
+    // fourth byte is 'R', not the space of a stock .dds, so only three are
+    // compared.
+    size_t base = 0;
+    if (!memcmp(b, "TEX", 3)) base = 12;
+    else if (memcmp(b, "DDS", 3) != 0) return false;
+    if (bytes < base + 20 || memcmp(b + base, "DDS", 3) != 0) return false;
+    uint32_t size = 0, h = 0, w = 0;
+    memcpy(&size, b + base + 4, 4);
+    if (size != 124) return false;          // DDS_HEADER.dwSize
+    memcpy(&h, b + base + 12, 4);
+    memcpy(&w, b + base + 16, 4);
+    if (!w || !h || w > 65536 || h > 65536) return false;
+    if (width) *width = w;
+    if (height) *height = h;
+    return true;
+}
+
 UINT lowMipFor(const D3D11_TEXTURE2D_DESC* desc) {
     UINT width = desc->Width, height = desc->Height, mip = 0;
     while (mip + 1 < desc->MipLevels && (width > 512 || height > 512)) {

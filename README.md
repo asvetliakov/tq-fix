@@ -72,12 +72,26 @@ peak_nits=auto
 
 [performance]
 streaming=optimized
+loose_texture_max=0
 
 [debug]
 frame_overlay=0
 trace=0
 performance_trace=0
 ```
+
+`loose_texture_max` refuses a loose texture whose base level is larger than
+the given number of pixels on either side, so the game falls back to its own
+copy from the `.arc` archives. It is off at `0`, which is stock behaviour, and
+it exists for high-resolution texture packs: one measured install carries 984
+loose textures over 4096 on a side, up to 16384x16384 and 341 MiB for a single
+file, and although they are only 7.9% of its files they are 46% of its bytes.
+The archive copies of those same assets total 6.4% of the size. Setting
+`loose_texture_max=4096` keeps every 4K and smaller asset from the pack and
+takes the rest from the archive; a texture with no archive copy is simply not
+found, which is the engine's own behaviour for a missing file. The redirect
+costs nothing at runtime beyond reading each loose file's 32-byte header, and
+the first sixty-four redirects are named in `tqflicker-hdr.log`.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and

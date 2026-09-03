@@ -32,8 +32,12 @@ struct Options {
     UINT anisotropy;
     UINT shadowMapScale;
     UINT pointShadowMapScale;
+    // Largest dimension a loose texture may have before it is refused and the
+    // game's own archive copy is used instead. 0 leaves loose files alone,
+    // which is the stock behaviour and the default.
+    UINT looseTextureMax;
 };
-Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16, 4, 2};
+Options g_options = {true, true, true, false, BloomEnhanced, 0.85f, 16, 4, 2, 0};
 
 // The smallest square the game requests for its directional shadow map. Point
 // and spot maps are requested below this.
@@ -43,7 +47,7 @@ bool g_bloomEnhancedRuntime = true;
 bool g_globalBloomEnabled;
 
 struct Patch { void** slot; void* original; void* replacement; };
-Patch g_patches[24];
+Patch g_patches[32];
 int g_patchCount;
 LONG g_installed;
 LONG g_firstPresentLogged;
@@ -332,6 +336,15 @@ void readOptions() {
     GetPrivateProfileStringW(L"performance", L"streaming", L"optimized",
                              value, 32, path);
     g_options.streaming = tq::streaming::optimizationEnabled(value);
+    // A texture pack that ships assets larger than the engine ever asks for is
+    // not a rendering problem, it is a loading one: this install carries 984
+    // loose textures over 4096 on a side, up to 16384x16384, and between them
+    // they are 46% of the pack's bytes. Refusing those hands the game its own
+    // archive copy, which for the same assets is 6.4% of the size.
+    int looseMax = GetPrivateProfileIntW(L"performance", L"loose_texture_max",
+                                         0, path);
+    g_options.looseTextureMax = looseMax >= 64 && looseMax <= 16384
+                              ? (UINT)looseMax : 0;
     if (g_options.streaming && !tq::streaming::presentHookInstalled()) {
         g_options.streaming = false;
         tq::hdr::log("Progressive streaming disabled: renderer Present hook unavailable\r\n");
@@ -603,6 +616,250 @@ bool ensureArchiveUnmapHook(void** vtable) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// The loose-file size gate.
+//
+// GAME::FileSystem::OpenFile (0x10151460) asks each registered source in turn
+// and returns the first non-NULL answer:
+//
+//     101514f8  CALL [EAX + 0x8]    ; source->vtbl[2](path, ...) == OpenFile
+//     101514ff  JNZ  0x10151527     ; non-NULL -> that is the answer
+//     10151525  XOR  EBX,EBX        ; nothing anywhere -> NULL
+//
+// so a directory source that declines falls through to the archive source with
+// no fallback logic of our own, and a file with no archive copy comes back
+// NULL, which is the engine's own file-not-found path. The whole redirect is
+// "return NULL", and everything below exists only to decide when.
+typedef void* (__thiscall* SourceOpenFileFn)(void*, const void*, const void*);
+typedef void (__thiscall* SourceCloseFileFn)(void*, void**);
+typedef void* (__thiscall* FileLockFn)(void*, unsigned, unsigned);
+typedef void (__thiscall* FileUnlockFn)(void*);
+typedef unsigned (__thiscall* FileGetLengthFn)(void*);
+
+SourceOpenFileFn g_directoryOpenFile;
+SourceOpenFileFn g_archiveOpenFile;
+LONG g_looseTraceLines;
+LONG g_looseRedirects;
+LONG g_looseBiggest;
+
+// MSVC's std::string is a 16-byte union that holds either the characters or a
+// pointer to them, then the size, then the capacity. FileSystem::OpenFile
+// picks between the two with `CMP capacity,0x10` / `CMOVNC`, which is what
+// fixes the layout. Best-effort and fully guarded: this is only ever used to
+// name a file in the log.
+const char* resourcePath(const void* string, unsigned* length) {
+    *length = 0;
+    if (!string || !readable(string)) return nullptr;
+    const BYTE* s = (const BYTE*)string;
+    if (!readable(s + 20)) return nullptr;
+    unsigned size = *(const unsigned*)(s + 16);
+    unsigned capacity = *(const unsigned*)(s + 20);
+    const char* text = capacity >= 16 ? *(const char* const*)s : (const char*)s;
+    if (!text || !readable(text) || size == 0 || size > 1024) return nullptr;
+    *length = size;
+    return text;
+}
+
+void* __fastcall hookDirectoryOpenFile(void* self, void*, const void* path,
+                                       const void* extra) {
+    void* file = g_directoryOpenFile ? g_directoryOpenFile(self, path, extra)
+                                     : nullptr;
+    const UINT limit = g_options.looseTextureMax;
+    if (!file || !limit || !readable(file)) return file;
+    BYTE* engine = (BYTE*)GetModuleHandleW(L"Engine.dll");
+    void** vtable = *(void***)file;
+    // Only the audited loose-file class, whose Lock/Unlock/GetLength are the
+    // three slots used below. Anything else is handed back untouched.
+    if (!engine || !readable(vtable) || !readable(vtable + 6)
+        || vtable != (void**)(engine + 0x2f71ec)
+        || vtable[2] != engine + 0x14e560 || vtable[4] != engine + 0x14e540
+        || vtable[6] != engine + 0x14e500) return file;
+
+    unsigned length = ((FileGetLengthFn)vtable[6])(file);
+    if (length < 32) return file;
+    const unsigned want = length < 128 ? length : 128;
+    // FileDirectory::Unlock is `UnmapViewOfFile(this[0x34]); this[0x34] = 0`
+    // and nothing else -- no lock flag -- so the object is left exactly as
+    // OpenFile returned it and the caller's own Lock behaves normally.
+    const int64_t started = tq::probe::now();
+    const void* head = ((FileLockFn)vtable[2])(file, 0, want);
+    UINT width = 0, height = 0;
+    const bool texture = head && readable(head)
+        && tq::upload::textureDimensions(head, want, &width, &height);
+    ((FileUnlockFn)vtable[4])(file);
+    tq::probe::engineCount(tq::probe::CounterLooseProbe);
+    tq::probe::engineCount(tq::probe::CounterLooseProbeUs,
+                           tq::probe::microsecondsSince(started));
+    if (!texture || (width <= limit && height <= limit)) return file;
+
+    void** sourceVtable = *(void***)self;
+    if (!readable(sourceVtable + 3)
+        || sourceVtable[3] != engine + 0x14fdc0) return file;
+    ((SourceCloseFileFn)sourceVtable[3])(self, &file);
+    tq::probe::engineCount(tq::probe::CounterLooseRejectOversize);
+    InterlockedIncrement(&g_looseRedirects);
+    LONG largest = (LONG)(width > height ? width : height);
+    if (largest > g_looseBiggest) g_looseBiggest = largest;
+    // Named individually for the first few, so a redirect can be checked
+    // against the file it was meant to apply to rather than trusted.
+    if (InterlockedIncrement(&g_looseTraceLines) <= 64) {
+        unsigned n = 0;
+        const char* name = resourcePath(path, &n);
+        tq::hdr::log("Loose texture %ux%u over %u: %.*s -> archive\r\n",
+                     width, height, limit, name ? (int)n : 1,
+                     name ? name : "?");
+    }
+    return nullptr;
+}
+
+void* __fastcall hookArchiveOpenFile(void* self, void*, const void* path,
+                                     const void* extra) {
+    void* file = g_archiveOpenFile ? g_archiveOpenFile(self, path, extra)
+                                   : nullptr;
+    if (file) tq::probe::engineCount(tq::probe::CounterArcOpen);
+    return file;
+}
+
+// Patches two vtable slots and writes no code into Engine.dll. Both are
+// verified against the audited build first, and restoreSlots() puts them back.
+bool installFileSourceGate() {
+    BYTE* engine = (BYTE*)GetModuleHandleW(L"Engine.dll");
+    if (!engine) return false;
+    void** directory = (void**)(engine + 0x2f722c);
+    void** archive = (void**)(engine + 0x2f7208);
+    if (!readable(directory) || !readable(directory + 3)
+        || !readable(archive) || !readable(archive + 2)
+        || directory[2] != engine + 0x14fde0
+        || directory[3] != engine + 0x14fdc0
+        || archive[2] != engine + 0x14ed30) {
+        tq::hdr::log("Loose texture cap not installed: the file sources are not"
+                     " the audited build\r\n");
+        return false;
+    }
+    bool ok = patchSlot(&directory[2], (void*)&hookDirectoryOpenFile,
+                        (void**)&g_directoryOpenFile);
+    ok &= patchSlot(&archive[2], (void*)&hookArchiveOpenFile,
+                    (void**)&g_archiveOpenFile);
+    tq::hdr::log("Loose texture cap: limit=%u installed=%u\r\n",
+                 g_options.looseTextureMax, ok ? 1u : 0u);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// The deferred unmap, moved off the render thread.
+//
+// Run 5 measured 1.03 s of UnmapViewOfFile inside Present across 307 retiring
+// jobs, up to 37.8 ms in one frame, and 92-98% of every one of the six worst
+// stream_step frames in the session. Tearing down the view has to happen; it
+// does not have to happen on the thread that is trying to present a frame.
+const unsigned kUnmapQueueSlots = 64;
+CRITICAL_SECTION g_unmapLock;
+bool g_unmapReady;
+HANDLE g_unmapSemaphore;
+HANDLE g_unmapStop;
+HANDLE g_unmapThread;
+void* g_unmapRing[kUnmapQueueSlots];
+unsigned g_unmapWrite, g_unmapRead, g_unmapPending;
+
+void unmapNow(void* view, bool inlineOnRenderThread) {
+    int64_t started = tq::probe::now();
+    UnmapViewOfFile(view);
+    uint32_t microseconds = tq::probe::microsecondsSince(started);
+    tq::probe::engineCount(tq::probe::CounterUploadUnmap);
+    if (inlineOnRenderThread) {
+        tq::probe::engineCount(tq::probe::CounterUploadUnmapInline);
+        tq::probe::engineCount(tq::probe::CounterUploadUnmapInlineUs,
+                               microseconds);
+    } else {
+        tq::probe::engineCount(tq::probe::CounterUploadUnmapUs, microseconds);
+    }
+}
+
+bool takeQueuedUnmap(void** view) {
+    *view = nullptr;
+    EnterCriticalSection(&g_unmapLock);
+    if (g_unmapPending) {
+        *view = g_unmapRing[g_unmapRead];
+        g_unmapRead = (g_unmapRead + 1) % kUnmapQueueSlots;
+        --g_unmapPending;
+    }
+    LeaveCriticalSection(&g_unmapLock);
+    return *view != nullptr;
+}
+
+DWORD WINAPI unmapThread(void*) {
+    HANDLE waits[2] = {g_unmapStop, g_unmapSemaphore};
+    for (;;) {
+        DWORD woke = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        // Drain whatever is queued whichever handle woke us, so a stop that
+        // arrives with work outstanding still finishes it.
+        void* view = nullptr;
+        while (takeQueuedUnmap(&view)) unmapNow(view, false);
+        if (woke == WAIT_OBJECT_0) return 0;
+    }
+}
+
+void startUnmapWorker() {
+    if (g_unmapReady) return;
+    InitializeCriticalSection(&g_unmapLock);
+    g_unmapWrite = g_unmapRead = g_unmapPending = 0;
+    g_unmapStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_unmapSemaphore = CreateSemaphoreW(nullptr, 0, kUnmapQueueSlots, nullptr);
+    if (g_unmapStop && g_unmapSemaphore)
+        g_unmapThread = CreateThread(nullptr, 0, &unmapThread, nullptr, 0,
+                                     nullptr);
+    if (!g_unmapThread) {
+        // Fail open: without the worker every unmap simply stays inline, which
+        // is what the shipped code did, and upload_unmap_inline_us says so.
+        if (g_unmapStop) { CloseHandle(g_unmapStop); g_unmapStop = nullptr; }
+        if (g_unmapSemaphore) {
+            CloseHandle(g_unmapSemaphore);
+            g_unmapSemaphore = nullptr;
+        }
+        DeleteCriticalSection(&g_unmapLock);
+        return;
+    }
+    g_unmapReady = true;
+}
+
+void stopUnmapWorker() {
+    if (!g_unmapReady) return;
+    g_unmapReady = false;
+    if (g_unmapStop) SetEvent(g_unmapStop);
+    if (g_unmapThread) {
+        WaitForSingleObject(g_unmapThread, 2000);
+        CloseHandle(g_unmapThread);
+        g_unmapThread = nullptr;
+    }
+    // Anything the worker did not reach is unmapped here; at teardown this
+    // thread is the only one left.
+    void* view = nullptr;
+    while (takeQueuedUnmap(&view)) UnmapViewOfFile(view);
+    if (g_unmapStop) { CloseHandle(g_unmapStop); g_unmapStop = nullptr; }
+    if (g_unmapSemaphore) {
+        CloseHandle(g_unmapSemaphore);
+        g_unmapSemaphore = nullptr;
+    }
+    DeleteCriticalSection(&g_unmapLock);
+}
+
+// Hands the view to the worker, or reports that it could not so the caller
+// unmaps it itself rather than leaking it.
+bool queueUnmap(void* view) {
+    if (!g_unmapReady || !view) return false;
+    bool queued = false;
+    EnterCriticalSection(&g_unmapLock);
+    if (g_unmapPending < kUnmapQueueSlots) {
+        g_unmapRing[g_unmapWrite] = view;
+        g_unmapWrite = (g_unmapWrite + 1) % kUnmapQueueSlots;
+        ++g_unmapPending;
+        queued = true;
+    }
+    LeaveCriticalSection(&g_unmapLock);
+    if (queued) ReleaseSemaphore(g_unmapSemaphore, 1, nullptr);
+    return queued;
+}
+
 // The mapping lease, expressed as the upload module's retain/release pair.
 // Called with that module's lock held, on whichever thread is loading.
 bool retainMapping(void* ownerPointer, void** token) {
@@ -644,16 +901,10 @@ void releaseMapping(void* token) {
         memset(lease, 0, sizeof(*lease));
     }
     tq::upload::unlock();
-    // The other half of the retire path, and the one the run-4 data points
-    // hardest at: tearing down a mapped view of a file that can be 341 MiB,
-    // on the render thread, inside Present.
-    if (unmap) {
-        int64_t started = tq::probe::now();
-        UnmapViewOfFile(unmap);
-        tq::probe::engineCount(tq::probe::CounterUploadUnmap);
-        tq::probe::engineCount(tq::probe::CounterUploadUnmapUs,
-                               tq::probe::microsecondsSince(started));
-    }
+    // Measured at 1.03 s inside Present over one session, so it goes to the
+    // worker. If the queue is full it is done here anyway -- a leaked view in
+    // a 32-bit address space is a worse failure than a long frame.
+    if (unmap && !queueUnmap(unmap)) unmapNow(unmap, true);
 }
 
 int64_t uploadNow() {
@@ -2702,6 +2953,8 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (g_options.streaming && !tq::upload::install(uploadCalls())) {
         tq::hdr::log("Progressive upload disabled: missing device entry point\r\n");
     }
+    if (g_options.streaming) startUnmapWorker();
+    if (g_options.looseTextureMax) installFileSourceGate();
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -2735,6 +2988,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         restoreSlots();
         g_context->Release();
         g_context = nullptr;
+        stopUnmapWorker();
         tq::upload::shutdown();
         tq::streaming::setPresentCallback(nullptr);
         tq::streaming::setPostPresentCallback(nullptr);
@@ -2837,8 +3091,13 @@ void shutdown() {
     g_bloomToggleKeyDown = false;
     g_bloomEnhancedRuntime = true;
     restoreSlots();
-    // Jobs first, so nothing is still holding a lease when the leases go.
+    // Jobs first, so nothing is still holding a lease when the leases go, and
+    // the worker before that, so no view is unmapped from under it.
     tq::upload::shutdown();
+    stopUnmapWorker();
+    if (g_looseRedirects)
+        tq::hdr::log("Loose texture cap: %ld redirected to the archive, "
+                     "largest %ld px\r\n", g_looseRedirects, g_looseBiggest);
     for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
         if (g_mappingLeases[i].used && g_mappingLeases[i].mappedBase)
             UnmapViewOfFile(g_mappingLeases[i].mappedBase);
@@ -2884,6 +3143,9 @@ void shutdown() {
     g_psSetShaderResources = nullptr;
     g_updateSubresource = nullptr;
     g_archiveUnmap = nullptr;
+    g_directoryOpenFile = nullptr;
+    g_archiveOpenFile = nullptr;
+    g_looseTraceLines = g_looseRedirects = g_looseBiggest = 0;
     if (workerStopped) tq::probe::releaseResources();
     tq::probe::shutdown();
     tq::frameoverlay::reset();

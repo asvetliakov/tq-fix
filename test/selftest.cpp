@@ -687,6 +687,82 @@ bool buildSyntheticTexture(SyntheticTexture* out) {
     return true;
 }
 
+// The dimension gate. The first case is not synthetic: these are the real
+// first 32 bytes of XPack3/Scenery/atlantis/06garden/nature/trees/
+// gardens_bigtree01normal.tex from the installed texture pack, which is the
+// 341 MiB 16384x16384 DXT5 that motivated the cap.
+void testTextureDimensions() {
+    static const BYTE kRealTexHeader[32] = {
+        0x54,0x45,0x58,0x01, 0x00,0x00,0x00,0x00, 0xf0,0x55,0x55,0x15,
+        0x44,0x44,0x53,0x52, 0x7c,0x00,0x00,0x00, 0x07,0x10,0x0a,0x00,
+        0x00,0x40,0x00,0x00, 0x00,0x40,0x00,0x00
+    };
+    UINT w = 0, h = 0;
+    check(tq::upload::textureDimensions(kRealTexHeader, sizeof(kRealTexHeader),
+                                        &w, &h) && w == 16384 && h == 16384,
+          "read 16384x16384 out of a real TEX container header");
+
+    // A TEX whose payload magic is the stock "DDS " rather than this pack's
+    // "DDSR", at a size that must be kept.
+    BYTE tex[64] = {};
+    memcpy(tex, "TEX\x01", 4);
+    memcpy(tex + 12, "DDS ", 4);
+    UINT size = 124, height = 2048, width = 4096;
+    memcpy(tex + 16, &size, 4);
+    memcpy(tex + 24, &height, 4);
+    memcpy(tex + 28, &width, 4);
+    w = h = 0;
+    check(tq::upload::textureDimensions(tex, sizeof(tex), &w, &h)
+          && w == 4096 && h == 2048,
+          "read a TEX container whose payload carries the stock DDS magic");
+
+    // A bare .dds, where the header starts at zero instead of twelve.
+    BYTE dds[64] = {};
+    memcpy(dds, "DDS ", 4);
+    memcpy(dds + 4, &size, 4);
+    memcpy(dds + 12, &height, 4);
+    memcpy(dds + 16, &width, 4);
+    w = h = 0;
+    check(tq::upload::textureDimensions(dds, sizeof(dds), &w, &h)
+          && w == 4096 && h == 2048, "read a bare DDS header");
+
+    // Everything that is not a texture has to be refused, because the gate
+    // runs over every file the loose source opens, not just textures.
+    BYTE junk[64];
+    memset(junk, 0xab, sizeof(junk));
+    check(!tq::upload::textureDimensions(junk, sizeof(junk), &w, &h),
+          "refuse a file that is not a texture container");
+    check(!tq::upload::textureDimensions(kRealTexHeader, 8, &w, &h),
+          "refuse a header too short to carry dimensions");
+    BYTE bad[64] = {};
+    memcpy(bad, tex, sizeof(bad));
+    UINT wrongSize = 100;
+    memcpy(bad + 16, &wrongSize, 4);
+    check(!tq::upload::textureDimensions(bad, sizeof(bad), &w, &h),
+          "refuse a DDS header whose dwSize is not 124");
+    BYTE zero[64] = {};
+    memcpy(zero, tex, sizeof(zero));
+    UINT none = 0;
+    memcpy(zero + 28, &none, 4);
+    check(!tq::upload::textureDimensions(zero, sizeof(zero), &w, &h),
+          "refuse a texture claiming a zero dimension");
+
+    // The policy itself, over the real distribution: 4096 keeps a 4K asset and
+    // refuses everything above it on either axis.
+    struct Case { UINT w, h; bool refused; };
+    static const Case kCases[] = {
+        {4096, 4096, false}, {2048, 2048, false}, {4096, 2048, false},
+        {8192, 8192, true},  {16384, 16384, true},
+        {4096, 16384, true}, {16384, 4096, true}, {8000, 16384, true},
+    };
+    bool policy = true;
+    for (unsigned i = 0; i < sizeof(kCases) / sizeof(kCases[0]); ++i) {
+        bool over = kCases[i].w > 4096 || kCases[i].h > 4096;
+        policy &= over == kCases[i].refused;
+    }
+    check(policy, "a 4096 cap refuses exactly the shapes over it on either axis");
+}
+
 void testUpload() {
     SyntheticTexture texture;
     if (!buildSyntheticTexture(&texture)) {
@@ -1395,6 +1471,7 @@ int main(int argc, char** argv) {
     testShadowSplitRedirect();
     testShadowFitStabilizer();
     testShadowBasisReference();
+    testTextureDimensions();
     testUpload();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
