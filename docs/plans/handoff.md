@@ -496,6 +496,23 @@ a five-second frame nobody has ever looked at. §31 and §33 are the background.
 9. ~~Pooling the archive scratch buffers~~ — **struck**, run 24.
 10. ~~The archive block cache beyond 8 MiB~~ — **struck**, run 22.
 
+**State a new session needs, beyond the repo:**
+
+- `cache/` is gitignored but present: `cache/runs/` holds the run inis
+  (`run27`–`run33` are this session's), each with its reasoning in the header,
+  and `cache/runs/live-config.ini` is the reporter's normal `tqflicker.ini`,
+  which every run ini is built from and diffed against.
+- The CSVs and logs live in the game directory as
+  `tqflicker-{frames,debug}.runN.{csv,log}`, runs 9–33. §34's whole argument is
+  a re-read of those nineteen files; nothing was thrown away.
+- The reporter's live `tqflicker.ini` has been restored (trace off, so the mod
+  is inert), and `winmm.dll` in the game directory is byte-identical to
+  `build/winmm.dll` at HEAD — functionally the run 33 build, since only
+  comments changed after that run.
+- The pinned `Engine.dll` is SHA-256 `0aedbb18…f694f6`; `verify-sites.py`
+  checks every byte table in `src/engine_probe.cpp` against it and the other
+  two modules.
+
 **Deferred at the reporter's request:** `cache/runs/play-with-cache-verify.ini`
 and `play-with-cache.ini` — the long-play validation and then serving. To be
 done once the project is otherwise finished, since hour-long sessions are a
