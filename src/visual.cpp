@@ -670,10 +670,18 @@ void* __fastcall hookDirectoryOpenFile(void* self, void*, const void* path,
     void** vtable = *(void***)file;
     // Only the audited loose-file class, whose Lock/Unlock/GetLength are the
     // three slots used below. Anything else is handed back untouched.
+    // Slot 4 is deliberately not compared, and slot 4 is deliberately not
+    // called: ensureArchiveUnmapHook replaces it with hookArchiveUnmap on the
+    // first progressive job, so requiring the original there disabled this
+    // gate for every file after the first. Run 6 caught it exactly --
+    // loose_probe read 1, on the same frame as the first job. The class is
+    // already pinned by the vtable address and slots 2 and 6, so Unlock is
+    // called at its known address instead.
     if (!engine || !readable(vtable) || !readable(vtable + 6)
         || vtable != (void**)(engine + 0x2f71ec)
-        || vtable[2] != engine + 0x14e560 || vtable[4] != engine + 0x14e540
+        || vtable[2] != engine + 0x14e560
         || vtable[6] != engine + 0x14e500) return file;
+    tq::probe::engineCount(tq::probe::CounterLooseOpen);
 
     unsigned length = ((FileGetLengthFn)vtable[6])(file);
     if (length < 32) return file;
@@ -686,7 +694,7 @@ void* __fastcall hookDirectoryOpenFile(void* self, void*, const void* path,
     UINT width = 0, height = 0;
     const bool texture = head && readable(head)
         && tq::upload::textureDimensions(head, want, &width, &height);
-    ((FileUnlockFn)vtable[4])(file);
+    ((FileUnlockFn)(engine + 0x14e540))(file);
     tq::probe::engineCount(tq::probe::CounterLooseProbe);
     tq::probe::engineCount(tq::probe::CounterLooseProbeUs,
                            tq::probe::microsecondsSince(started));

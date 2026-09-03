@@ -135,6 +135,11 @@ enum Counter {
     // anything the game itself contains -- this install has 984 over 4096 on a
     // side, up to 16384x16384 -- and those are what make a mapped view
     // expensive to tear down and a synchronous create expensive to do at all.
+    // Files the loose source served at all, so a run can tell "the gate never
+    // saw a loose file" from "it saw them and declined to inspect them" --
+    // the ambiguity that hid a bug in the gate's own class check for a whole
+    // session.
+    CounterLooseOpen,
     CounterLooseProbe,
     CounterLooseProbeUs,
     CounterLooseRejectOversize,
