@@ -688,6 +688,86 @@ once, in a 32-bit process already carrying about 336 MiB of the mod's shadow
 targets.  The pool's only limit is a count of 128 leases, and that count is
 not a safe one.
 
+## 9. Run 11: where the frame actually goes
+
+Stage 3 gained two more brackets -- `Engine::Update` (`0x101443a0`) and
+`Engine::Render` (`0x10143fe0`), each detoured whole, once a frame -- and run
+11 repeated run 10's route with them in.  For the first time the session's
+time is fully accounted for:
+
+| | | |
+| --- | ---: | ---: |
+| `Engine::Render` | 58,174 ms | 57.9% |
+| waiting on the game's `Present` | 12,539 ms | 12.5% |
+| `Engine::Update` | 10,313 ms | 10.3% |
+| **outside all of them** | 10,009 ms | **10.0%** |
+| the mod's own phases | 9,520 ms | 9.5% |
+
+The five sum to 100.2% of 100,556 ms, and the 0.2% is nesting -- which is the
+arithmetic checking itself rather than a number to explain.
+
+### The hitch time splits three ways, not one
+
+Over the 70 frames above 50 ms (9.68 s):
+
+| | | |
+| --- | ---: | ---: |
+| `Engine::Render` | 4.54 s | 46.9% |
+| **outside all of them** | 3.72 s | **38.4%** |
+| `Engine::Update` | 0.67 s | 6.9% |
+| the mod | 0.47 s | 4.8% |
+| `Present` | 0.28 s | 2.9% |
+
+By frame count the ranking inverts: of the 32 frames over 100 ms, **18 are
+dominated by time outside everything**, 11 by `Engine::Render`, 2 by
+`Engine::Update`, 1 by `Present`.
+
+### The worst frame is where §1a said it would be
+
+Frame 1753, 1,453.8 ms: **`Engine::Update` 0.0 ms, `Engine::Render` 1,448.6
+ms, outside 5.2 ms**, with `Region::LoadLevel` accounting for 505.7 ms of the
+render.  The forced synchronous load really does happen inside the render
+pass, through `AddElementsInBox`, exactly as §1a read it off the
+disassembly -- and the ~950 ms §8 could not place is inside `Engine::Render`
+too.  Stages 4 and 5 are aimed at real ground.
+
+### The unexplained class was never one mechanism
+
+§8's "second class" resolves into three:
+
+- **A simulation stall.**  Frame 1425: 245 of 253 ms inside `Engine::Update`.
+- **Frames that draw nothing.**  Frames 4, 26, 83, 111, 121, 1956, 2124:
+  `draw_indexed` 0-1, `map` 2-19, `Engine::Render` 0.0 ms, 55-172 ms each.
+  Loading screens and zone transitions.
+- **Frames that draw normally and stall anyway.**  Frames 4615, 4871, 5018,
+  5146, 5398, 5585, 5743, 6044, 6218 and others: 400-1,600 indexed draws,
+  800-2,100 maps, a 4-9 ms shadow pass, `Engine::Update` about 2 ms,
+  `Engine::Render` about 10 ms -- and **100 to 225 ms outside everything**.
+  The mod is idle on every one of them: `upload_jobs_started`,
+  `upload_unmap` and `upload_kib` are all 0.
+
+A normal 9 ms frame spends 0.30 ms in `Engine::Update`, 1.60 ms in
+`Engine::Render` and **0.21 ms outside**.  The third group is a thousandfold
+excursion in the one region nothing measures.
+
+### One hypothesis tested and rejected
+
+Address-space pressure from the mod's own mapping leases does not explain it.
+The tenth of the session with the worst stalls (frames 4970-5680, 1.43 s
+outside, peak 224 ms) held a p95 of **18 MiB** of leases; the tenth holding
+**1,024 MiB** had the *least* outside time in the whole run, 0.15 s.  The
+correlation is absent, and if anything inverted.
+
+### What is left, and the one bracket that can decide it
+
+The remaining candidates for that 10 s are `Game.dll`'s simulation, TQ.exe's
+own main loop, and the CrossOver/DXMT layer below the process.  `Game.dll`
+exports `?Update@GameEngine@GAME@@QAEXH@Z` (`Game+0x19a230`, `__thiscall
+void(int)`, confirmed by the `ret 4` at `+0x5ee`), which is the top-level
+simulation tick and the only candidate large enough to hold it.  It is now
+bracketed the same way -- 24 bytes verified, six stolen, once a frame -- and
+it is the first hook in this work that is not in `Engine.dll`.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

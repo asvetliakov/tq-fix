@@ -115,14 +115,33 @@ section has what they change. In short:
   1,466 ms worst frame and the whole of the second class, whose frames show
   every engine column at zero.
 
-## Next: run 11, before anything else is written
+## Run 11 closed the frame's accounting
 
-Stage 3 gained one more instrument for it — `Engine::Update` and
-`Engine::Render` bracketed whole, both once a frame — to say which half of the
-game's frame the dark time is in, or whether it is in neither. "Neither" puts
-it outside `Engine.dll` and invalidates the premise of both Stage 4 and Stage
-5, so run 11 comes first. Its ini is `cache/runs/run11-frame-split.ini`; the
-settings are identical to run 10's, only the header differs.
+`Engine::Update` and `Engine::Render`, bracketed whole. The session now adds
+up to 100.2%: render 57.9%, Present 12.5%, update 10.3%, **outside everything
+10.0%**, the mod 9.5%.
+
+- **The worst frame is Stage 5's.** 1,453.8 ms, of which 1,448.6 is
+  `Engine::Render` with `Region::LoadLevel` inside it. §1a confirmed.
+- **`Engine::Render` is 46.9% of the hitch time.** Stages 4 and 5 are aimed
+  correctly.
+- **38.4% of the hitch time, and 18 of the 32 frames over 100 ms, is outside
+  `Engine.dll` entirely** — on frames that draw normally with the mod idle,
+  spending 100–225 ms where a normal frame spends 0.21 ms. Nothing in this
+  plan would improve them.
+- The mapping-lease hypothesis for those frames is tested and dead: the worst
+  stall cluster held 18 MiB, the 1,024 MiB cluster had the least stall time.
+
+## Next: run 12
+
+`GameEngine::Update` (`Game+0x19a230`, `__thiscall void(int)`) is now
+bracketed too — the first hook in this work outside `Engine.dll`. It decides
+whether the dark 10 s is `Game.dll`'s simulation or something below the
+process, and those point at completely different work. Its ini is
+`cache/runs/run12-game-update.ini`; settings identical to runs 10 and 11.
+
+Stage 4.1 is safe to write in parallel on its own evidence. Stage 5 should
+wait for run 12 — its premise is confirmed, but it fixes one frame a session.
 
 ## The old Stage 3 notes
 

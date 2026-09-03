@@ -83,7 +83,8 @@ const char* const kCounterNames[CounterCount] = {
     "engine_region_lock_hits", "engine_region_lock_us",
     "engine_sweeps", "engine_sweep_us",
     "engine_wait_loading", "engine_wait_loading_us",
-    "engine_update", "engine_update_us", "engine_render", "engine_render_us"
+    "engine_update", "engine_update_us", "engine_render", "engine_render_us",
+    "game_update", "game_update_us"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");

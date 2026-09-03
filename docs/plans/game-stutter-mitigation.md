@@ -123,13 +123,32 @@ time in no mod column and the engine columns name **1.6–2.8 s of it — 21% to
 and the entirety of the second class, whose frames show *every* engine column
 at zero.
 
-**So Stages 4 and 5 are no longer the obvious next move, and this plan should
-not pretend otherwise.** Stage 3 has been extended with one further
-instrument — `Engine::Update` and `Engine::Render`, bracketed whole, both
-once-per-frame and therefore free — to split the dark time into the game's
-update, the game's render, or neither. "Neither" would put it outside
-`Engine.dll` and invalidate the premise of both remaining stages. Run 11
-decides it, and nothing in Stage 4 or 5 should be written first.
+**Run 11 answered that, and the answer is "both".** `findings.md` §9 has it;
+the frame's time is now fully accounted for, to within 0.2%.
+
+- **Stages 4 and 5 keep their target.** `Engine::Render` is 57.9% of the
+  session and **46.9% of the hitch time**, and the worst frame — 1,453.8 ms —
+  is 1,448.6 ms of `Engine::Render`, with `Region::LoadLevel` inside it. §1a's
+  forced synchronous load through `AddElementsInBox` is confirmed as a
+  measurement. Even the ~950 ms §8 could not place is inside the render pass.
+- **But 38.4% of the hitch time, and 18 of the 32 frames over 100 ms, is
+  outside `Engine.dll` altogether** — outside `Engine::Update`, outside
+  `Engine::Render`, outside the mod, outside `Present`. Those frames draw 400
+  to 1,600 times with the mod completely idle, and spend 100–225 ms where a
+  normal frame spends 0.21 ms.
+
+That second finding is not in this plan anywhere, and no stage in it would
+improve those frames. It is now instrumented: `GameEngine::Update`
+(`Game+0x19a230`) is bracketed the same way, and it is the first hook in this
+work outside `Engine.dll`. Run 12 decides whether the time is `Game.dll`'s
+simulation or something below the process — and those point at completely
+different work.
+
+**Sequencing.** Stage 4.1 (the block cache) is now safe to write on its own
+evidence: 4.38 s a session, 1.88 GiB inflated to serve 1.03 GiB. Stage 5
+should wait for run 12, not because its premise is in doubt — it is
+confirmed — but because it fixes one frame per session, and if run 12 puts
+the dark time in `Game.dll` there is a much larger target beside it.
 
 ---
 

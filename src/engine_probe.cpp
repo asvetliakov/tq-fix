@@ -291,6 +291,31 @@ const SweepSite kSweepSites[kSweepCount] = {
     {kSweepWindowBRva, kSweepWindowBBytes, sizeof(kSweepWindowBBytes), 28},
 };
 
+// --- GameEngine::Update, in Game.dll rather than Engine.dll. It is here
+// because run 11 closed the frame's accounting and found the answer was not
+// in Engine.dll at all: 58% of the session is Engine::Render and 10% is
+// Engine::Update, but 38% of the hitch time -- and eighteen of the thirty-two
+// frames over 100 ms -- fall outside both, on frames that draw 400 to 1,600
+// times with the mod completely idle. Against a normal frame's 0.21 ms
+// outside, those spend 100 to 225 ms there. This is the one bracket large
+// enough to hold it.
+//
+// `?Update@GameEngine@GAME@@QAEXH@Z` is __thiscall void(int): one stack
+// argument, callee popped, confirmed by the `ret 4` that ends the body at
+// +0x5ee.
+const DWORD kGameImageSize = 0x0059a000;
+const DWORD kGameUpdateRva = 0x19a230;
+const char kGameUpdateName[] = "?Update@GameEngine@GAME@@QAEXH@Z";
+const BYTE kGameUpdateBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,                          // push <SEH handler>
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x81, 0xec, 0x70, 0x04                     // sub esp,0x470
+};
+const Relocation kGameUpdateRelocs[] = {{9, 0x2f1112}};
+
 // ---------------------------------------------------------------------------
 // Configuration. Bit 0 means "everything"; the rest select groups, so a run
 // that misbehaves can be narrowed from the INI rather than from a rebuild.
@@ -302,6 +327,7 @@ const unsigned kGroupLock = 0x10;
 const unsigned kGroupSweeps = 0x20;
 const unsigned kGroupWait = 0x40;
 const unsigned kGroupFrame = 0x80;
+const unsigned kGroupGame = 0x100;
 
 unsigned g_traceMask = 1;
 
@@ -335,6 +361,7 @@ typedef void (__fastcall* SweepFn)(void* self, void* edx);
 typedef void (__fastcall* EngineUpdateFn)(void* self, void* edx,
                                           const void* frustum, int flag);
 typedef void (__fastcall* EngineRenderFn)(void* self, void* edx);
+typedef void (__fastcall* GameUpdateFn)(void* self, void* edx, int delta);
 
 LoadLevelFn g_loadLevel;
 LoadResourceFn g_loadResource;
@@ -345,6 +372,7 @@ ArchiveBlockFn g_archiveBlock;
 SweepFn g_sweep;
 EngineUpdateFn g_engineUpdate;
 EngineRenderFn g_engineRender;
+GameUpdateFn g_gameUpdate;
 
 Detour g_loadLevelDetour;
 Detour g_loadResourceDetour;
@@ -355,6 +383,7 @@ Detour g_archiveBlockDetour;
 Detour g_waitForLoadingDetour;
 Detour g_engineUpdateDetour;
 Detour g_engineRenderDetour;
+Detour g_gameUpdateDetour;
 CallPatch g_lockPatches[kLockSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
@@ -494,6 +523,15 @@ void __fastcall hookEngineRender(void* self, void* edx) {
     g_engineRender(self, edx);
     tq::probe::engineCount(tq::probe::CounterEngineRender);
     tq::probe::engineCount(tq::probe::CounterEngineRenderUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookGameUpdate(void* self, void* edx, int delta) {
+    if (!g_gameUpdate) return;
+    const int64_t started = tq::probe::now();
+    g_gameUpdate(self, edx, delta);
+    tq::probe::engineCount(tq::probe::CounterGameUpdate);
+    tq::probe::engineCount(tq::probe::CounterGameUpdateUs,
                            tq::probe::microsecondsSince(started));
 }
 
@@ -682,6 +720,42 @@ bool installSweeps(HMODULE engine) {
     return installed != 0;
 }
 
+// The same assertion install() makes about Engine.dll, for whichever module
+// is being patched: a build with a different SizeOfImage is a different build,
+// and one log line beats nine failed signature matches.
+bool auditedImage(HMODULE module, DWORD expectedSize, const char* what) {
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)module;
+    if (!module || !tq::detour::readable(dos, sizeof(*dos))
+        || dos->e_lfanew <= 0)
+        return false;
+    const IMAGE_NT_HEADERS* nt =
+        (const IMAGE_NT_HEADERS*)((const BYTE*)module + dos->e_lfanew);
+    if (tq::detour::readable(nt, sizeof(*nt))
+        && nt->Signature == IMAGE_NT_SIGNATURE
+        && nt->OptionalHeader.SizeOfImage == expectedSize)
+        return true;
+    tq::hdr::log("Engine trace: %s is not the audited build, nothing"
+                 " installed from it\r\n", what);
+    return false;
+}
+
+bool installGame() {
+    HMODULE game = GetModuleHandleW(L"Game.dll");
+    if (!game || !auditedImage(game, kGameImageSize, "Game.dll")) {
+        note("GameEngine::Update", false);
+        return false;
+    }
+    void* target = resolve(game, kGameUpdateName, kGameUpdateRva);
+    if (target)
+        tq::detour::attach(
+            g_gameUpdateDetour, game, target,
+            signature(kGameUpdateBytes, sizeof(kGameUpdateBytes),
+                      kGameUpdateRelocs, 1),
+            6, (const void*)&hookGameUpdate, (void**)&g_gameUpdate);
+    note("GameEngine::Update", g_gameUpdate != nullptr);
+    return g_gameUpdate != nullptr;
+}
+
 bool installFrame(HMODULE engine) {
     void* target = resolve(engine, kEngineUpdateName, kEngineUpdateRva);
     if (target)
@@ -729,16 +803,7 @@ bool install(HMODULE engine) {
     if (!engine || !tq::probe::enabled() || !g_traceMask) return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
-    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)engine;
-    const IMAGE_NT_HEADERS* nt =
-        tq::detour::readable(dos, sizeof(*dos)) && dos->e_lfanew > 0
-            ? (const IMAGE_NT_HEADERS*)((const BYTE*)engine + dos->e_lfanew)
-            : nullptr;
-    if (!nt || !tq::detour::readable(nt, sizeof(*nt))
-        || nt->Signature != IMAGE_NT_SIGNATURE
-        || nt->OptionalHeader.SizeOfImage != kEngineImageSize) {
-        tq::hdr::log("Engine trace: not the audited Engine.dll, nothing"
-                     " installed\r\n");
+    if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
         InterlockedExchange(&g_installed, 0);
         return false;
     }
@@ -756,6 +821,7 @@ bool install(HMODULE engine) {
     if (wants(kGroupSweeps)) installSweeps(engine);
     if (wants(kGroupWait)) installWait(engine);
     if (wants(kGroupFrame)) installFrame(engine);
+    if (wants(kGroupGame)) installGame();
 
     tq::hdr::log("Engine trace: mask=0x%x hooks=%u main thread id at %p\r\n",
                  g_traceMask, g_installedHooks, (const void*)g_mainThreadId);
@@ -767,6 +833,8 @@ bool install(HMODULE engine) {
 void shutdown() {
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::detach(g_gameUpdateDetour);
+    g_gameUpdate = nullptr;
     tq::detour::detach(g_engineRenderDetour);
     g_engineRender = nullptr;
     tq::detour::detach(g_engineUpdateDetour);

@@ -225,6 +225,14 @@ enum Counter {
     CounterEngineUpdateUs,
     CounterEngineRender,
     CounterEngineRenderUs,
+    // Game.dll's simulation tick, which is neither of the two above. Run 11
+    // closed the session's accounting to 100% and found 38% of the hitch time
+    // -- and the majority of hitching frames -- outside Engine.dll entirely,
+    // on frames that render normally with the mod idle. This is the only
+    // candidate large enough to hold it; if it stays small, what is left is
+    // TQ.exe's own loop or the layer below the process.
+    CounterGameUpdate,
+    CounterGameUpdateUs,
     CounterCount
 };
 
