@@ -232,7 +232,10 @@ them, the loader-fence wait in `Engine::Update`, the seven resource-manager
 sweeps beside it, any time the render path blocked on a region lock, and
 `Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
 against the half of the frame they happened in, and `GameEngine::Update` from
-`Game.dll` for the simulation that is in neither. That
+`Game.dll` for the simulation that is in neither. Beside them the `loop_*`
+columns time what TQ.exe's own main loop blocks in -- its sleep, with what it
+asked for next to what it got, its message pump, and its waits -- and
+`proc_avail_va_mib` gauges the free address space. That
 last one is why a hitch row that used to say only "38 ms" can now name the
 load that caused it. Durations there are microseconds and end in `_us`, so
 `frames.py` counts them separately from the mod's own millisecond phases.
@@ -247,8 +250,13 @@ leaves the rest. A build that is not the audited `Engine.dll` installs nothing
 at all and says so in `tqflicker-hdr.log`. `engine_trace=1` is everything;
 larger values are a mask -- `2` loads, `4` archive reads, `8` the fence, `16`
 the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the
-update/render brackets, `256` `Game.dll`'s simulation tick -- so a run that
-misbehaves can be narrowed without a rebuild.
+update/render brackets, `256` `Game.dll`'s simulation tick, `512` TQ.exe's
+main loop -- so a run that misbehaves can be narrowed without a rebuild.
+
+The `512` group is the only one that patches nothing: it redirects three
+entries of TQ.exe's own import address table, so it is scoped to the one
+module being measured and every other caller in the process -- the mod's own
+included -- keeps the real function.
 
 For startup or crash diagnosis without changing the rendered image, enable the
 lightweight trace instead:

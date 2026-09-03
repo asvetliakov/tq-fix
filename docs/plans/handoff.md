@@ -132,16 +132,43 @@ up to 100.2%: render 57.9%, Present 12.5%, update 10.3%, **outside everything
 - The mapping-lease hypothesis for those frames is tested and dead: the worst
   stall cluster held 18 MiB, the 1,024 MiB cluster had the least stall time.
 
-## Next: run 12
+## Run 12 ruled out the last candidate inside the game
 
-`GameEngine::Update` (`Game+0x19a230`, `__thiscall void(int)`) is now
-bracketed too — the first hook in this work outside `Engine.dll`. It decides
-whether the dark 10 s is `Game.dll`'s simulation or something below the
-process, and those point at completely different work. Its ini is
-`cache/runs/run12-game-update.ini`; settings identical to runs 10 and 11.
+`GameEngine::Update` is **307 ms of a 102,662 ms session — 0.3%**, 1.3% of
+hitch time and **0.0%** of the time in frames over 100 ms. The stalls are not
+the game's simulation.
 
-Stage 4.1 is safe to write in parallel on its own evidence. Stage 5 should
-wait for run 12 — its premise is confirmed, but it fixes one frame a session.
+It also corrected run 11's accounting: the game's `Present` is called
+**outside** `Engine::Render` (median frame 2.00 ms render, 3.57 ms Present),
+so the brackets really are disjoint and the frame decomposes exactly —
+render 55.2%, Present 14.2%, **unexplained 11.6%**, update 9.6%, the mod
+9.2%, `GameEngine::Update` 0.3%. In hitching frames the residual is 40.9%
+over 50 ms and 44.7% over 100 ms.
+
+The residual is not a steady tax: median 0.12–0.61 ms on ordinary frames, and
+twenty discrete events of 50–398 ms arriving in **bursts**.
+
+## Next: run 13, and the instrument that patches nothing
+
+TQ.exe imports `Sleep`, `WaitForSingleObject`, `GetMessageA` and **no
+`PeekMessage`** — so its pump is the blocking one — and it imports
+`?NeedsSleep@GameEngine@GAME@@QBE_NXZ` beside `Sleep`, so it is a frame
+limiter. All three are now timed through **TQ.exe's import table**, which
+patches no code and is scoped to that one module.
+
+`loop_sleep_req_us` against `loop_sleep_us` is the pair that decides it: a
+loop that asks for a millisecond and is handed two hundred is an environment
+problem, not a game one, and the fix would be mod-side or a CrossOver setting
+rather than anything in Stages 4–6. `proc_avail_va_mib` rides along free and
+closes the address-space question for good.
+
+Ini: `cache/runs/run13-main-loop.ini`; settings identical to runs 10–12.
+
+## Superseded: run 12
+
+Answered above. Stage 4.1 remains safe to write in parallel on its own
+evidence; Stage 5's premise is confirmed but it fixes one frame a session, so
+it waits on where the residual lands.
 
 ## The old Stage 3 notes
 

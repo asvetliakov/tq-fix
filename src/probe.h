@@ -233,6 +233,30 @@ enum Counter {
     // TQ.exe's own loop or the layer below the process.
     CounterGameUpdate,
     CounterGameUpdateUs,
+    // TQ.exe's main loop, reached through its import table rather than by
+    // patching anything. Run 12 left 11.6% of the session and 44.7% of the
+    // time in frames over 100 ms outside every bracket, arriving as bursts of
+    // 50-398 ms events rather than as a steady tax -- and the loop's whole
+    // vocabulary for blocking is these three imports. It has no PeekMessage
+    // at all, so its message pump is the blocking GetMessageA, and it asks
+    // GameEngine::NeedsSleep and then sleeps.
+    //
+    // The requested/actual pair on the sleep is the point: a loop that asks
+    // for one millisecond and is handed two hundred is an environment
+    // problem, not a game one, and the two columns say which immediately.
+    CounterLoopSleep,
+    CounterLoopSleepRequestedUs,
+    CounterLoopSleepUs,
+    CounterLoopMessage,
+    CounterLoopMessageUs,
+    CounterLoopWait,
+    CounterLoopWaitUs,
+    // Free address space in the process, sampled once a frame as a gauge.
+    // The mapping-lease explanation for the stalls is already dead, but the
+    // 32-bit address space is the one resource whose exhaustion would look
+    // exactly like this, and one call a frame settles it rather than leaving
+    // it as a second run.
+    CounterProcAvailVaMib,
     CounterCount
 };
 

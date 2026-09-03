@@ -267,6 +267,8 @@ LONG g_callReplacement;
 void __fastcall detourHookBody(void*, void*, int) { InterlockedIncrement(&g_detourHook); }
 void __fastcall detourReplaceBody(void*, void*) { InterlockedIncrement(&g_detourHook); }
 void __stdcall detourCallTarget() { InterlockedIncrement(&g_callOriginal); }
+LONG g_sleepCalls;
+void __stdcall sleepCountingReplacement(DWORD) { InterlockedIncrement(&g_sleepCalls); }
 void __stdcall detourCallReplacement() { InterlockedIncrement(&g_callReplacement); }
 
 BYTE* allocateSyntheticEngine(SIZE_T imageSize) {
@@ -580,6 +582,55 @@ void testEngineProbe() {
     tq::probe::readOptions(nullptr);
     tq::engineprobe::readOptions(nullptr);
     DeleteFileW(ini);
+    // ---- patchImport, which is how the game's own main loop is instrumented.
+    // It writes four bytes into an import table rather than into anybody's
+    // code, and it is scoped to one module -- so the test that matters is
+    // that it finds the right slot, refuses a slot holding something else,
+    // and leaves the real function reachable everywhere else.
+    {
+        // winmm.dll is loaded by the harness and imports from kernel32, so
+        // there is a real import table to walk without inventing one.
+        HMODULE self = GetModuleHandleW(nullptr);
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        void* realSleep = kernel ? (void*)GetProcAddress(kernel, "Sleep")
+                                 : nullptr;
+        tq::detour::CallPatch importPatch = {};
+        check(realSleep && !tq::detour::patchImport(
+                  importPatch, self, "kernel32.dll", "Sleep",
+                  (const void*)&detourCallReplacement,
+                  (const void*)&detourCallReplacement)
+              && !importPatch.installed,
+              "patchImport refuses an import slot holding something else");
+        check(!tq::detour::patchImport(importPatch, self, "kernel32.dll",
+                                       "NoSuchExportedFunction", realSleep,
+                                       (const void*)&detourCallReplacement),
+              "patchImport refuses a name the module does not import");
+        // The real redirect, and back again. Sleep(0) is a yield, so calling
+        // through the patched slot is safe and observable.
+        if (realSleep
+            && tq::detour::patchImport(importPatch, self, "kernel32.dll",
+                                       "Sleep", realSleep,
+                                       (const void*)&sleepCountingReplacement)) {
+            check(importPatch.installed
+                  && *(void**)importPatch.operand
+                         == (void*)&sleepCountingReplacement,
+                  "patchImport redirects the import slot it was given");
+            g_sleepCalls = 0;
+            Sleep(0);
+            check(g_sleepCalls == 1,
+                  "the module's own call reaches the replacement");
+            check((void*)GetProcAddress(kernel, "Sleep") == realSleep,
+                  "the exporting module still hands out the real function");
+            tq::detour::restoreCall(importPatch);
+            g_sleepCalls = 0;
+            Sleep(0);
+            check(g_sleepCalls == 0,
+                  "restoreCall puts the import slot back");
+        } else {
+            check(false, "redirect the harness's own Sleep import");
+        }
+    }
+
     VirtualFree(image, 0, MEM_RELEASE);
 }
 

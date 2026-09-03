@@ -703,8 +703,13 @@ time is fully accounted for:
 | **outside all of them** | 10,009 ms | **10.0%** |
 | the mod's own phases | 9,520 ms | 9.5% |
 
-The five sum to 100.2% of 100,556 ms, and the 0.2% is nesting -- which is the
-arithmetic checking itself rather than a number to explain.
+*(Corrected after run 12: the "outside" row above was computed by subtracting
+the other four from the frame, so its summing to 100% was circular and proved
+nothing.  Run 12 established that the game's `Present` is called **outside**
+`Engine::Render`, not inside it -- the median frame spends 2.00 ms in
+`Engine::Render` and 3.57 ms in `Present` -- so the rows really are disjoint
+and the totals stand.  But the arithmetic was not the check it was described
+as, and §10 states it properly.)*
 
 ### The hitch time splits three ways, not one
 
@@ -767,6 +772,70 @@ void(int)`, confirmed by the `ret 4` at `+0x5ee`), which is the top-level
 simulation tick and the only candidate large enough to hold it.  It is now
 bracketed the same way -- 24 bytes verified, six stolen, once a frame -- and
 it is the first hook in this work that is not in `Engine.dll`.
+
+## 10. Run 12: the dark time is not the game's, either
+
+`GameEngine::Update` (`Game+0x19a230`) bracketed the same way, and the answer
+is a clean negative.
+
+**`Game.dll`'s simulation is 307 ms of a 102,662 ms session -- 0.3%.**  It is
+1.3% of the time in frames over 50 ms and **0.0%** of the time in frames over
+100 ms.  On every stall frame it reads 0.0-0.1 ms.  Whatever the stalls are,
+they are not the game thinking.
+
+With four disjoint brackets the frame decomposes exactly, and this time the
+parts are measured rather than derived:
+
+| | | |
+| --- | ---: | ---: |
+| `Engine::Render` | 56,655 ms | 55.2% |
+| the game's `Present` | 14,542 ms | 14.2% |
+| **unexplained** | 11,879 ms | **11.6%** |
+| `Engine::Update` | 9,860 ms | 9.6% |
+| the mod, at Present | 9,420 ms | 9.2% |
+| `GameEngine::Update` | 307 ms | 0.3% |
+
+`Present` is called **outside** `Engine::Render`, which run 11 assumed the
+other way: the median frame spends 2.00 ms in `Engine::Render` against 3.57 ms
+in `Present`, and only 539 of 1,852 ordinary frames have a render long enough
+to contain it.  So the game's main loop calls it, not the renderer.
+
+In the frames that hitch the residual is not a rounding error:
+
+| | over 50 ms (9.07 s) | over 100 ms (7.60 s) |
+| --- | ---: | ---: |
+| `Engine::Render` | 46.9% | 46.5% |
+| **unexplained** | **40.9%** | **44.7%** |
+| `Engine::Update` | 6.2% | 4.7% |
+| the game's `Present` | 3.2% | 3.5% |
+| the mod | 1.5% | 0.6% |
+| `GameEngine::Update` | 1.3% | 0.0% |
+
+### The shape of it is the clue
+
+The residual is not a tax spread over the session.  On ordinary frames its
+median is 0.12-0.61 ms.  It arrives as twenty discrete events of 50-398 ms,
+and those events come in **bursts**: four in the first 1.2 seconds, then
+nothing for 27 seconds, then nine between 58.7 s and 67.2 s spaced 0.2 to
+2.9 seconds apart, then quiet again.  Bursts do not look like game logic and
+they do not look like content -- run 11's stalls fell on different frames of
+the same route.
+
+### What TQ.exe actually imports
+
+The main loop is the only place left, and its import table is short enough to
+be suggestive.  From `KERNEL32` and `USER32` it takes `Sleep`,
+`WaitForSingleObject`, `GetMessageA`, `QueryPerformanceCounter` and
+`CreateFileA` -- and **no `PeekMessage` at all**.  From `Game.dll` it imports
+`?NeedsSleep@GameEngine@GAME@@QBE_NXZ`.
+
+So the loop asks the game whether it should sleep, and then sleeps; and it
+pumps messages with the **blocking** `GetMessageA` rather than the polling
+`PeekMessage`.  Either of those can stall for as long as the host feels like,
+neither is instrumented, and both would produce exactly the burst pattern
+above on a machine that is occasionally busy.  Both live in TQ.exe's import
+table, so measuring them is an IAT write and not a `.text` write -- the
+cheapest and most reversible instrument in this whole investigation.
 
 ## Cross-references worth acting on
 

@@ -1078,6 +1078,17 @@ void advanceTextureUploadsInternal() {
     if (leased > 0)
         tq::probe::count(tq::probe::CounterUploadLeasedMib,
                          (uint32_t)(leased / (1024 * 1024)));
+    // Free address space, on the same terms and for the same reason. This is
+    // a 32-bit process holding ~336 MiB of shadow targets, and exhaustion is
+    // the one resource failure that would look like the unexplained stalls
+    // run 12 measured. One call a frame settles it instead of costing a run.
+    if (tq::probe::enabled()) {
+        MEMORYSTATUSEX memory = {};
+        memory.dwLength = sizeof(memory);
+        if (GlobalMemoryStatusEx(&memory))
+            tq::probe::count(tq::probe::CounterProcAvailVaMib,
+                             (uint32_t)(memory.ullAvailVirtual / (1024 * 1024)));
+    }
 }
 
 

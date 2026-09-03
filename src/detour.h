@@ -110,6 +110,19 @@ bool patchCall(CallPatch& patch, HMODULE module, void* window,
                const Signature& signature, unsigned callOffset,
                const void* expectedTarget, const void* replacement);
 
+// Redirects one entry of `module`'s import address table, which is where the
+// game's own main loop reaches the operating system. This writes four bytes
+// into a data table rather than into anybody's code, and it is scoped to one
+// module: every other caller of the same API in the process is untouched,
+// including the mod's own calls.
+//
+// `expectedTarget` is what the slot must already hold, so a loader that bound
+// the import somewhere unexpected produces a refusal rather than a redirect.
+// restoreCall puts the slot back.
+bool patchImport(CallPatch& patch, HMODULE module, const char* dll,
+                 const char* name, const void* expectedTarget,
+                 const void* replacement);
+
 void restoreCall(CallPatch& patch);
 
 }  // namespace detour

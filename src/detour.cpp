@@ -241,6 +241,89 @@ bool patchCall(CallPatch& patch, HMODULE module, void* window,
     return true;
 }
 
+namespace {
+
+bool sameName(const char* a, const char* b) {
+    for (; *a && *b; ++a, ++b) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return !*a && !*b;
+}
+
+const IMAGE_NT_HEADERS* headers(HMODULE module) {
+    if (!module || !readable(module, sizeof(IMAGE_DOS_HEADER))) return nullptr;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)module;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return nullptr;
+    const IMAGE_NT_HEADERS* nt =
+        (const IMAGE_NT_HEADERS*)((const BYTE*)module + dos->e_lfanew);
+    if (!readable(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE)
+        return nullptr;
+    return nt;
+}
+
+// The slot in `module`'s import address table for `dll`!`name`, or null.
+// Imports by ordinal have no name to match and are skipped.
+void** importSlot(HMODULE module, const char* dll, const char* name) {
+    const IMAGE_NT_HEADERS* nt = headers(module);
+    if (!nt) return nullptr;
+    const IMAGE_DATA_DIRECTORY& directory =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!directory.VirtualAddress || !directory.Size) return nullptr;
+    BYTE* base = (BYTE*)module;
+    const IMAGE_IMPORT_DESCRIPTOR* descriptor =
+        (const IMAGE_IMPORT_DESCRIPTOR*)(base + directory.VirtualAddress);
+    for (; readable(descriptor, sizeof(*descriptor))
+           && (descriptor->OriginalFirstThunk || descriptor->FirstThunk);
+         ++descriptor) {
+        const char* moduleName = (const char*)(base + descriptor->Name);
+        if (!readable(moduleName, 1) || !sameName(moduleName, dll)) continue;
+        // The name table may be absent in a bound image; there is then no way
+        // to identify the slot, so refuse rather than guess at an index.
+        if (!descriptor->OriginalFirstThunk || !descriptor->FirstThunk) continue;
+        const IMAGE_THUNK_DATA* named =
+            (const IMAGE_THUNK_DATA*)(base + descriptor->OriginalFirstThunk);
+        IMAGE_THUNK_DATA* bound =
+            (IMAGE_THUNK_DATA*)(base + descriptor->FirstThunk);
+        for (; readable(named, sizeof(*named)) && named->u1.AddressOfData;
+             ++named, ++bound) {
+            if (named->u1.Ordinal & IMAGE_ORDINAL_FLAG32) continue;
+            const IMAGE_IMPORT_BY_NAME* entry =
+                (const IMAGE_IMPORT_BY_NAME*)(base + named->u1.AddressOfData);
+            if (!readable(entry, sizeof(*entry) + 1)) continue;
+            if (!sameName((const char*)entry->Name, name)) continue;
+            if (!readable(bound, sizeof(*bound))) return nullptr;
+            return (void**)&bound->u1.Function;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+bool patchImport(CallPatch& patch, HMODULE module, const char* dll,
+                 const char* name, const void* expectedTarget,
+                 const void* replacement) {
+    if (patch.installed || !module || !dll || !name || !expectedTarget
+        || !replacement)
+        return false;
+    void** slot = importSlot(module, dll, name);
+    if (!slot || !readable(slot, sizeof(*slot)) || *slot != expectedTarget)
+        return false;
+    const uint32_t original = (uint32_t)(uintptr_t)*slot;
+    const uint32_t updated = (uint32_t)(uintptr_t)replacement;
+    if (!writeBytes((BYTE*)slot, (const BYTE*)&original,
+                    (const BYTE*)&updated, sizeof(original)))
+        return false;
+    patch.operand = (BYTE*)slot;
+    patch.original = original;
+    patch.replacement = updated;
+    patch.installed = true;
+    return true;
+}
+
 void restoreCall(CallPatch& patch) {
     if (patch.installed && patch.operand)
         writeBytes(patch.operand, (const BYTE*)&patch.replacement,

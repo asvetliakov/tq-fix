@@ -316,6 +316,18 @@ const BYTE kGameUpdateBytes[] = {
 };
 const Relocation kGameUpdateRelocs[] = {{9, 0x2f1112}};
 
+// --- TQ.exe's main loop. Not a patch at all: three entries of the
+// executable's own import address table, so the redirect is scoped to the one
+// module that has the stall in it and every other caller in the process --
+// including the mod's own -- keeps the real function.
+//
+// The loop's entire vocabulary for blocking is these three. It imports no
+// PeekMessage, so its pump is the *blocking* GetMessageA; and it imports
+// GameEngine::NeedsSleep beside Sleep, so it is a frame limiter. Either can
+// hand back an arbitrary amount of time on a host that is momentarily busy,
+// which is the shape run 12 measured.
+const DWORD kExecutableImageSize = 0x0036a000;
+
 // ---------------------------------------------------------------------------
 // Configuration. Bit 0 means "everything"; the rest select groups, so a run
 // that misbehaves can be narrowed from the INI rather than from a rebuild.
@@ -328,6 +340,7 @@ const unsigned kGroupSweeps = 0x20;
 const unsigned kGroupWait = 0x40;
 const unsigned kGroupFrame = 0x80;
 const unsigned kGroupGame = 0x100;
+const unsigned kGroupLoop = 0x200;
 
 unsigned g_traceMask = 1;
 
@@ -524,6 +537,51 @@ void __fastcall hookEngineRender(void* self, void* edx) {
     tq::probe::engineCount(tq::probe::CounterEngineRender);
     tq::probe::engineCount(tq::probe::CounterEngineRenderUs,
                            tq::probe::microsecondsSince(started));
+}
+
+typedef void (WINAPI* SleepFn)(DWORD);
+typedef BOOL (WINAPI* GetMessageFn)(LPMSG, HWND, UINT, UINT);
+typedef DWORD (WINAPI* WaitFn)(HANDLE, DWORD);
+SleepFn g_loopSleep;
+GetMessageFn g_loopGetMessage;
+WaitFn g_loopWait;
+CallPatch g_loopSleepPatch;
+CallPatch g_loopMessagePatch;
+CallPatch g_loopWaitPatch;
+
+void __stdcall hookLoopSleep(DWORD milliseconds) {
+    if (!g_loopSleep) return;
+    const int64_t started = tq::probe::now();
+    g_loopSleep(milliseconds);
+    tq::probe::engineCount(tq::probe::CounterLoopSleep);
+    // Saturating rather than wrapping, so an INFINITE or a very long request
+    // reads as "longer than this can express" instead of as a short one.
+    const uint32_t requested = milliseconds > 4294967u ? 0xffffffffu
+                                                       : milliseconds * 1000u;
+    tq::probe::engineCount(tq::probe::CounterLoopSleepRequestedUs, requested);
+    tq::probe::engineCount(tq::probe::CounterLoopSleepUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+BOOL __stdcall hookLoopGetMessage(LPMSG message, HWND window, UINT first,
+                                  UINT last) {
+    if (!g_loopGetMessage) return FALSE;
+    const int64_t started = tq::probe::now();
+    const BOOL result = g_loopGetMessage(message, window, first, last);
+    tq::probe::engineCount(tq::probe::CounterLoopMessage);
+    tq::probe::engineCount(tq::probe::CounterLoopMessageUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
+}
+
+DWORD __stdcall hookLoopWait(HANDLE handle, DWORD milliseconds) {
+    if (!g_loopWait) return WAIT_FAILED;
+    const int64_t started = tq::probe::now();
+    const DWORD result = g_loopWait(handle, milliseconds);
+    tq::probe::engineCount(tq::probe::CounterLoopWait);
+    tq::probe::engineCount(tq::probe::CounterLoopWaitUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
 }
 
 void __fastcall hookGameUpdate(void* self, void* edx, int delta) {
@@ -756,6 +814,49 @@ bool installGame() {
     return g_gameUpdate != nullptr;
 }
 
+// One import slot, with the original captured before the slot is rewritten so
+// the hook always has something to call through.
+bool redirectImport(CallPatch& patch, HMODULE executable, const char* dll,
+                    const char* name, void** original, const void* replacement) {
+    HMODULE provider = GetModuleHandleA(dll);
+    void* target = provider ? (void*)GetProcAddress(provider, name) : nullptr;
+    if (!target) {
+        tq::hdr::log("Engine trace: %s!%s is not resolvable\r\n", dll, name);
+        return false;
+    }
+    *original = target;
+    if (tq::detour::patchImport(patch, executable, dll, name, target,
+                                replacement))
+        return true;
+    *original = nullptr;
+    tq::hdr::log("Engine trace: TQ.exe's %s import does not hold %p\r\n",
+                 name, target);
+    return false;
+}
+
+bool installLoop() {
+    HMODULE executable = GetModuleHandleW(nullptr);
+    if (!executable
+        || !auditedImage(executable, kExecutableImageSize, "TQ.exe")) {
+        note("TQ.exe main loop", false);
+        return false;
+    }
+    unsigned installed = 0;
+    installed += redirectImport(g_loopSleepPatch, executable, "kernel32.dll",
+                                "Sleep", (void**)&g_loopSleep,
+                                (const void*)&hookLoopSleep) ? 1u : 0u;
+    installed += redirectImport(g_loopMessagePatch, executable, "user32.dll",
+                                "GetMessageA", (void**)&g_loopGetMessage,
+                                (const void*)&hookLoopGetMessage) ? 1u : 0u;
+    installed += redirectImport(g_loopWaitPatch, executable, "kernel32.dll",
+                                "WaitForSingleObject", (void**)&g_loopWait,
+                                (const void*)&hookLoopWait) ? 1u : 0u;
+    tq::hdr::log("Engine trace: TQ.exe main loop %u/3 imports redirected\r\n",
+                 installed);
+    if (installed) ++g_installedHooks;
+    return installed != 0;
+}
+
 bool installFrame(HMODULE engine) {
     void* target = resolve(engine, kEngineUpdateName, kEngineUpdateRva);
     if (target)
@@ -822,6 +923,7 @@ bool install(HMODULE engine) {
     if (wants(kGroupWait)) installWait(engine);
     if (wants(kGroupFrame)) installFrame(engine);
     if (wants(kGroupGame)) installGame();
+    if (wants(kGroupLoop)) installLoop();
 
     tq::hdr::log("Engine trace: mask=0x%x hooks=%u main thread id at %p\r\n",
                  g_traceMask, g_installedHooks, (const void*)g_mainThreadId);
@@ -833,6 +935,12 @@ bool install(HMODULE engine) {
 void shutdown() {
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::restoreCall(g_loopWaitPatch);
+    g_loopWait = nullptr;
+    tq::detour::restoreCall(g_loopMessagePatch);
+    g_loopGetMessage = nullptr;
+    tq::detour::restoreCall(g_loopSleepPatch);
+    g_loopSleep = nullptr;
     tq::detour::detach(g_gameUpdateDetour);
     g_gameUpdate = nullptr;
     tq::detour::detach(g_engineRenderDetour);
