@@ -254,7 +254,8 @@ at all and says so in `tqflicker-hdr.log`. `engine_trace=1` is everything;
 larger values are a mask -- `2` loads, `4` archive reads, `8` the fence, `16`
 the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the
 update/render brackets, `256` `Game.dll`'s simulation tick, `512` TQ.exe's
-main loop -- so a run that misbehaves can be narrowed without a rebuild.
+main loop, `1024` the inside of the window message pump -- so a run that
+misbehaves can be narrowed without a rebuild.
 
 The `512` group is the only one that patches nothing: it redirects three
 entries of TQ.exe's own import address table, so it is scoped to the one

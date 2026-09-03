@@ -341,6 +341,7 @@ const unsigned kGroupWait = 0x40;
 const unsigned kGroupFrame = 0x80;
 const unsigned kGroupGame = 0x100;
 const unsigned kGroupLoop = 0x200;
+const unsigned kGroupPump = 0x400;
 
 unsigned g_traceMask = 1;
 
@@ -666,6 +667,35 @@ int __fastcall hookPump(void* self, void* edx) {
     const int result = g_pump(self, edx);
     tq::probe::engineCount(tq::probe::CounterLoopPump);
     tq::probe::engineCount(tq::probe::CounterLoopPumpUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
+}
+
+// The pump, split. Both are USER32 imports of Engine.dll -- not of the
+// executable -- because EWindow::ProcessMessages is Engine.dll's code.
+typedef BOOL (WINAPI* PeekMessageFn)(LPMSG, HWND, UINT, UINT, UINT);
+typedef LRESULT (WINAPI* DispatchMessageFn)(const MSG*);
+PeekMessageFn g_peekMessage;
+DispatchMessageFn g_dispatchMessage;
+CallPatch g_peekPatch, g_dispatchPatch;
+
+BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
+                               UINT last, UINT remove) {
+    if (!g_peekMessage) return FALSE;
+    const int64_t started = tq::probe::now();
+    const BOOL result = g_peekMessage(message, window, first, last, remove);
+    tq::probe::engineCount(tq::probe::CounterPumpPeek);
+    tq::probe::engineCount(tq::probe::CounterPumpPeekUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
+}
+
+LRESULT __stdcall hookDispatchMessage(const MSG* message) {
+    if (!g_dispatchMessage) return 0;
+    const int64_t started = tq::probe::now();
+    const LRESULT result = g_dispatchMessage(message);
+    tq::probe::engineCount(tq::probe::CounterPumpDispatch);
+    tq::probe::engineCount(tq::probe::CounterPumpDispatchUs,
                            tq::probe::microsecondsSince(started));
     return result;
 }
@@ -996,6 +1026,21 @@ bool installLoop() {
     return installed != 0;
 }
 
+bool installPump(HMODULE engine) {
+    unsigned installed = 0;
+    installed += redirectImport(g_peekPatch, engine, "user32.dll",
+                                "PeekMessageA", (void**)&g_peekMessage,
+                                (const void*)&hookPeekMessage) ? 1u : 0u;
+    installed += redirectImport(g_dispatchPatch, engine, "user32.dll",
+                                "DispatchMessageA",
+                                (void**)&g_dispatchMessage,
+                                (const void*)&hookDispatchMessage) ? 1u : 0u;
+    tq::hdr::log("Engine trace: message pump %u/2 imports redirected\r\n",
+                 installed);
+    if (installed) ++g_installedHooks;
+    return installed != 0;
+}
+
 bool installFrame(HMODULE engine) {
     void* target = resolve(engine, kEngineUpdateName, kEngineUpdateRva);
     if (target)
@@ -1063,6 +1108,7 @@ bool install(HMODULE engine) {
     if (wants(kGroupFrame)) installFrame(engine);
     if (wants(kGroupGame)) installGame();
     if (wants(kGroupLoop)) installLoop();
+    if (wants(kGroupPump)) installPump(engine);
 
     tq::hdr::log("Engine trace: mask=0x%x hooks=%u main thread id at %p\r\n",
                  g_traceMask, g_installedHooks, (const void*)g_mainThreadId);
@@ -1074,6 +1120,10 @@ bool install(HMODULE engine) {
 void shutdown() {
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::restoreCall(g_dispatchPatch);
+    g_dispatchMessage = nullptr;
+    tq::detour::restoreCall(g_peekPatch);
+    g_peekMessage = nullptr;
     tq::detour::restoreCall(g_pumpPatch);
     g_pump = nullptr;
     tq::detour::restoreCall(g_questsPatch);

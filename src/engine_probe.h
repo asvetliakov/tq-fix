@@ -38,6 +38,8 @@ namespace engineprobe {
 //      Engine::PresentSurface, the collision fixup, quest triggers, and
 //      EWindow::ProcessMessages -- eleven imports covering every call in the
 //      loop that does work rather than return a pointer
+//1024  inside the pump: PeekMessageA and DispatchMessageA, which are
+//      Engine.dll's imports rather than the executable's
 void readOptions(const wchar_t* iniPath);
 
 // Installs whatever the mask selects and the build supports. Returns true if

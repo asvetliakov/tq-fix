@@ -298,6 +298,25 @@ enum Counter {
     CounterLoopQuestsUs,
     CounterLoopPump,
     CounterLoopPumpUs,
+    // Inside the pump. Run 15 found it: EWindow::ProcessMessages is 20.3% of
+    // the hitch time, and the worst frames are 119-214 ms of pump with
+    // everything else at nothing. The function itself is nine instructions --
+    // PeekMessageA(PM_REMOVE), TranslateMessage, DispatchMessageA, looping
+    // until the queue drains -- so there are exactly two places the time can
+    // be, and they mean opposite things.
+    //
+    // Many cheap peeks means a message flood, and the count says so.  One
+    // expensive peek means the host is not answering, which under CrossOver
+    // is a wineserver round trip and not the game's problem at all.  Time in
+    // dispatch means the game's own window procedure, which is the one case
+    // that is the game's problem and the one that could be fixed here.
+    //
+    // These hook Engine.dll's import table rather than the executable's; the
+    // pump belongs to Engine.dll, which is why TQ.exe's GetMessageA read zero.
+    CounterPumpPeek,
+    CounterPumpPeekUs,
+    CounterPumpDispatch,
+    CounterPumpDispatchUs,
     CounterCount
 };
 

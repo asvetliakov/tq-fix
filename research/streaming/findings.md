@@ -948,6 +948,74 @@ Also worth recording from the disassembly: `mov ebp, ds:0x5efa6c` at
 genuinely on the path, and its one call in a session is a real measurement of
 `NeedsSleep` rather than a missed hook.
 
+## 13. Run 15: it is the window message pump
+
+Eleven brackets, covering every call in TQ.exe's main loop that does work
+rather than return a pointer.  The residual fell from 11.6% of the session to
+**2.3%**, and from 35.5% of the time in frames over 50 ms to **12.2%**.  What
+took it:
+
+| whole session | | frames over 50 ms | |
+| --- | ---: | --- | ---: |
+| `Engine::Render` | 57.2% | `Engine::Render` | 51.0% |
+| `Engine::PresentSurface` | 21.6% | **`EWindow::ProcessMessages`** | **20.3%** |
+| `Engine::Update` | 10.2% | unexplained | 12.2% |
+| **`EWindow::ProcessMessages`** | **8.0%** | `Engine::Update` | 8.8% |
+| unexplained | 2.3% | `Engine::PresentSurface` | 5.2% |
+
+And the stall frames are the pump almost in their entirety:
+
+```
+ frame       ms |      pump    render    update    unexplained
+  4592    224.2 |     213.9       4.4       3.9        0.1
+  5858    206.6 |     192.5      11.3       2.2        0.5
+  4460    193.8 |     188.8       1.7       2.3        0.1
+  7195    210.1 |     188.0      15.8       4.3        0.3
+  3768    178.6 |     151.2      20.5       4.6        0.2
+  3482    147.8 |     118.3      23.4       3.8        0.1
+```
+
+That is the "second class" of hitch, the one §8 could not name and §9 found on
+frames that draw normally with the mod idle.  It is the window message pump.
+
+**The platform layer was a wrong guess and should be recorded as one.**
+`THQNO_Process` -- the online poll with `libcurl` behind it, and the candidate
+I rated most likely -- is **44 ms in the session**.  `SoundManager::Update` is
+2 ms, `Jukebox::Update` and `QuestRepository::FireTriggers` round to nothing,
+`GraphicsEngine::UpdateFromOptions` is 28 ms.  All negligible, all closed.
+
+### The pump is nine instructions, and there are only two places the time can be
+
+`EWindow::ProcessMessages` (`Engine+0x272380`) reads, in full:
+
+```
+  edi = PeekMessageA   ebx = TranslateMessage   ebp = DispatchMessageA
+loop:
+  PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)
+  if (!result) goto done
+  TranslateMessage(&msg)
+  DispatchMessageA(&msg)          ; -> the game's window procedure
+  if (msg.message == WM_QUIT) return false
+done:
+  if (result == 1) goto loop      ; drain the queue
+  return this[0x24] == 0
+```
+
+It is called once per frame (7,471 calls in 7,469 frames), so a 214 ms pump is
+one call, not an accumulation across the frame.  The time is therefore in
+`PeekMessageA` or in `DispatchMessageA`, and the two mean opposite things:
+
+- **many cheap peeks** is a message flood, and the count says so directly;
+- **one expensive peek** is the host not answering -- under CrossOver a
+  wineserver round trip, and not the game's problem at all;
+- **time in dispatch** is the game's own window procedure, which is the only
+  one of the three that is the game's problem and the only one fixable here.
+
+Both are imports of **Engine.dll**, not of the executable -- the pump is
+Engine.dll's code, which is the same reason TQ.exe's `GetMessageA` read zero
+calls in run 13 -- so splitting them is two more import-table entries and
+still no patched code.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to
