@@ -53,10 +53,36 @@ below was written. That single fact invalidates findings (1) and (2):
 - **The uploader is no longer the problem.** `stream_step_ms` p99 is 5.1 ms and
   its max 13 ms. The remaining Stage 2 items — the `PSSetShaderResources` fast
   path, multi-job advance, the chunk-rate model — are polish.
-- **The big hitches are the game's.** The worst frame of the most recent run is
-  **1,503 ms** with `arc_open:+1299` and only 22 ms in any mod column. That is
-  archive reading and level loading, and it dwarfs everything fixed so far.
-  **Stage 3 is the right next step**, and Stages 4 and 5 remain gated on it.
+- **The big hitches are the game's, and this is now measured rather than
+  inferred.** Run 9 repeated the route with the texture pack removed entirely,
+  everything served from `.arc`, every other setting identical:
+
+  | | pack on (run 8) | archives only (run 9) |
+  | --- | ---: | ---: |
+  | p50 / p99 frame | 9.02 / 45.9 ms | **9.02 / 45.6 ms** |
+  | worst frame | 1,503 ms (`arc_open` 1299) | **1,358 ms (`arc_open` 1300)** |
+  | frames > 200 ms | 8, 3.87 s | **12, 4.17 s** |
+  | hitch time in no mod column | 6.84 s | **8.68 s** |
+  | `stream_step_ms` | 6,252 ms | 7 ms |
+  | `engine_tex_create_off_us` | 1,513 ms | 205 ms |
+
+  Removing 92.4 GiB of loose textures did not improve the hitches at all — it
+  is arguably slightly worse, though 8 frames against 12 is within route
+  variance. The worst frame is plainly the same event in both runs: ~1,300
+  archive opens in a single frame. Around 30% of every archive open in a
+  session lands inside a frame over 200 ms, in both configurations.
+
+  The run also confirms finding (1) precisely for the configuration it was
+  written about: with no loose files, `upload_jobs_started` and
+  `upload_src_loose` are **0**. The progressive uploader really never runs on
+  a stock install.
+
+  So the remaining stutter is the game's own level loading and archive reads,
+  independent of the pack. **Stages 3, 4 and 5 are the whole remaining
+  answer**, and Stage 3 is the right next step because 4 and 5 are gated on
+  what it measures. Note also that a second class of hitch — run 9's frames
+  1327 and 5726, 256 ms and 228 ms — carries *no* archive opens and nothing
+  named at all, so the archive path is not the only mechanism in play.
 
 ---
 
