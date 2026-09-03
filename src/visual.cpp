@@ -642,21 +642,31 @@ LONG g_looseTraceLines;
 LONG g_looseRedirects;
 LONG g_looseBiggest;
 
-// MSVC's std::string is a 16-byte union that holds either the characters or a
-// pointer to them, then the size, then the capacity. FileSystem::OpenFile
-// picks between the two with `CMP capacity,0x10` / `CMOVNC`, which is what
-// fixes the layout. Best-effort and fully guarded: this is only ever used to
-// name a file in the log.
-const char* resourcePath(const void* string, unsigned* length) {
+// The source is handed the characters, not the std::string that holds them:
+//
+//     101514eb  LEA    EDX,[ESP + 0x18]        ; the inline buffer
+//     101514ef  CMOVNC EDX,dword ptr [ESP+0x18] ; or the heap pointer, if long
+//     101514f7  PUSH   EDX                      ; <- this is arg1
+//
+// so FileSystem::OpenFile unwraps it and what arrives is a plain NUL-terminated
+// const char*. Run 7 logged sixty-four redirects as `?` because this read it as
+// a string object instead. Best-effort and fully guarded: it only names a file
+// in the log.
+const char* resourcePath(const void* path, unsigned* length) {
     *length = 0;
-    if (!string || !readable(string)) return nullptr;
-    const BYTE* s = (const BYTE*)string;
-    if (!readable(s + 20)) return nullptr;
-    unsigned size = *(const unsigned*)(s + 16);
-    unsigned capacity = *(const unsigned*)(s + 20);
-    const char* text = capacity >= 16 ? *(const char* const*)s : (const char*)s;
-    if (!text || !readable(text) || size == 0 || size > 1024) return nullptr;
-    *length = size;
+    const char* text = (const char*)path;
+    if (!text || !readable(text)) return nullptr;
+    unsigned n = 0;
+    while (n < 1024) {
+        const char* at = text + n;
+        // Re-checked at each page boundary rather than once, since the string
+        // may end anywhere and the next page need not be mapped.
+        if (((uintptr_t)at & 0xfff) == 0 && !readable(at)) return nullptr;
+        if (!*at) break;
+        ++n;
+    }
+    if (!n || n >= 1024) return nullptr;
+    *length = n;
     return text;
 }
 
@@ -684,7 +694,16 @@ void* __fastcall hookDirectoryOpenFile(void* self, void*, const void* path,
     tq::probe::engineCount(tq::probe::CounterLooseOpen);
 
     unsigned length = ((FileGetLengthFn)vtable[6])(file);
-    if (length < 32) return file;
+    // Run 7 measured the probe at 357 us -- a MapViewOfFile/UnmapViewOfFile
+    // pair is a wineserver round trip, not the memory read it looks like -- so
+    // it is worth not paying on files that cannot possibly be over the limit.
+    // The floor is an eighth of a square texture at the limit -- 2 MiB at
+    // 4096, and half of a DXT1 square at the limit, so a texture that trips
+    // the cap has to be pathologically thin to fall under it. On the measured
+    // pack it skips 40% of opens while the smallest genuinely oversize file is
+    // 10.67 MiB, five times the floor. GetLength is one load.
+    const unsigned floorBytes = (limit * limit) / 8u;
+    if (length < 32 || length < floorBytes) return file;
     const unsigned want = length < 128 ? length : 128;
     // FileDirectory::Unlock is `UnmapViewOfFile(this[0x34]); this[0x34] = 0`
     // and nothing else -- no lock flag -- so the object is left exactly as
