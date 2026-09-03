@@ -48,7 +48,7 @@ if it objects, recreate `Settings/` containing just those.
 | `53773b3`, `60950cf`, `e49d274` | Greece; the message histogram; the timer experiment and its `[performance] timer_period_ms` switch. |
 | `96527e6` | The pump closed: the timer is not the game's, and the re-arm path is refused. |
 | `6d760c2` | `verify-sites.py`, which reads every byte table out of the source and compares it to the installed binaries. |
-| *this session* | **Stage 4.1** — `src/arc_cache.{h,cpp}`, `[performance] archive_cache_mb`, seven `arc_cache_*` columns, five more verified windows in the block routine. Then six measurement runs (21–26) and four more instrument groups: the array allocator (`2048`), the archive syscalls (`4096`), everything that blocks (`8192`), and the `_main` split on all three. Findings §18–§25. |
+| `d6a4e79` | **Stage 4.1** — `src/arc_cache.{h,cpp}`, `[performance] archive_cache_mb`, seven `arc_cache_*` columns, five more verified windows in the block routine. Then six measurement runs (21–26) and four more instrument groups: the array allocator (`2048`), the archive syscalls (`4096`), everything that blocks (`8192`), and the `_main` split on all three. Findings §18–§25. |
 
 Verification is `npm run doctor && npm run build && npm run selftest`.
 
@@ -156,9 +156,12 @@ postponed.**
 
 ## The runs on disk
 
-`cache/` is gitignored but present. Each run has `cache/runN-*.csv`, its log,
-and the ini it was booted with in `cache/runs/`. The ini headers carry the
-reasoning; they are worth reading before re-running anything.
+**`cache/` is gitignored, so none of this is in the repository — it exists
+only on the reporter's machine.** Run CSVs and logs live in the game directory
+as `tqflicker-frames.runN.csv` / `tqflicker-debug.runN.log`, and the ini each
+was booted with is in `cache/runs/`. The ini headers carry the reasoning for
+each run and are worth reading before re-running anything; runs 21–26 are the
+current work. `tools/frames.py <csv>` summarises one.
 
 | run | what it settled |
 | --- | --- |
