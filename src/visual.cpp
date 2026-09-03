@@ -7,6 +7,7 @@
 #include "probe.h"
 #include "shadow_fix.h"
 #include "streaming.h"
+#include "upload.h"
 
 #include <d3dcompiler.h>
 #include <math.h>
@@ -141,38 +142,15 @@ LONG g_programState;  // 0 idle, 1 building, 2 ready, 3 failed
 HANDLE g_programThread;
 HMODULE g_compiler;
 
-const UINT kUploadChunkBytes = 2 * 1024 * 1024;
-
-// What one progressive upload chunk is allowed to cost. At 60 FPS a frame is
-// 16.7 ms, and a background upload that takes a fifth of it is already
-// visible in the pacing graph.
-const double kUploadTargetMs = 3.0;
-const UINT kUploadFloorBytes = 256 * 1024;
-
-// Milliseconds per KiB, smoothed over recent chunks. The source is a mapped
-// archive view, so a chunk's cost depends on whether its pages are resident
-// and varies far too much to predict from size alone -- but the recent rate is
-// a much better opening guess than the ceiling.
-double g_uploadMsPerKib = 0.002;
-
-UINT chunkBytesForTargetMs() {
-    if (!(g_uploadMsPerKib > 0.0)) return kUploadFloorBytes;
-    double kib = kUploadTargetMs / g_uploadMsPerKib;
-    if (kib < 256.0) kib = 256.0;
-    if (kib > (double)kUploadChunkBytes / 1024.0)
-        kib = (double)kUploadChunkBytes / 1024.0;
-    return (UINT)(kib * 1024.0);
-}
-
-const unsigned kMaxUploadJobs = 256;
+// The job pool, the chunk controller and the substitution table live in
+// src/upload.cpp. What stays here is what is specific to this game: which
+// textures are candidates, which File object owns their bytes, and the
+// mapping lease that keeps a loose file's view alive while a job runs.
 const unsigned kMaxMappingLeases = 128;
-const unsigned kMaxTextureMips = 16;
 
 typedef void (__thiscall* ArchiveUnmapFn)(void*);
 ArchiveUnmapFn g_archiveUnmap;
 LONG g_archiveVtablePatched;
-CRITICAL_SECTION g_uploadLock;
-bool g_uploadLockReady;
 
 struct MappingLease {
     bool used;
@@ -182,23 +160,7 @@ struct MappingLease {
     LONG jobs;
 };
 
-struct UploadJob {
-    LONG state;  // 0 free, 1 reserved, 2 uploading
-    ID3D11Texture2D* texture;
-    ID3D11ShaderResourceView* fullView;
-    ID3D11ShaderResourceView* lowView;
-    MappingLease* lease;
-    D3D11_TEXTURE2D_DESC desc;
-    D3D11_SUBRESOURCE_DATA source[kMaxTextureMips];
-    UINT lowMip;
-    UINT mip;
-    UINT blockRow;
-    UINT chunkBytes;
-    UINT maxChunkBytes;
-};
-
 MappingLease g_mappingLeases[kMaxMappingLeases];
-UploadJob g_uploadJobs[kMaxUploadJobs];
 
 bool upgradedIdentity(void* identity);
 
@@ -609,8 +571,8 @@ MappingLease* createLease(void* source, void* mappedBase) {
 void __fastcall hookArchiveUnmap(void* source, void*) {
     bool retained = false;
     void* unmap = nullptr;
-    if (g_uploadLockReady) {
-        EnterCriticalSection(&g_uploadLock);
+    if (tq::upload::ready()) {
+        tq::upload::lock();
         MappingLease* lease = findLease(source);
         if (lease && *(void**)((BYTE*)source + 0x34) == nullptr) {
             lease->sealed = true;
@@ -620,14 +582,14 @@ void __fastcall hookArchiveUnmap(void* source, void*) {
                 memset(lease, 0, sizeof(*lease));
             }
         }
-        LeaveCriticalSection(&g_uploadLock);
+        tq::upload::unlock();
     }
     if (unmap) UnmapViewOfFile(unmap);
     if (!retained && g_archiveUnmap) g_archiveUnmap(source);
 }
 
 bool ensureArchiveUnmapHook(void** vtable) {
-    if (!vtable || !g_uploadLockReady) return false;
+    if (!vtable || !tq::upload::ready()) return false;
     if (InterlockedCompareExchange(&g_archiveVtablePatched, 1, 1))
         return vtable[4] == (void*)&hookArchiveUnmap;
     if (vtable[4] != (void*)((BYTE*)GetModuleHandleW(L"Engine.dll") + 0x14e540))
@@ -641,21 +603,76 @@ bool ensureArchiveUnmapHook(void** vtable) {
     return true;
 }
 
-UploadJob* reserveUploadJob() {
-    for (unsigned i = 0; i < kMaxUploadJobs; ++i)
-        if (InterlockedCompareExchange(&g_uploadJobs[i].state, 1, 0) == 0)
-            return &g_uploadJobs[i];
-    return nullptr;
+// The mapping lease, expressed as the upload module's retain/release pair.
+// Called with that module's lock held, on whichever thread is loading.
+bool retainMapping(void* ownerPointer, void** token) {
+    TextureOwner& owner = *(TextureOwner*)ownerPointer;
+    MappingLease* lease = findLease(owner.source);
+    if (owner.mappedBase
+        && (!lease || lease->sealed || lease->mappedBase != owner.mappedBase))
+        lease = createLease(owner.source, owner.mappedBase);
+    bool hooked = lease && ensureArchiveUnmapHook(owner.vtable);
+    if (hooked && owner.mappedBase) {
+        void** field = (void**)((BYTE*)owner.source + 0x34);
+        void* prior = InterlockedCompareExchangePointer(field, nullptr,
+                                                        owner.mappedBase);
+        hooked = prior == owner.mappedBase;
+    }
+    if (hooked && !owner.mappedBase)
+        hooked = lease->mappedBase != nullptr;
+    if (!hooked) {
+        if (lease && !lease->jobs) memset(lease, 0, sizeof(*lease));
+        return false;
+    }
+    ++lease->jobs;
+    *token = lease;
+    return true;
 }
 
-UINT lowMipFor(const D3D11_TEXTURE2D_DESC* desc) {
-    UINT width = desc->Width, height = desc->Height, mip = 0;
-    while (mip + 1 < desc->MipLevels && (width > 512 || height > 512)) {
-        if (width > 1) width >>= 1;
-        if (height > 1) height >>= 1;
-        ++mip;
+// Called on the render thread when a job retires, with the upload module's
+// lock dropped -- which is what lets the unmap happen outside it, as it did
+// before the extraction. Retaking the lock here is safe: it is a recursive
+// CRITICAL_SECTION and this thread does not hold it.
+void releaseMapping(void* token) {
+    MappingLease* lease = (MappingLease*)token;
+    if (!lease) return;
+    void* unmap = nullptr;
+    tq::upload::lock();
+    if (lease->jobs > 0) --lease->jobs;
+    if (lease->sealed && !lease->jobs) {
+        unmap = lease->mappedBase;
+        memset(lease, 0, sizeof(*lease));
     }
-    return mip;
+    tq::upload::unlock();
+    if (unmap) UnmapViewOfFile(unmap);
+}
+
+int64_t uploadNow() {
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return counter.QuadPart;
+}
+
+double uploadMillisecondsSince(int64_t start) {
+    static LARGE_INTEGER frequency;   // invariant for the process
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    LARGE_INTEGER after;
+    QueryPerformanceCounter(&after);
+    return frequency.QuadPart
+         ? (double)(after.QuadPart - start) * 1000.0 / (double)frequency.QuadPart
+         : 0.0;
+}
+
+tq::upload::Calls uploadCalls() {
+    tq::upload::Calls calls = {};
+    calls.createTexture2D = g_createTexture2D;
+    calls.createShaderResourceView = g_createShaderResourceView;
+    calls.updateSubresource = g_updateSubresource;
+    calls.now = &uploadNow;
+    calls.millisecondsSince = &uploadMillisecondsSince;
+    calls.retain = &retainMapping;
+    calls.release = &releaseMapping;
+    return calls;
 }
 
 bool progressiveTextureCandidate(const D3D11_TEXTURE2D_DESC* desc,
@@ -663,7 +680,7 @@ bool progressiveTextureCandidate(const D3D11_TEXTURE2D_DESC* desc,
                                  const void* caller, uint64_t* topBytes) {
     if (!g_options.streaming || !desc || !initial || !initial[0].pSysMem
         || desc->Usage != D3D11_USAGE_DEFAULT || desc->ArraySize != 1
-        || !desc->MipLevels || desc->MipLevels > kMaxTextureMips
+        || !desc->MipLevels || desc->MipLevels > tq::upload::kMaxTextureMips
         || desc->BindFlags != D3D11_BIND_SHADER_RESOURCE) return false;
     UINT blockBytes = 0;
     if (!blockCompressedFormat(desc->Format, &blockBytes)) return false;
@@ -685,7 +702,7 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
     *handled = false;
     uint64_t topBytes = 0;
     if (!progressiveTextureCandidate(desc, initial, caller, &topBytes)
-        || !g_uploadLockReady) return E_FAIL;
+        || !tq::upload::ready()) return E_FAIL;
     TextureOwner owner = {};
     const BYTE* dds = (const BYTE*)initial[0].pSysMem - 0x80;
     // Past this point the texture is one this path wanted, so every decline
@@ -703,74 +720,8 @@ HRESULT createProgressiveTexture(ID3D11Device* device,
         return E_FAIL;
     }
     tq::probe::engineCount(tq::probe::CounterUploadSrcLoose);
-    UploadJob* job = reserveUploadJob();
-    if (!job) {
-        tq::probe::engineCount(tq::probe::CounterUploadRejectPool);
-        tq::probe::engineCount(tq::probe::CounterUploadRejected);
-        return E_FAIL;
-    }
-
-    UINT lowMip = lowMipFor(desc);
-    D3D11_SUBRESOURCE_DATA staged[kMaxTextureMips] = {};
-    for (UINT mip = lowMip; mip < desc->MipLevels; ++mip)
-        staged[mip] = initial[mip];
-    HRESULT hr = g_createTexture2D(device, desc, staged, texture);
-    if (FAILED(hr) || !texture || !*texture) {
-        InterlockedExchange(&job->state, 0);
-        return E_FAIL;
-    }
-
-    EnterCriticalSection(&g_uploadLock);
-    MappingLease* lease = findLease(owner.source);
-    if (owner.mappedBase
-        && (!lease || lease->sealed || lease->mappedBase != owner.mappedBase))
-        lease = createLease(owner.source, owner.mappedBase);
-    bool hooked = lease && ensureArchiveUnmapHook(owner.vtable);
-    if (hooked && owner.mappedBase) {
-        void** field = (void**)((BYTE*)owner.source + 0x34);
-        void* prior = InterlockedCompareExchangePointer(field, nullptr, owner.mappedBase);
-        hooked = prior == owner.mappedBase;
-    }
-    if (hooked && !owner.mappedBase)
-        hooked = lease->mappedBase != nullptr;
-    if (!hooked) {
-        if (lease && !lease->jobs) memset(lease, 0, sizeof(*lease));
-        LeaveCriticalSection(&g_uploadLock);
-        (*texture)->Release();
-        *texture = nullptr;
-        InterlockedExchange(&job->state, 0);
-        // The retention resource could not be acquired: the lease table is
-        // full, or the mapping pointer moved under the swap. Stage 2 replaces
-        // leases with a copy, and this becomes the allocation failure proper.
-        tq::probe::engineCount(tq::probe::CounterUploadRejectAlloc);
-        tq::probe::engineCount(tq::probe::CounterUploadRejected);
-        return E_FAIL;
-    }
-
-    memset((BYTE*)job + sizeof(job->state), 0, sizeof(*job) - sizeof(job->state));
-    job->texture = *texture;
-    job->texture->AddRef();
-    job->lease = lease;
-    job->desc = *desc;
-    memcpy(job->source, initial, desc->MipLevels * sizeof(*initial));
-    job->lowMip = lowMip;
-    job->mip = 0;
-    job->blockRow = 0;
-    job->maxChunkBytes = topBytes <= 4ull * 1024ull * 1024ull
-                       ? 1024 * 1024 : kUploadChunkBytes;
-    // Start from what the last chunks actually cost rather than from the
-    // ceiling. Opening at the maximum is what produced the 34 ms outlier: the
-    // controller could only correct after a frame had already paid for it.
-    job->chunkBytes = chunkBytesForTargetMs();
-    // Also the loader thread's, so also the engine channel; this counter
-    // has been reading zero for every run that ever recorded it.
-    tq::probe::engineCount(tq::probe::CounterUploadJobsStarted);
-    ++lease->jobs;
-    InterlockedExchange(&job->state, 2);
-    LeaveCriticalSection(&g_uploadLock);
-
-    *handled = true;
-    return hr;
+    return tq::upload::create(device, desc, initial, texture, topBytes, &owner,
+                              handled);
 }
 
 HRESULT WINAPI hookCreateShaderResourceView(
@@ -787,32 +738,8 @@ HRESULT WINAPI hookCreateShaderResourceView(
         used = &translated;
     }
     HRESULT hr = g_createShaderResourceView(device, resource, used, view);
-    if (FAILED(hr) || !view || !*view || !g_uploadLockReady) return hr;
-
-    EnterCriticalSection(&g_uploadLock);
-    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
-        UploadJob& job = g_uploadJobs[i];
-        if (job.state != 2 || job.texture != resource || job.fullView) continue;
-        D3D11_SHADER_RESOURCE_VIEW_DESC low = {};
-        if (description) low = *description;
-        else {
-            low.Format = job.desc.Format;
-            low.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            low.Texture2D.MostDetailedMip = 0;
-            low.Texture2D.MipLevels = job.desc.MipLevels;
-        }
-        if (low.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D) {
-            low.Texture2D.MostDetailedMip = job.lowMip;
-            low.Texture2D.MipLevels = job.desc.MipLevels - job.lowMip;
-            ID3D11ShaderResourceView* lowView = nullptr;
-            if (SUCCEEDED(g_createShaderResourceView(device, resource, &low, &lowView))) {
-                job.fullView = *view;
-                job.lowView = lowView;
-            }
-        }
-        break;
-    }
-    LeaveCriticalSection(&g_uploadLock);
+    if (FAILED(hr) || !view || !*view) return hr;
+    tq::upload::noteShaderResourceView(device, resource, description, *view);
     return hr;
 }
 
@@ -820,142 +747,26 @@ void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
                                      UINT count,
                                      ID3D11ShaderResourceView* const* views) {
     if (!views || !count || count > D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT
-        || !g_uploadLockReady) {
+        || !tq::upload::ready()) {
         g_psSetShaderResources(context, start, count, views);
         return;
     }
     tq::probe::count(tq::probe::CounterPsSetSrv);
     ID3D11ShaderResourceView* substituted[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
     memcpy(substituted, views, count * sizeof(*views));
-    EnterCriticalSection(&g_uploadLock);
-    for (UINT slot = 0; slot < count; ++slot) {
-        if (!substituted[slot]) continue;
-        for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
-            UploadJob& job = g_uploadJobs[i];
-            if (job.state == 2 && job.fullView == substituted[slot] && job.lowView) {
-                substituted[slot] = job.lowView;
-                break;
-            }
-        }
-    }
+    // The lock is held across the substitution *and* the device call, which is
+    // what the shipped code did. It is a real cost on a path that runs
+    // thousands of times a frame, and Stage 2.6 of the mitigation plan is
+    // where it goes; keeping it here keeps this commit a move.
+    tq::upload::lock();
+    tq::upload::substituteLocked(count, substituted);
     g_psSetShaderResources(context, start, count, substituted);
-    LeaveCriticalSection(&g_uploadLock);
+    tq::upload::unlock();
 }
 
 void advanceTextureUploadsInternal() {
-    if (!g_uploadLockReady || !g_context || !g_updateSubresource) return;
-    ID3D11Texture2D* releaseTexture = nullptr;
-    ID3D11ShaderResourceView* releaseLowView = nullptr;
-    void* unmap = nullptr;
-
-    EnterCriticalSection(&g_uploadLock);
-    UploadJob* selected = nullptr;
-    for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
-        if (g_uploadJobs[i].state == 2) {
-            selected = &g_uploadJobs[i];
-            break;
-        }
-    }
-    if (!selected) {
-        LeaveCriticalSection(&g_uploadLock);
-        return;
-    }
-
-    UploadJob& job = *selected;
-    if (job.mip < job.lowMip) {
-        UINT width = job.desc.Width >> job.mip;
-        UINT height = job.desc.Height >> job.mip;
-        if (!width) width = 1;
-        if (!height) height = 1;
-        UINT totalBlockRows = (height + 3u) / 4u;
-        if (!totalBlockRows) totalBlockRows = 1;
-        UINT pitch = job.source[job.mip].SysMemPitch;
-        UINT rows = pitch ? job.chunkBytes / pitch : 0;
-        if (!rows) rows = 1;
-        if (rows > totalBlockRows - job.blockRow)
-            rows = totalBlockRows - job.blockRow;
-        D3D11_BOX box = {};
-        box.left = 0;
-        box.right = width;
-        box.top = job.blockRow * 4u;
-        box.bottom = (job.blockRow + rows) * 4u;
-        if (box.bottom > height) box.bottom = height;
-        box.front = 0;
-        box.back = 1;
-        const BYTE* source = (const BYTE*)job.source[job.mip].pSysMem
-                           + (uint64_t)job.blockRow * pitch;
-        // QueryPerformanceCounter, not GetTickCount. The tick counter's
-        // resolution is about 15.6 ms, so a chunk that took four milliseconds
-        // measured zero and the budget ratcheted to its ceiling and stayed
-        // there, while a chunk unlucky enough to straddle a tick measured
-        // fifteen and was halved for no reason. A measured run showed the
-        // controller pinned at the ceiling while chunks really cost 3.2 ms per
-        // MiB -- up to 19 ms in a single frame.
-        //
-        // `source` points into the memory-mapped archive, so this call can also
-        // fault pages in off disk. That cost is real, is part of what the frame
-        // paid, and is inside the interval measured here.
-        static LARGE_INTEGER frequency;   // invariant for the process
-        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
-        LARGE_INTEGER before, after;
-        QueryPerformanceCounter(&before);
-        g_updateSubresource(g_context, job.texture, job.mip, &box,
-                            source, pitch, 0);
-        QueryPerformanceCounter(&after);
-        double stepMs = frequency.QuadPart
-            ? (double)(after.QuadPart - before.QuadPart) * 1000.0
-              / (double)frequency.QuadPart : 0.0;
-        // Budget in time rather than in bytes: what matters to frame pacing is
-        // the milliseconds this stole, and how many bytes that bought varies
-        // with whether the source was resident.
-        UINT sentKib = (UINT)(((uint64_t)rows * pitch) / 1024u);
-        if (sentKib && stepMs > 0.0) {
-            // Weighted towards recent history, and hard against the worst
-            // case: a chunk that cost far more than expected must move the
-            // estimate immediately, not over the next twenty chunks.
-            double observed = stepMs / (double)sentKib;
-            double weight = observed > g_uploadMsPerKib ? 0.5 : 0.1;
-            g_uploadMsPerKib += (observed - g_uploadMsPerKib) * weight;
-        }
-        UINT predicted = chunkBytesForTargetMs();
-        if (stepMs > kUploadTargetMs && job.chunkBytes > kUploadFloorBytes)
-            job.chunkBytes = job.chunkBytes / 2 < predicted
-                           ? job.chunkBytes / 2 : predicted;
-        else
-            job.chunkBytes = predicted;
-        if (job.chunkBytes < kUploadFloorBytes)
-            job.chunkBytes = kUploadFloorBytes;
-        if (job.chunkBytes > job.maxChunkBytes)
-            job.chunkBytes = job.maxChunkBytes;
-        tq::probe::count(tq::probe::CounterUploadSteps);
-        tq::probe::count(tq::probe::CounterUploadKiB,
-                         (uint32_t)(((uint64_t)rows * pitch) / 1024u));
-        job.blockRow += rows;
-        if (job.blockRow >= totalBlockRows) {
-            ++job.mip;
-            job.blockRow = 0;
-        }
-    }
-
-    if (job.mip >= job.lowMip) {
-        tq::probe::count(tq::probe::CounterUploadJobsDone);
-        releaseTexture = job.texture;
-        releaseLowView = job.lowView;
-        MappingLease* lease = job.lease;
-        memset((BYTE*)&job + sizeof(job.state), 0,
-               sizeof(job) - sizeof(job.state));
-        InterlockedExchange(&job.state, 0);
-        if (lease && lease->jobs > 0) --lease->jobs;
-        if (lease && lease->sealed && !lease->jobs) {
-            unmap = lease->mappedBase;
-            memset(lease, 0, sizeof(*lease));
-        }
-    }
-    LeaveCriticalSection(&g_uploadLock);
-
-    if (releaseLowView) releaseLowView->Release();
-    if (releaseTexture) releaseTexture->Release();
-    if (unmap) UnmapViewOfFile(unmap);
+    if (!g_context) return;
+    tq::upload::advance(g_context);
 }
 
 
@@ -2789,10 +2600,6 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
                  hdrRuntime.settings.requestHdr ? 1u : 0u,
                  hdrRuntime.fp16Active ? 1u : 0u,
                  hdrRuntime.active ? 1u : 0u);
-    if (g_options.streaming) {
-        InitializeCriticalSection(&g_uploadLock);
-        g_uploadLockReady = true;
-    }
     tq::streaming::setPresentCallback(&onPresent);
     tq::streaming::setPostPresentCallback(&onPostPresent);
     // The shadow path needs the pre-resize callback too, not just FP16: the
@@ -2878,6 +2685,14 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&cv[45], (void*)&hookRSSetScissors, (void**)&g_rsSetScissors);
     }
     g_updateSubresource = g_options.streaming ? (UpdateSubresourceFn)cv[48] : nullptr;
+    // After patching, not before it: the module's dependencies are the
+    // originals the patches hand back. The window this opens is a few slot
+    // writes wide and fails open -- upload::ready() is false, so a texture
+    // created inside it takes the engine's own synchronous path, which is
+    // exactly what happens when streaming is off.
+    if (g_options.streaming && !tq::upload::install(uploadCalls())) {
+        tq::hdr::log("Progressive upload disabled: missing device entry point\r\n");
+    }
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -2911,10 +2726,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         restoreSlots();
         g_context->Release();
         g_context = nullptr;
-        if (g_uploadLockReady) {
-            g_uploadLockReady = false;
-            DeleteCriticalSection(&g_uploadLock);
-        }
+        tq::upload::shutdown();
         tq::streaming::setPresentCallback(nullptr);
         tq::streaming::setPostPresentCallback(nullptr);
         tq::streaming::setPreResizeCallback(nullptr);
@@ -3016,22 +2828,12 @@ void shutdown() {
     g_bloomToggleKeyDown = false;
     g_bloomEnhancedRuntime = true;
     restoreSlots();
-    if (g_uploadLockReady) {
-        EnterCriticalSection(&g_uploadLock);
-        for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
-            UploadJob& job = g_uploadJobs[i];
-            if (job.lowView) job.lowView->Release();
-            if (job.texture) job.texture->Release();
-            memset(&job, 0, sizeof(job));
-        }
-        for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
-            if (g_mappingLeases[i].used && g_mappingLeases[i].mappedBase)
-                UnmapViewOfFile(g_mappingLeases[i].mappedBase);
-            memset(&g_mappingLeases[i], 0, sizeof(g_mappingLeases[i]));
-        }
-        LeaveCriticalSection(&g_uploadLock);
-        g_uploadLockReady = false;
-        DeleteCriticalSection(&g_uploadLock);
+    // Jobs first, so nothing is still holding a lease when the leases go.
+    tq::upload::shutdown();
+    for (unsigned i = 0; i < kMaxMappingLeases; ++i) {
+        if (g_mappingLeases[i].used && g_mappingLeases[i].mappedBase)
+            UnmapViewOfFile(g_mappingLeases[i].mappedBase);
+        memset(&g_mappingLeases[i], 0, sizeof(g_mappingLeases[i]));
     }
     bool workerStopped = true;
     if (g_programThread) {

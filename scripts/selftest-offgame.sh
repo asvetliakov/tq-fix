@@ -10,7 +10,7 @@ REPORT_WIN='C:\tqflicker-selftest\report.txt'
 [ -f build/winmm.dll ] || { echo "no build/winmm.dll - run: npm run build" >&2; exit 1; }
 
 i686-w64-mingw32-g++ -o build/selftest.exe \
-  test/selftest.cpp src/bloom_hook.cpp src/dxbc_patch.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp \
+  test/selftest.cpp src/bloom_hook.cpp src/dxbc_patch.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp \
   -I src -I build/gen -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   -DTQ_SELFTEST -ld3d11
 i686-w64-mingw32-g++ -shared -o build/Direct3D11.dll \

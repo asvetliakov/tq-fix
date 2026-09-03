@@ -17,6 +17,7 @@
 #include "probe.h"
 #include "shadow_fix.h"
 #include "streaming.h"
+#include "upload.h"
 #include "visual.h"
 #include "bloom_shaders.inc"
 
@@ -537,6 +538,248 @@ bool csvLastFieldIs(const char* line, const char* name) {
     for (const char* p = line; p < end; ++p) if (*p == ',') last = p + 1;
     size_t length = strlen(name);
     return (size_t)(end - last) == length && strncmp(last, name, length) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// The progressive texture uploader, driven entirely off-game. The module takes
+// its device entry points and its clock by injection precisely so this is
+// possible: the chunk controller is a feedback loop over measured time, and
+// against a clock that only ever tells the truth there is nothing to assert.
+
+struct FakeCom {
+    void** vtable;
+    LONG refs;
+};
+
+ULONG __stdcall fakeAddRef(void* self) { return ++((FakeCom*)self)->refs; }
+ULONG __stdcall fakeRelease(void* self) { return --((FakeCom*)self)->refs; }
+
+void* g_fakeVtable[8];
+
+void initFakeCom(FakeCom* object) {
+    g_fakeVtable[1] = (void*)&fakeAddRef;
+    g_fakeVtable[2] = (void*)&fakeRelease;
+    object->vtable = g_fakeVtable;
+    object->refs = 1;
+}
+
+struct UploadFake {
+    FakeCom texture;
+    FakeCom fullView;
+    FakeCom lowView;
+    unsigned creates, views, updates, retains, releases;
+    // What the last UpdateSubresource was asked to do.
+    D3D11_BOX box;
+    UINT mip, pitch;
+    const void* source;
+    UINT lastRows;
+    UINT lastBytes;
+    // The clock the module sees, and what the next chunk will appear to cost.
+    int64_t clock;
+    double nextChunkMs;
+    // Which mips the fake was handed at creation, so the low-mip staging can
+    // be asserted rather than assumed.
+    const void* staged[tq::upload::kMaxTextureMips];
+    UINT stagedCount;
+};
+
+UploadFake g_upload;
+
+HRESULT WINAPI fakeCreateTexture2D(ID3D11Device*, const D3D11_TEXTURE2D_DESC* desc,
+                                   const D3D11_SUBRESOURCE_DATA* initial,
+                                   ID3D11Texture2D** texture) {
+    ++g_upload.creates;
+    g_upload.stagedCount = desc ? desc->MipLevels : 0;
+    for (UINT i = 0; i < g_upload.stagedCount && i < tq::upload::kMaxTextureMips; ++i)
+        g_upload.staged[i] = initial ? initial[i].pSysMem : nullptr;
+    initFakeCom(&g_upload.texture);
+    *texture = (ID3D11Texture2D*)&g_upload.texture;
+    return S_OK;
+}
+
+HRESULT WINAPI fakeCreateShaderResourceView(ID3D11Device*, ID3D11Resource*,
+                                            const D3D11_SHADER_RESOURCE_VIEW_DESC*,
+                                            ID3D11ShaderResourceView** view) {
+    ++g_upload.views;
+    initFakeCom(&g_upload.lowView);
+    *view = (ID3D11ShaderResourceView*)&g_upload.lowView;
+    return S_OK;
+}
+
+void WINAPI fakeUpdateSubresource(ID3D11DeviceContext*, ID3D11Resource*, UINT mip,
+                                  const D3D11_BOX* box, const void* source,
+                                  UINT pitch, UINT) {
+    ++g_upload.updates;
+    if (box) g_upload.box = *box;
+    g_upload.mip = mip;
+    g_upload.pitch = pitch;
+    g_upload.source = source;
+    g_upload.lastRows = box ? (box->bottom - box->top + 3u) / 4u : 0u;
+    g_upload.lastBytes = g_upload.lastRows * pitch;
+    // Charge the configured cost to the clock the module reads back.
+    g_upload.clock += (int64_t)(g_upload.nextChunkMs * 1000.0);
+}
+
+int64_t fakeNow() { return g_upload.clock; }
+double fakeMillisecondsSince(int64_t start) {
+    return (double)(g_upload.clock - start) / 1000.0;
+}
+bool fakeRetain(void*, void** token) { ++g_upload.retains; *token = &g_upload; return true; }
+void fakeRelease2(void*) { ++g_upload.releases; }
+
+tq::upload::Calls fakeUploadCalls() {
+    tq::upload::Calls calls = {};
+    calls.createTexture2D = &fakeCreateTexture2D;
+    calls.createShaderResourceView = &fakeCreateShaderResourceView;
+    calls.updateSubresource = &fakeUpdateSubresource;
+    calls.now = &fakeNow;
+    calls.millisecondsSince = &fakeMillisecondsSince;
+    calls.retain = &fakeRetain;
+    calls.release = &fakeRelease2;
+    return calls;
+}
+
+// A 2048x2048 BC1 with a full mip chain, which is the shape of the terrain
+// textures this path exists for: 8 bytes per 4x4 block, so mip 0 is a 4096
+// byte pitch over 512 block rows.
+struct SyntheticTexture {
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_SUBRESOURCE_DATA initial[tq::upload::kMaxTextureMips];
+    BYTE* bytes;
+    size_t size;
+    uint64_t topBytes;
+};
+
+bool buildSyntheticTexture(SyntheticTexture* out) {
+    memset(out, 0, sizeof(*out));
+    out->desc.Width = out->desc.Height = 2048;
+    out->desc.MipLevels = 12;
+    out->desc.ArraySize = 1;
+    out->desc.Format = DXGI_FORMAT_BC1_UNORM;
+    out->desc.SampleDesc.Count = 1;
+    out->desc.Usage = D3D11_USAGE_DEFAULT;
+    out->desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    size_t total = 0;
+    for (UINT mip = 0; mip < out->desc.MipLevels; ++mip) {
+        UINT width = out->desc.Width >> mip, height = out->desc.Height >> mip;
+        if (!width) width = 1;
+        if (!height) height = 1;
+        total += (size_t)((width + 3u) / 4u) * 8u * ((height + 3u) / 4u);
+    }
+    out->bytes = (BYTE*)malloc(total);
+    if (!out->bytes) return false;
+    out->size = total;
+    // A pattern that is a function of position, so a copy can be checked byte
+    // for byte against what the engine's buffer held.
+    for (size_t i = 0; i < total; ++i) out->bytes[i] = (BYTE)(i * 31u + 7u);
+    size_t offset = 0;
+    for (UINT mip = 0; mip < out->desc.MipLevels; ++mip) {
+        UINT width = out->desc.Width >> mip, height = out->desc.Height >> mip;
+        if (!width) width = 1;
+        if (!height) height = 1;
+        UINT pitch = ((width + 3u) / 4u) * 8u;
+        UINT rows = (height + 3u) / 4u;
+        out->initial[mip].pSysMem = out->bytes + offset;
+        out->initial[mip].SysMemPitch = pitch;
+        offset += (size_t)pitch * rows;
+        if (!mip) out->topBytes = (uint64_t)pitch * rows;
+    }
+    return true;
+}
+
+void testUpload() {
+    SyntheticTexture texture;
+    if (!buildSyntheticTexture(&texture)) {
+        check(false, "build a synthetic 2048x2048 BC1 for the upload tests");
+        return;
+    }
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)&g_upload;
+
+    // --- one job, and only the low mips reach the driver at creation ---
+    memset(&g_upload, 0, sizeof(g_upload));
+    g_upload.nextChunkMs = 1.0;
+    tq::upload::resetRateForTest();
+    check(tq::upload::install(fakeUploadCalls()) && tq::upload::ready(),
+          "the upload module installs against injected device calls");
+    ID3D11Texture2D* created = nullptr;
+    bool handled = false;
+    HRESULT hr = tq::upload::create(nullptr, &texture.desc, texture.initial,
+                                    &created, texture.topBytes, &g_upload,
+                                    &handled);
+    UINT lowMip = tq::upload::lowMipFor(&texture.desc);
+    bool staged = g_upload.stagedCount == texture.desc.MipLevels;
+    for (UINT mip = 0; mip < texture.desc.MipLevels && staged; ++mip)
+        staged = mip < lowMip ? g_upload.staged[mip] == nullptr
+                              : g_upload.staged[mip] == texture.initial[mip].pSysMem;
+    check(SUCCEEDED(hr) && handled && created && tq::upload::runningJobsForTest() == 1
+          && g_upload.retains == 1,
+          "create starts one progressive job and takes a hold on the source");
+    check(lowMip == 2 && staged,
+          "the texture is created with the large mips withheld from the driver");
+
+    // --- one chunk, block-aligned, out of the mip the job is working on ---
+    tq::upload::advance(context);
+    bool aligned = g_upload.updates == 1
+                && g_upload.mip == 0
+                && g_upload.box.left == 0 && g_upload.box.right == 2048
+                && g_upload.box.top == 0
+                && g_upload.box.bottom % 4 == 0
+                && g_upload.box.bottom <= 2048
+                && g_upload.box.front == 0 && g_upload.box.back == 1
+                && g_upload.pitch == texture.initial[0].SysMemPitch
+                && g_upload.source == texture.initial[0].pSysMem;
+    check(aligned, "advance issues one chunk as a block-aligned D3D11_BOX");
+
+    // --- an expensive chunk shrinks the next one ---
+    // A fresh job, so both chunks come out of mip 0 and their sizes are
+    // comparable: across a mip boundary the pitch changes and a comparison in
+    // block rows means nothing.
+    tq::upload::shutdown();
+    memset(&g_upload, 0, sizeof(g_upload));
+    g_upload.nextChunkMs = 40.0;
+    tq::upload::resetRateForTest();
+    tq::upload::install(fakeUploadCalls());
+    created = nullptr;
+    handled = false;
+    tq::upload::create(nullptr, &texture.desc, texture.initial, &created,
+                       texture.topBytes, &g_upload, &handled);
+    tq::upload::advance(context);
+    UINT expensive = g_upload.lastBytes;
+    tq::upload::advance(context);
+    check(expensive && g_upload.lastBytes * 2 <= expensive,
+          "a chunk that overran its budget at least halves the one after it");
+
+    // --- cheap chunks grow the budget back to the ceiling ---
+    // The rate is process-global by design -- it is a property of the driver
+    // and the format, not of a texture -- so this starts from the ratcheted
+    // value the expensive run just produced, which is the case that matters.
+    tq::upload::shutdown();
+    memset(&g_upload, 0, sizeof(g_upload));
+    g_upload.nextChunkMs = 0.1;
+    tq::upload::resetRateForTest();
+    tq::upload::install(fakeUploadCalls());
+    UINT peakAfterFirst = 0;
+    for (unsigned i = 0; i < 12; ++i) {
+        if (!tq::upload::runningJobsForTest()) {
+            created = nullptr;
+            handled = false;
+            tq::upload::create(nullptr, &texture.desc, texture.initial, &created,
+                               texture.topBytes, &g_upload, &handled);
+            tq::upload::advance(context);   // the opening chunk, uncapped
+            continue;
+        }
+        tq::upload::advance(context);
+        if (g_upload.lastBytes > peakAfterFirst) peakAfterFirst = g_upload.lastBytes;
+    }
+    check(tq::upload::chunkBytesForTargetMs() == 2u * 1024u * 1024u,
+          "chunks that cost nothing grow the budget back to its ceiling");
+    check(peakAfterFirst && peakAfterFirst <= 1024u * 1024u,
+          "a job's own chunks stay under the per-texture cap however cheap they get");
+
+    tq::upload::shutdown();
+    check(!tq::upload::ready() && tq::upload::runningJobsForTest() == 0,
+          "shutdown clears the job pool");
+    free(texture.bytes);
 }
 
 // Whether this device retires timestamp queries at all, and under which of the
@@ -1152,6 +1395,7 @@ int main(int argc, char** argv) {
     testShadowSplitRedirect();
     testShadowFitStabilizer();
     testShadowBasisReference();
+    testUpload();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
     check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal

@@ -41,7 +41,7 @@ fi
 
 "$CXX" -shared -o "$OUT" \
   build/gen/winmm.def \
-  src/fix.cpp src/bloom_hook.cpp src/dxbc_patch.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/visual.cpp \
+  src/fix.cpp src/bloom_hook.cpp src/dxbc_patch.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp src/visual.cpp \
   build/gen/winmm_stubs.S \
   -I src -I build/gen \
   "${CXXFLAGS[@]}" \
