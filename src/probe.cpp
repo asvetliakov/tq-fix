@@ -68,7 +68,22 @@ const char* const kCounterNames[CounterCount] = {
     "upload_unmap", "upload_unmap_us", "upload_unmap_inline",
     "upload_unmap_inline_us", "upload_release_us",
     "loose_open", "loose_probe", "loose_probe_us", "loose_reject_oversize",
-    "arc_open", "upload_leased_mib"
+    "arc_open", "upload_leased_mib",
+    // Engine.dll's own work. Durations are `_us` here too, and for the same
+    // reason: frames.py must not charge the game's loading to the mod.
+    "engine_level_load", "engine_level_load_us", "engine_level_load_main",
+    "engine_level_load_main_us",
+    "engine_res_load", "engine_res_load_us", "engine_res_load_main",
+    "engine_res_load_main_us",
+    "engine_region_unload", "engine_region_unload_us",
+    "engine_arc_read", "engine_arc_kib",
+    "engine_arc_blocks", "engine_arc_inflate_us",
+    "engine_res_enqueued",
+    "engine_fence_wait", "engine_fence_wait_us",
+    "engine_region_lock_hits", "engine_region_lock_us",
+    "engine_sweeps", "engine_sweep_us",
+    "engine_wait_loading", "engine_wait_loading_us",
+    "engine_update", "engine_update_us", "engine_render", "engine_render_us"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");

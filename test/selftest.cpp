@@ -11,6 +11,8 @@
 #include "dxbc_patch.h"
 #include "bloom_hook.h"
 #include "frame_overlay.h"
+#include "detour.h"
+#include "engine_probe.h"
 #include "frustum_fix.h"
 #include "grass.h"
 #include "hdr.h"
@@ -248,6 +250,336 @@ void testGrassProbe() {
     check(!tq::grass::install((HMODULE)image, broken) && !tq::grass::installed(),
           "reject a near-match grass prologue without patching it");
     tq::grass::shutdown();
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+// The engine instrumentation writes into another module's .text on paths that
+// run thousands of times a second, so the parts worth testing without the game
+// are the ones that can corrupt it: that a long signature refuses a target
+// whose short prologue matches, that relocated operands are checked rather
+// than skipped, that a retargeted call site reaches the replacement, and that
+// every byte comes back.
+LONG g_detourBody;
+LONG g_detourHook;
+LONG g_callOriginal;
+LONG g_callReplacement;
+
+void __fastcall detourHookBody(void*, void*, int) { InterlockedIncrement(&g_detourHook); }
+void __fastcall detourReplaceBody(void*, void*) { InterlockedIncrement(&g_detourHook); }
+void __stdcall detourCallTarget() { InterlockedIncrement(&g_callOriginal); }
+void __stdcall detourCallReplacement() { InterlockedIncrement(&g_callReplacement); }
+
+BYTE* allocateSyntheticEngine(SIZE_T imageSize) {
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, imageSize,
+                                      MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!image) return nullptr;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x100;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.SizeOfImage = (DWORD)imageSize;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    memcpy(section->Name, ".text", 5);
+    section->VirtualAddress = 0x1000;
+    section->Misc.VirtualSize = 0x2aa69c;
+    return image;
+}
+
+void testDetour() {
+    const SIZE_T imageSize = 0x400000;
+    BYTE* image = allocateSyntheticEngine(imageSize);
+    if (!image) {
+        check(false, "allocate a synthetic image for the detour tests");
+        return;
+    }
+    HMODULE module = (HMODULE)image;
+
+    // ---- a long signature over the shared six-byte prologue.
+    //
+    // Region::LoadLevel, Archive::ReadFromFile, the archive block inflate and
+    // Region::GetEntitiesInFrustum all open with these same six bytes, so this
+    // is the exact confusion the verify length exists to prevent.
+    BYTE* target = image + 0x20bec0;
+    BYTE body[] = {
+        0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,     // the shared prologue: stolen
+        0x83, 0xec, 0x0c, 0x53, 0x8b, 0xd9,     // verified, not stolen
+        0x56, 0x8b, 0x43, 0x50,                 // mov eax,[ebx+0x50]
+        0xff, 0x05, 0, 0, 0, 0,                 // inc [g_detourBody]
+        0x8b, 0xe5, 0x5d, 0xc2, 0x04, 0x00      // mov esp,ebp; pop ebp; ret 4
+    };
+    emitAbsoluteIncrement(body + 16, &g_detourBody);
+    memcpy(target, body, sizeof(body));
+    BYTE reference[sizeof(body)];
+    memcpy(reference, body, sizeof(body));
+
+    tq::detour::Signature good = {body, 16, nullptr, 0};
+    BYTE nearMiss[16];
+    memcpy(nearMiss, body, sizeof(nearMiss));
+    nearMiss[9] ^= 1;                            // past the six stolen bytes
+    tq::detour::Signature wrong = {nearMiss, 16, nullptr, 0};
+
+    tq::detour::Detour detour = {};
+    void* trampoline = nullptr;
+    check(!tq::detour::attach(detour, module, target, wrong, 6,
+                              (const void*)&detourHookBody, &trampoline)
+          && !detour.installed && !trampoline
+          && !memcmp(target, reference, sizeof(reference)),
+          "attach refuses a target whose stolen bytes match but whose"
+          " signature does not, and writes nothing");
+
+    check(tq::detour::attach(detour, module, target, good, 6,
+                             (const void*)&detourHookBody, &trampoline)
+          && detour.installed && trampoline
+          && target[0] == 0x68 && target[5] == 0xc3,
+          "attach detours a verified target with one absolute branch");
+
+    typedef void (__fastcall* BodyFn)(void*, void*, int);
+    g_detourBody = g_detourHook = 0;
+    ((BodyFn)(void*)target)(image, nullptr, 0);
+    check(g_detourHook == 1 && g_detourBody == 0,
+          "the detoured entry reaches the replacement");
+    g_detourHook = 0;
+    ((BodyFn)trampoline)(image, nullptr, 0);
+    check(g_detourBody == 1 && g_detourHook == 0,
+          "the trampoline still reaches the original body");
+
+    tq::detour::detach(detour);
+    check(!detour.installed && !memcmp(target, reference, sizeof(reference)),
+          "detach restores every stolen byte");
+
+    // ---- relocated operands are resolved, not masked out.
+    BYTE* relocated = image + 0x213ed0;
+    BYTE relocatedBody[] = {
+        0x6a, 0xff, 0x68, 0, 0, 0, 0,           // push -1; push <handler>
+        0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+        0x50, 0x83, 0xec, 0x08,
+        0xc2, 0x04, 0x00
+    };
+    const uint32_t handler = (uint32_t)(uintptr_t)(image + 0x2a2db8);
+    memcpy(relocatedBody + 3, &handler, sizeof(handler));
+    memcpy(relocated, relocatedBody, sizeof(relocatedBody));
+    BYTE relocatedPattern[17];
+    memcpy(relocatedPattern, relocatedBody, sizeof(relocatedPattern));
+    memset(relocatedPattern + 3, 0, sizeof(uint32_t));
+    const tq::detour::Relocation right[] = {{3, 0x2a2db8}};
+    const tq::detour::Relocation elsewhere[] = {{3, 0x2a29a3}};
+    tq::detour::Signature matching = {relocatedPattern, 17, right, 1};
+    tq::detour::Signature mismatched = {relocatedPattern, 17, elsewhere, 1};
+    check(tq::detour::matches(module, relocated, matching),
+          "a signature resolves a relocated operand against the module base");
+    check(!tq::detour::matches(module, relocated, mismatched),
+          "a relocated operand pointing somewhere else fails the signature");
+
+    // ---- replace, for a target too small to trampoline.
+    BYTE* tiny = image + 0x20bde0;
+    const BYTE tinyBody[] = {0x80, 0x79, 0x78, 0x01, 0x74, 0xfa, 0xc3};
+    memcpy(tiny, tinyBody, sizeof(tinyBody));
+    tq::detour::Signature tinySignature = {tinyBody, sizeof(tinyBody), nullptr, 0};
+    tq::detour::Detour replaced = {};
+    check(tq::detour::replace(replaced, module, tiny, tinySignature,
+                              sizeof(tinyBody),
+                              (const void*)&detourReplaceBody)
+          && replaced.installed && !replaced.trampoline
+          && tiny[0] == 0x68 && tiny[5] == 0xc3 && tiny[6] == 0x90,
+          "replace overwrites a seven-byte function and nops the tail");
+    g_detourHook = 0;
+    ((void (__fastcall*)(void*, void*))(void*)tiny)(nullptr, nullptr);
+    check(g_detourHook == 1, "the replaced function runs the replacement");
+    tq::detour::detach(replaced);
+    check(!replaced.installed && !memcmp(tiny, tinyBody, sizeof(tinyBody)),
+          "detach restores a replaced function byte for byte");
+
+    // ---- patchCall over an FF 15 site. This is the shape both the loader
+    // fence and the region lock use, and the operand it rewrites points at the
+    // patch's own cell rather than at the shared import slot -- so every other
+    // caller of that import is left alone.
+    void** slot = (void**)(image + 0x2ac188);
+    *slot = (void*)&detourCallTarget;
+    BYTE* indirect = image + 0x14479a;
+    BYTE indirectBody[] = {0xff, 0x15, 0, 0, 0, 0, 0xc3};
+    const uint32_t slotAddress = (uint32_t)(uintptr_t)slot;
+    memcpy(indirectBody + 2, &slotAddress, sizeof(slotAddress));
+    memcpy(indirect, indirectBody, sizeof(indirectBody));
+    BYTE indirectPattern[sizeof(indirectBody)];
+    memcpy(indirectPattern, indirectBody, sizeof(indirectBody));
+    memset(indirectPattern + 2, 0, sizeof(uint32_t));
+    const tq::detour::Relocation importSlot[] = {{2, 0x2ac188}};
+    tq::detour::Signature indirectSignature = {indirectPattern,
+                                               sizeof(indirectPattern),
+                                               importSlot, 1};
+    tq::detour::CallPatch indirectPatch = {};
+    check(!tq::detour::patchCall(indirectPatch, module, indirect,
+                                 indirectSignature, 0, (const void*)&g_detourBody,
+                                 (const void*)&detourCallReplacement)
+          && !indirectPatch.installed
+          && !memcmp(indirect, indirectBody, sizeof(indirectBody)),
+          "patchCall refuses a site whose call resolves somewhere unexpected");
+    check(tq::detour::patchCall(indirectPatch, module, indirect,
+                                indirectSignature, 0,
+                                (const void*)&detourCallTarget,
+                                (const void*)&detourCallReplacement)
+          && indirectPatch.installed
+          && *slot == (void*)&detourCallTarget,
+          "patchCall retargets an FF 15 site without touching the import slot");
+    g_callOriginal = g_callReplacement = 0;
+    ((void (__stdcall*)())(void*)indirect)();
+    check(g_callReplacement == 1 && g_callOriginal == 0,
+          "the retargeted FF 15 site calls the replacement");
+    tq::detour::restoreCall(indirectPatch);
+    check(!memcmp(indirect, indirectBody, sizeof(indirectBody)),
+          "restoreCall puts an FF 15 operand back exactly");
+    g_callOriginal = g_callReplacement = 0;
+    ((void (__stdcall*)())(void*)indirect)();
+    check(g_callOriginal == 1 && g_callReplacement == 0,
+          "the restored FF 15 site calls the original again");
+
+    // ---- patchCall over an E8 site, which is what the seven resource-manager
+    // sweeps use.
+    BYTE* callee = image + 0x120250;
+    BYTE calleeBody[] = {0xff, 0x05, 0, 0, 0, 0, 0xc3};
+    emitAbsoluteIncrement(calleeBody, &g_callOriginal);
+    memcpy(callee, calleeBody, sizeof(calleeBody));
+    BYTE* direct = image + 0x144484;
+    BYTE directBody[] = {0xe8, 0, 0, 0, 0, 0xc3};
+    const int32_t rel = (int32_t)((uintptr_t)callee - ((uintptr_t)direct + 5));
+    memcpy(directBody + 1, &rel, sizeof(rel));
+    memcpy(direct, directBody, sizeof(directBody));
+    tq::detour::Signature directSignature = {directBody, sizeof(directBody),
+                                             nullptr, 0};
+    tq::detour::CallPatch directPatch = {};
+    check(!tq::detour::patchCall(directPatch, module, direct, directSignature, 0,
+                                 (const void*)&g_detourBody,
+                                 (const void*)&detourCallReplacement)
+          && !memcmp(direct, directBody, sizeof(directBody)),
+          "patchCall refuses an E8 site whose displacement resolves elsewhere");
+    check(tq::detour::patchCall(directPatch, module, direct, directSignature, 0,
+                                callee, (const void*)&detourCallReplacement)
+          && directPatch.installed,
+          "patchCall retargets a verified E8 site");
+    g_callOriginal = g_callReplacement = 0;
+    ((void (__stdcall*)())(void*)direct)();
+    check(g_callReplacement == 1 && g_callOriginal == 0,
+          "the retargeted E8 site calls the replacement");
+    tq::detour::restoreCall(directPatch);
+    check(!memcmp(direct, directBody, sizeof(directBody)),
+          "restoreCall puts an E8 displacement back exactly");
+    g_callOriginal = g_callReplacement = 0;
+    ((void (__stdcall*)())(void*)direct)();
+    check(g_callOriginal == 1 && g_callReplacement == 0,
+          "the restored E8 site calls the original again");
+
+    VirtualFree(image, 0, MEM_RELEASE);
+}
+
+// The engine trace is gated twice and measured once. The gate is what keeps a
+// shipping boot byte-identical to a build without any of this; the region-lock
+// thunk is the one hook that sits on a render-path call, so what it costs when
+// the section is free is the thing worth pinning down off-game.
+struct LockHolder {
+    CRITICAL_SECTION* section;
+    HANDLE acquired;
+};
+
+DWORD WINAPI holdLockBriefly(void* argument) {
+    LockHolder* holder = (LockHolder*)argument;
+    EnterCriticalSection(holder->section);
+    SetEvent(holder->acquired);
+    Sleep(100);
+    LeaveCriticalSection(holder->section);
+    return 0;
+}
+
+void testEngineProbe() {
+    wchar_t ini[MAX_PATH], csv[MAX_PATH];
+    if (!GetFullPathNameW(L"tqflicker-engine-selftest.ini", MAX_PATH, ini, nullptr)
+        || !GetFullPathNameW(L"tqflicker-engine-selftest.csv", MAX_PATH, csv,
+                             nullptr))
+        return;
+    DeleteFileW(ini);
+    DeleteFileW(csv);
+
+    BYTE* image = allocateSyntheticEngine(0x400000);
+    if (!image) {
+        check(false, "allocate a synthetic image for the engine trace tests");
+        return;
+    }
+
+    // The shipping configuration: the probe is off, so nothing is even looked
+    // at, let alone written.
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "the engine trace installs nothing while the performance probe is off");
+
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
+    WritePrivateProfileStringW(L"debug", L"engine_trace", L"0", ini);
+    tq::probe::readOptions(ini);
+    tq::probe::setOutputPath(csv);
+    tq::engineprobe::readOptions(ini);
+    check(tq::probe::enabled() && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "engine_trace=0 installs nothing even with the probe on");
+
+    WritePrivateProfileStringW(L"debug", L"engine_trace", L"1", ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "a module that is not the audited Engine.dll installs nothing");
+    tq::engineprobe::shutdown();
+
+    // The region-lock thunk, both ways round. Uncontended it is one
+    // interlocked operation and a branch and records nothing at all, which is
+    // what makes it affordable on a call the renderer makes per region per
+    // frame; contended it names the wait, which is the audit's section 1b and
+    // has never been measured.
+    CRITICAL_SECTION section;
+    InitializeCriticalSection(&section);
+    tq::probe::endFrame(16.7f);
+    tq::engineprobe::enterCriticalSectionForTest(&section);
+    LeaveCriticalSection(&section);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineRegionLockHits) == 0
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineRegionLockUs) == 0,
+          "the region-lock thunk records nothing while the section is free");
+
+    LockHolder holder = {&section,
+                         CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    HANDLE thread = holder.acquired
+        ? CreateThread(nullptr, 0, holdLockBriefly, &holder, 0, nullptr)
+        : nullptr;
+    if (thread && WaitForSingleObject(holder.acquired, 5000) == WAIT_OBJECT_0) {
+        tq::engineprobe::enterCriticalSectionForTest(&section);
+        LeaveCriticalSection(&section);
+        WaitForSingleObject(thread, 5000);
+        tq::probe::endFrame(16.7f);
+        const uint32_t hits = tq::probe::counterForTest(
+            0, tq::probe::CounterEngineRegionLockHits);
+        const uint32_t waited = tq::probe::counterForTest(
+            0, tq::probe::CounterEngineRegionLockUs);
+        check(hits == 1 && waited >= 10000u && waited < 5000000u,
+              "the region-lock thunk names the wait when the section is held");
+    } else {
+        check(false, "hold the region lock from a second thread");
+    }
+    if (thread) CloseHandle(thread);
+    if (holder.acquired) CloseHandle(holder.acquired);
+    DeleteCriticalSection(&section);
+
+    tq::probe::shutdown();
+    DeleteFileW(csv);
+    tq::probe::resetForTest();
+    tq::probe::readOptions(nullptr);
+    tq::engineprobe::readOptions(nullptr);
+    DeleteFileW(ini);
     VirtualFree(image, 0, MEM_RELEASE);
 }
 
@@ -1487,6 +1819,7 @@ int main(int argc, char** argv) {
     testRendererPresentHook();
     testBloomHook();
     testGrassProbe();
+    testDetour();
     testGrassPointerIndex();
     testGrassCrossed();
     testBloomExtraction();
@@ -2075,6 +2408,7 @@ int main(int argc, char** argv) {
 
     testTimestampCapability(device, context);
     testProbe(device, context);
+    testEngineProbe();
     testFrameOverlay(device, context);
 
     int transformed = 0;

@@ -2,8 +2,8 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Both are current as of `eb550ca`
-on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Both are current as of the Stage 3
+work on branch `stutter-mitigation`.
 
 ## Read these first
 
@@ -90,7 +90,41 @@ maximum, in a process already carrying ~336 MiB of the mod's shadow targets.
 answers it on the next pack-on run with any route. With a real peak, replace
 the count with a byte budget.
 
-## Next: Stage 3
+## Stage 3 landed; run 10 measured it
+
+`src/detour.{h,cpp}` and `src/engine_probe.{h,cpp}`, plus 27 `engine_*`
+columns. Ten hook groups, all installed on the pinned build; the byte tables
+are re-verified against `Engine.dll` and the whole thing costs nothing
+measurable — p50, p99 and the mod's share are unchanged against run 8 despite
+a detour on a function called 12.0 million times in the session.
+
+`research/streaming/findings.md` §8 has the numbers and the plan's Status
+section has what they change. In short:
+
+- **Four hypotheses closed by measurement, not deferred**: the region lock is
+  never contended (0 hits), the seven sweeps cost 11.2 ms a session, the
+  loader fence wait costs 1.6 ms, and `WaitForLoadingToFinish` is never
+  called. Stage 6.1, 6.2 and 6.3 can be deleted.
+- **Stage 5's premise is confirmed but small**: `Region::LoadLevel` is 100%
+  main-thread and cost 511 ms in the worst frame — but exactly one frame in
+  7,347 has a load costing over a millisecond.
+- **Stage 4.1 is well aimed**: 4.38 s a session in block inflates, 1.88 GiB
+  inflated to serve 1.03 GiB.
+- **2.4 has its number**: `upload_leased_mib` peaked at 1,064 MiB.
+- **Two thirds of the hitch time is still dark**, including ~950 ms of the
+  1,466 ms worst frame and the whole of the second class, whose frames show
+  every engine column at zero.
+
+## Next: run 11, before anything else is written
+
+Stage 3 gained one more instrument for it — `Engine::Update` and
+`Engine::Render` bracketed whole, both once a frame — to say which half of the
+game's frame the dark time is in, or whether it is in neither. "Neither" puts
+it outside `Engine.dll` and invalidates the premise of both Stage 4 and Stage
+5, so run 11 comes first. Its ini is `cache/runs/run11-frame-split.ini`; the
+settings are identical to run 10's, only the header differs.
+
+## The old Stage 3 notes
 
 Instrument Engine.dll itself. Everything so far has been vtable slots and
 mod-side code; Stage 3 writes into `.text` on paths that run thousands of times

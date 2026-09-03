@@ -588,6 +588,106 @@ than as the lookup.  The recorded main-thread id is at `Engine+0x41a5dc`
 impossible — the stolen bytes contain the relative `74 fa` — so instrumenting
 it means replacing it outright rather than detouring it.
 
+## 8. What run 10 measured, once the instruments were in
+
+Stage 3's hooks went into the pinned `Engine.dll` on 2026-09-03 -- all ten
+groups, three of three region-lock sites, seven of seven sweeps -- and a
+99.7-second session over the same Eternal Embers route as runs 8 and 9, with
+the texture pack installed, cost nothing to measure: p50 9.0 ms, p99 45.8 ms,
+mod share 9.5%, against run 8's 9.0 / 45.9 / 9.5%.  That matters on its own,
+because the instrumentation includes a detour on a function the session
+entered **12.0 million** times.
+
+### Four hypotheses this audit raised are now closed by measurement
+
+- **§1b, the render path blocking on the region lock, does not happen.**
+  `engine_region_lock_hits` is **0** for the whole session across all three
+  sites -- `Region::GetEntitiesInFrustum` and both `AddElementsInBox`
+  overloads.  Every acquisition was uncontended.  The thunk takes timestamps
+  only on failure, so this is a real zero and not a threshold artefact.
+- **The seven `UnloadUnreferencedResources` sweeps cost nothing.**  51,443
+  calls -- exactly seven per `Engine::Update` -- totalling **11.2 ms** across
+  the session.  Amortizing them cannot buy anything.
+- **The loader fence is already signalled, as §3 predicted.**  7,349 waits,
+  one per frame, totalling **1.6 ms**: 0.22 microseconds each.  The rendezvous
+  is not the cost.  (What `FUN_1011f490`'s per-thread `OpenThread` /
+  `WaitForSingleObject` / `CloseHandle` walk costs is still unmeasured; only
+  the wait itself is closed.)
+- **`Region::WaitForLoadingToFinish` is never called.**  `engine_wait_loading`
+  is 0.  The `.text` scan that found no caller is confirmed at runtime, and
+  the hazard is closed rather than merely unlikely.
+
+### What the loading path actually costs
+
+The reproducible worst frame is fully attributed for the first time.  Frame
+2202, 1,465.8 ms:
+
+| | |
+| --- | --- |
+| `Region::LoadLevel` | **511 ms**, 5 calls, **100% on the engine's main thread** |
+| `ResourceLoader::LoadResource` | 362 ms, 764 calls, all on the main thread |
+| block read + inflate | 264 ms, 1,468 blocks, from 1,282 `ReadFromFile` over 82 MiB |
+
+These nest -- inflate inside the resource load inside the level load -- so the
+renderer really does force a synchronous level load onto the main thread, and
+one of them cost half a second.  §1a's mechanism is confirmed as a measurement
+rather than as a reading of the disassembly.
+
+Two qualifications matter for what to do about it.  **511 ms of 1,466 is the
+whole of what the level load explains**; roughly 950 ms of that frame is in
+nothing any column can see.  And in 7,347 frames, **exactly one** has a
+`Region::LoadLevel` costing more than a millisecond -- the other 203,414 calls
+take the resident fast path and are free.  Making the load asynchronous would
+therefore fix the worst frame in the session and almost nothing else.
+
+Resource loading is the more frequent cost: 1.90 s over the session, 1.71 s of
+it on the main thread, spread over 11 frames that spend more than 20 ms in it.
+
+### The archive numbers Stage 4 was sized against
+
+`Archive::ReadFromFile` was called 4,941 times for 1.03 GiB, and the block
+routine below it inflated **7,527 blocks in 4.38 s** -- 582 microseconds each.
+Seven thousand five hundred 256 KiB blocks is 1.88 GiB inflated to serve 1.03
+GiB requested: a **1.8x amplification**, which is the single-slot block cache
+of R1 re-inflating what it has already inflated.  4.1's multi-block cache is
+aimed at a real number.
+
+### A column that means something other than its name
+
+`engine_res_enqueued` recorded **12,003,283** calls, 1,634 a frame.
+`ResourceLoader::EnqueueResource` is not a queue insert that happens when work
+arrives; it is a per-resource touch that happens for everything in view, every
+frame.  It is not a backlog signal and should not be read as one.
+
+### The second class of hitch is not loading at all
+
+Runs 8 and 9 both carried hitches that named nothing.  With the engine
+instrumented, four frames of 200-242 ms show **every engine column at or near
+zero**: no level-load time, no resource load, no inflate, no archive read
+worth the name, no lock contention, sweeps of 1-390 microseconds.  Every mod
+phase is under 0.05 ms, the game's own `Present` returns in 0.04 ms, and the
+GPU's own passes total about 6 ms.  Their draw, map and level-load counts are
+ordinary.
+
+So 240 milliseconds of wall clock pass in which nothing this instrument can
+see happens.  `gpu_frame` spans those frames almost entirely, but that is not
+evidence of GPU work -- the whole-frame region also spans a CPU stall, so it
+cannot separate the two.
+
+This class is not explained by the archive path, and it is not explained by
+anything Stages 4, 5 or 6 propose.  It is the reason `Engine::Update` and
+`Engine::Render` are now bracketed as well: between them they say which half
+of the game's frame the time is in, or that it is in neither -- and neither
+would put it outside `Engine.dll` entirely.
+
+### One number for a question that was left open
+
+`upload_leased_mib` peaked at **1,064 MiB** (mean 257) with the texture pack
+installed.  Over a gigabyte of address space held in `MapViewOfFile` leases at
+once, in a 32-bit process already carrying about 336 MiB of the mod's shadow
+targets.  The pool's only limit is a count of 128 leases, and that count is
+not a safe one.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

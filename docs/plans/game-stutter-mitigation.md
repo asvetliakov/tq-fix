@@ -84,6 +84,53 @@ below was written. That single fact invalidates findings (1) and (2):
   1327 and 5726, 256 ms and 228 ms — carries *no* archive opens and nothing
   named at all, so the archive path is not the only mechanism in play.
 
+**Stage 3 landed, and run 10 measured it.** `findings.md` §8 has the numbers;
+this is what they change. The instrumentation itself is free — p50, p99 and
+the mod's share are unchanged against run 8 — so everything below is a
+statement about the game and not about the probe.
+
+*Four things are now closed rather than deferred, and the plan is wrong to
+keep proposing them:*
+
+| | |
+| --- | --- |
+| **6.1, the seven sweeps** | 51,443 calls costing **11.2 ms a session**. Delete it. |
+| **6.2, the loader fence** | 7,349 waits costing **1.6 ms**, 0.22 µs each. The event is already signalled, exactly as 6.2 argued. Only `FUN_1011f490`'s thread walk remains unmeasured. |
+| **6.3, `WaitForLoadingToFinish`** | called **0** times. The hazard is closed, not merely unlikely. |
+| **the region lock (§1b), which 3.2 measured and 5 assumed** | **0 contended acquisitions** in a whole session across all three sites. The render path never blocks on it. |
+
+*Two things are confirmed, with a caveat that resizes them:*
+
+- **The renderer does force synchronous level loads onto the main thread.**
+  `Region::LoadLevel` ran 203,419 times, 100% on the engine's own thread, and
+  the worst frame spent **511 ms** in five of those calls. Stage 5's premise
+  is now a measurement. **But exactly one frame in 7,347 has a `LoadLevel`
+  costing over a millisecond** — the rest take the resident fast path and are
+  free. Stage 5 fixes the single worst frame of a session and essentially
+  nothing else. Size the work accordingly.
+- **The archive path is worth 4.38 s a session** across 7,527 block inflates
+  at 582 µs each, and it inflates 1.88 GiB to serve 1.03 GiB — the 1.8×
+  amplification §4.1's multi-block cache exists to remove. That one is well
+  aimed.
+
+*And 2.4 finally has its number:* `upload_leased_mib` peaked at **1,064 MiB**.
+The 128-lease count is not a safe limit; the byte budget is overdue.
+
+**What Stage 3 did not explain, which is most of it.** At the >50 ms threshold
+that reproduces runs 8 and 9 (6.72 s and 8.60 s), run 10 has 7.93 s of hitch
+time in no mod column and the engine columns name **1.6–2.8 s of it — 21% to
+35%**. Two thirds is still dark, including ~950 ms of the 1,466 ms worst frame
+and the entirety of the second class, whose frames show *every* engine column
+at zero.
+
+**So Stages 4 and 5 are no longer the obvious next move, and this plan should
+not pretend otherwise.** Stage 3 has been extended with one further
+instrument — `Engine::Update` and `Engine::Render`, bracketed whole, both
+once-per-frame and therefore free — to split the dark time into the game's
+update, the game's render, or neither. "Neither" would put it outside
+`Engine.dll` and invalidate the premise of both remaining stages. Run 11
+decides it, and nothing in Stage 4 or 5 should be written first.
+
 ---
 
 This plan acts on them. Five things are now established beyond doubt, all

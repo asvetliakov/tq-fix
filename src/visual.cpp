@@ -6,6 +6,8 @@
 #include "hdr.h"
 #include "probe.h"
 #include "shadow_fix.h"
+#include "engine_probe.h"
+
 #include "streaming.h"
 #include "upload.h"
 
@@ -357,6 +359,7 @@ void readOptions() {
     }
     tq::frameoverlay::readOptions(path);
     tq::probe::readOptions(path);
+    tq::engineprobe::readOptions(path);
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
@@ -3003,6 +3006,10 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     }
     if (g_options.streaming) startUnmapWorker();
     if (g_options.looseTextureMax) installFileSourceGate();
+    // Last of the Engine.dll work, and the only part that writes into .text.
+    // It installs nothing unless the probe is on, so a shipping boot never
+    // reaches past the check.
+    tq::engineprobe::install(GetModuleHandleW(L"Engine.dll"));
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -3130,6 +3137,9 @@ void onResize(IDXGISwapChain* swapChain) {
 }
 
 void shutdown() {
+    // First: these are writes into Engine.dll's .text, and every one of them
+    // has to be back before the probe they report into goes away.
+    tq::engineprobe::shutdown();
     tq::streaming::setPresentCallback(nullptr);
     tq::streaming::setPostPresentCallback(nullptr);
     tq::streaming::setPreResizeCallback(nullptr);

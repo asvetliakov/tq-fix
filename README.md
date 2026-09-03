@@ -78,6 +78,7 @@ loose_texture_max=0
 frame_overlay=0
 trace=0
 performance_trace=0
+engine_trace=1
 ```
 
 `loose_texture_max` refuses a loose texture whose base level is larger than
@@ -222,6 +223,31 @@ is one branch per instrumented call site.
 `tools/frames.py cache/run.csv` summarizes one or more runs: the frame-time
 distribution, the hitch count, and a ranking of which phase dominated the
 hitches and what it cost above its own baseline.
+
+While the performance trace is on, the `engine_*` columns report Titan Quest's
+own resource work rather than the mod's: forced level loads and how much of
+their cost landed on the game's main thread, resource loads and the queue
+behind them, region unloads, archive reads, the 256 KiB block inflates under
+them, the loader-fence wait in `Engine::Update`, the seven resource-manager
+sweeps beside it, any time the render path blocked on a region lock, and
+`Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
+against the half of the frame they happened in. That
+last one is why a hitch row that used to say only "38 ms" can now name the
+load that caused it. Durations there are microseconds and end in `_us`, so
+`frames.py` counts them separately from the mod's own millisecond phases.
+
+Those columns come from instrumentation written into `Engine.dll`'s own code,
+so they are gated twice: nothing is installed unless `performance_trace` is on
+**and** `engine_trace` is not `0`, which means a normal boot is byte-identical
+to a build without any of it. Every site is resolved by its exported name,
+checked against the address the audited build puts it at, and matched against
+16 to 24 bytes before 4 to 7 are written; a mismatch skips that one hook and
+leaves the rest. A build that is not the audited `Engine.dll` installs nothing
+at all and says so in `tqflicker-hdr.log`. `engine_trace=1` is everything;
+larger values are a mask -- `2` loads, `4` archive reads, `8` the fence, `16`
+the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the
+update/render brackets -- so a run that misbehaves can be narrowed without a
+rebuild.
 
 For startup or crash diagnosis without changing the rendered image, enable the
 lightweight trace instead:

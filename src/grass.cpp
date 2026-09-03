@@ -1,5 +1,7 @@
 #include "grass.h"
 
+#include "detour.h"
+
 #include "probe.h"
 
 #include "hdr.h"
@@ -12,11 +14,6 @@
 namespace tq {
 namespace grass {
 namespace {
-
-// push imm32; ret -- an absolute six-byte branch, so nothing depends on where
-// Engine.dll and winmm.dll land relative to one another.
-const SIZE_T kBranchSize = 6;
-const SIZE_T kMaxStolen = 8;
 
 // Both RenderGrass implementations open with push ebp; mov ebp,esp; and esp,-8,
 // the same six bytes the bloom detour already validates on this build.
@@ -47,14 +44,11 @@ typedef void (__fastcall* RenderGrassFn)(void* self, void* ignored, const void* 
 
 namespace {
 
-struct Detour {
-    BYTE* entry;
-    BYTE* trampoline;
-    SIZE_T stolen;
-    BYTE original[kMaxStolen];
-    BYTE patched[kMaxStolen];
-    bool installed;
-};
+// The detour machinery lives in src/detour.{h,cpp} now; this file was where it
+// grew up, and the engine instrumentation needed the same primitives with a
+// verify length separate from the stolen one.
+using tq::detour::Detour;
+using tq::detour::readable;
 
 Detour g_render[2];
 RenderGrassFn g_originalRender[2];
@@ -165,117 +159,6 @@ BYTE* g_scratch;
 // the path of every unmap in the game.
 volatile LONG g_pendingSlot = (LONG)kMaxGrassBuffers;
 
-bool readable(const void* address, SIZE_T bytes) {
-    MEMORY_BASIC_INFORMATION info = {};
-    if (!address || !bytes || !VirtualQuery(address, &info, sizeof(info))) return false;
-    DWORD protection = info.Protect & 0xff;
-    const BYTE* end = (const BYTE*)address + bytes;
-    const BYTE* regionEnd = (const BYTE*)info.BaseAddress + info.RegionSize;
-    return info.State == MEM_COMMIT && !(info.Protect & PAGE_GUARD)
-        && protection != PAGE_NOACCESS && end >= (const BYTE*)address
-        && end <= regionEnd;
-}
-
-bool moduleText(HMODULE module, BYTE** begin, SIZE_T* size) {
-    if (!module || !begin || !size || !readable(module, sizeof(IMAGE_DOS_HEADER)))
-        return false;
-    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)module;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return false;
-    const BYTE* ntAddress = (const BYTE*)module + dos->e_lfanew;
-    if (!readable(ntAddress, sizeof(IMAGE_NT_HEADERS))) return false;
-    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)ntAddress;
-    if (nt->Signature != IMAGE_NT_SIGNATURE
-        || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) return false;
-    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
-    if (!readable(section, nt->FileHeader.NumberOfSections * sizeof(*section)))
-        return false;
-    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        if (memcmp(section[i].Name, ".text", 5)) continue;
-        SIZE_T length = section[i].Misc.VirtualSize;
-        BYTE* address = (BYTE*)module + section[i].VirtualAddress;
-        if (!length || !readable(address, length)) return false;
-        *begin = address;
-        *size = length;
-        return true;
-    }
-    return false;
-}
-
-void absoluteBranch(BYTE* code, const void* destination) {
-    code[0] = 0x68;
-    uint32_t address = (uint32_t)(uintptr_t)destination;
-    memcpy(code + 1, &address, sizeof(address));
-    code[5] = 0xc3;
-}
-
-bool writeBytes(BYTE* address, const BYTE* expected, const BYTE* replacement,
-                SIZE_T bytes) {
-    if (!address || !readable(address, bytes) || memcmp(address, expected, bytes))
-        return false;
-    DWORD oldProtection = 0;
-    if (!VirtualProtect(address, bytes, PAGE_EXECUTE_READWRITE, &oldProtection))
-        return false;
-    memcpy(address, replacement, bytes);
-    FlushInstructionCache(GetCurrentProcess(), address, bytes);
-    DWORD ignored = 0;
-    VirtualProtect(address, bytes, oldProtection, &ignored);
-    return true;
-}
-
-// Copies the stolen bytes into an executable trampoline, branches from its end
-// back into the body, then overwrites the entry. The stolen bytes are verified
-// before anything is written, so a build whose prologue differs is left alone.
-bool attach(Detour& detour, HMODULE engine, void* target, const BYTE* expected,
-            SIZE_T stolen, const void* replacement, void** trampoline) {
-    if (detour.installed || !engine || !target || !expected || !replacement
-        || !trampoline || stolen < kBranchSize || stolen > kMaxStolen)
-        return false;
-    BYTE* text = nullptr;
-    SIZE_T textSize = 0;
-    BYTE* entry = (BYTE*)target;
-    if (!moduleText(engine, &text, &textSize) || entry < text
-        || entry + stolen < entry || entry + stolen > text + textSize
-        || !readable(entry, stolen) || memcmp(entry, expected, stolen))
-        return false;
-
-    BYTE* code = (BYTE*)VirtualAlloc(nullptr, stolen + kBranchSize,
-                                     MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (!code) return false;
-    memcpy(code, entry, stolen);
-    absoluteBranch(code + stolen, entry + stolen);
-    DWORD oldProtection = 0;
-    if (!VirtualProtect(code, stolen + kBranchSize, PAGE_EXECUTE_READ,
-                        &oldProtection)) {
-        VirtualFree(code, 0, MEM_RELEASE);
-        return false;
-    }
-    FlushInstructionCache(GetCurrentProcess(), code, stolen + kBranchSize);
-
-    memcpy(detour.original, entry, stolen);
-    // Any byte past the branch is unreachable; nop keeps the restore compare
-    // exact rather than leaving whatever the branch encoder did not touch.
-    memset(detour.patched, 0x90, kMaxStolen);
-    absoluteBranch(detour.patched, replacement);
-    if (!writeBytes(entry, detour.original, detour.patched, stolen)) {
-        VirtualFree(code, 0, MEM_RELEASE);
-        return false;
-    }
-    detour.entry = entry;
-    detour.trampoline = code;
-    detour.stolen = stolen;
-    detour.installed = true;
-    *trampoline = code;
-    return true;
-}
-
-void detach(Detour& detour) {
-    if (detour.installed && detour.entry && readable(detour.entry, detour.stolen)
-        && !memcmp(detour.entry, detour.patched, detour.stolen))
-        writeBytes(detour.entry, detour.patched, detour.original, detour.stolen);
-    if (detour.trampoline) VirtualFree(detour.trampoline, 0, MEM_RELEASE);
-    memset(&detour, 0, sizeof(detour));
-}
-
 void renderGrass(unsigned index, void* self, void* ignored, const void* name,
                  void* canvas, const void* renderer, const void* pass) {
     if (!g_originalRender[index]) return;
@@ -350,21 +233,22 @@ bool install(HMODULE engine, const Exports& exports) {
     {
         BYTE* text = nullptr;
         SIZE_T textSize = 0;
-        if (moduleText(engine, &text, &textSize)) {
+        if (tq::detour::moduleText(engine, &text, &textSize)) {
             g_engineBegin = (const BYTE*)engine;
             g_engineEnd = text + textSize;
         }
     }
 
-    void* trampoline = nullptr;
-    if (exports.renderGrass
-        && attach(g_render[0], engine, exports.renderGrass, kRenderPrologue,
-                  kRenderStolen, (const void*)&hookRenderGrass, &trampoline))
-        g_originalRender[0] = (RenderGrassFn)trampoline;
-    if (exports.renderGrassRT
-        && attach(g_render[1], engine, exports.renderGrassRT, kRenderPrologue,
-                  kRenderStolen, (const void*)&hookRenderGrassRt, &trampoline))
-        g_originalRender[1] = (RenderGrassFn)trampoline;
+    const tq::detour::Signature prologue = {kRenderPrologue, kRenderStolen,
+                                            nullptr, 0};
+    if (exports.renderGrass)
+        tq::detour::attach(g_render[0], engine, exports.renderGrass, prologue,
+                           kRenderStolen, (const void*)&hookRenderGrass,
+                           (void**)&g_originalRender[0]);
+    if (exports.renderGrassRT)
+        tq::detour::attach(g_render[1], engine, exports.renderGrassRT, prologue,
+                           kRenderStolen, (const void*)&hookRenderGrassRt,
+                           (void**)&g_originalRender[1]);
 
     if (g_render[0].installed || g_render[1].installed)
         return true;
@@ -997,8 +881,8 @@ static void completeSeed(ID3D11DeviceContext* context) {
 void shutdown() {
     g_originalRender[0] = nullptr;
     g_originalRender[1] = nullptr;
-    detach(g_render[0]);
-    detach(g_render[1]);
+    tq::detour::detach(g_render[0]);
+    tq::detour::detach(g_render[1]);
     g_engineBegin = nullptr;
     g_engineEnd = nullptr;
     if (g_grassLockReady) {

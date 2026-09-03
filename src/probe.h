@@ -153,6 +153,78 @@ enum Counter {
     // measured median texture that is ~340 MiB of views, and at the 4K cap's
     // maximum it would be 2.7 GiB, in a process that has about 3.
     CounterUploadLeasedMib,
+
+    // ---------------------------------------------------------------------
+    // Engine.dll's own work, from src/engine_probe.cpp. Everything below is
+    // written from inside the game's code on whichever thread reached it, and
+    // exists to name the residual tools/frames.py has always had to report as
+    // "the game's frame": ~7-8.7 s of hitch time a session that no mod column
+    // accounts for.
+    //
+    // The `_us` totals nest. A resource load inside a level load is counted in
+    // both, so they are a breakdown of where a hitch went and not a partition
+    // to be summed.
+    //
+    // `_main` is the subset that ran on the thread the engine recorded as its
+    // own at Engine+0x41a5dc -- i.e. the loads the game forced synchronously
+    // rather than handing to its loader thread. Those are the ones that are
+    // in the frame rather than beside it.
+    CounterEngineLevelLoad,
+    CounterEngineLevelLoadUs,
+    CounterEngineLevelLoadMain,
+    CounterEngineLevelLoadMainUs,
+    CounterEngineResLoad,
+    CounterEngineResLoadUs,
+    CounterEngineResLoadMain,
+    CounterEngineResLoadMainUs,
+    CounterEngineRegionUnload,
+    CounterEngineRegionUnloadUs,
+    // Archive::ReadFromFile calls and the bytes they asked for. Counted, not
+    // timed: the worst frame measured carries ~1,300 archive opens, and a
+    // QueryPerformanceCounter pair on each would price the instrument rather
+    // than the read.
+    CounterEngineArcRead,
+    CounterEngineArcKib,
+    // One 256 KiB block read and inflated. This one is timed, because a single
+    // inflate costs on the order of a millisecond and the pair that measures
+    // it does not.
+    CounterEngineArcBlocks,
+    CounterEngineArcInflateUs,
+    // Work handed to the loader thread. Rising here before a hitch is the
+    // backlog forming; rising in the _main columns is the backlog being paid.
+    CounterEngineResEnqueued,
+    // Engine::Update's rendezvous with the loader fence, once per update, so
+    // the count doubles as the number of engine updates the frame contained.
+    CounterEngineFenceWait,
+    CounterEngineFenceWaitUs,
+    // The region lock, taken on the render path by both AddElementsInBox
+    // overloads and by Region::GetEntitiesInFrustum. Only contended
+    // acquisitions are counted or timed -- an uncontended one costs one
+    // interlocked op and a branch and records nothing.
+    CounterEngineRegionLockHits,
+    CounterEngineRegionLockUs,
+    // The seven UnloadUnreferencedResources sweeps Engine::Update runs every
+    // update. A candidate for the class of hitch that carries no archive
+    // opens and names nothing, which is exactly why it is measured before
+    // anything is done about it.
+    CounterEngineSweeps,
+    CounterEngineSweepUs,
+    // Region::WaitForLoadingToFinish, a spin on a load flag that a full .text
+    // scan finds no caller for. Non-zero here would be genuine news.
+    CounterEngineWaitLoading,
+    CounterEngineWaitLoadingUs,
+    // The frame, split in two at the engine's own seam. Run 10 named only a
+    // fifth to a third of the hitch time: its worst frame spent 511 ms in a
+    // forced level load and 950 ms somewhere nothing could see, and a whole
+    // class of 200-240 ms frames showed *every* other column at zero. These
+    // two brackets say which half of the game's frame that time is in --
+    // update or render -- or whether it is in neither, which would put it
+    // outside Engine.dll altogether. Both run once a frame, so they cost
+    // nothing worth counting.
+    CounterEngineUpdate,
+    CounterEngineUpdateUs,
+    CounterEngineRender,
+    CounterEngineRenderUs,
     CounterCount
 };
 
