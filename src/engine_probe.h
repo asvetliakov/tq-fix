@@ -105,6 +105,7 @@ void shutdown();
 // How many hooks the last install() put in, so a test can assert that a run
 // with the trace off installed nothing at all.
 unsigned installedForTest();
+unsigned pumpTimerFloorForTest();
 void setTraceMaskForTest(unsigned mask);
 // Whether install() would install one trace group, decided the way install()
 // decides it. archive_cache_mb can reach install() with the performance probe

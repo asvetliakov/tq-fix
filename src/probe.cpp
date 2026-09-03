@@ -10,6 +10,7 @@ namespace probe {
 
 namespace detail {
 bool active;
+bool drawTiming;
 }
 
 namespace {
@@ -47,13 +48,17 @@ struct GpuSlot {
     bool pending;
 };
 
-const char* const kPhaseNames[PhaseCount] = {
+// No explicit bound on any of these four: with one, `sizeof / sizeof` is the
+// bound rather than the initializer count, so the assertions below would hold
+// however many names were actually written and a phase added without a name
+// would ship with an empty CSV column. Without it they count what is there.
+const char* const kPhaseNames[] = {
     "present", "grass_present", "stream_step", "overlay_raster", "overlay_draw",
     "smaa", "bloom", "shader_create", "texture_create", "buffer_create",
-    "grass_fill", "grass_cross", "present_call"
+    "grass_fill", "grass_cross", "present_call", "draw_submit", "map_resource"
 };
 
-const char* const kCounterNames[CounterCount] = {
+const char* const kCounterNames[] = {
     "draw", "draw_indexed", "grass_draw", "grass_cross", "map", "unmap",
     "grass_fill", "grass_rotate", "grass_adopt", "grass_seed_queued",
     "grass_seed_done", "grass_seed_failed", "grass_twin_create",
@@ -98,6 +103,7 @@ const char* const kCounterNames[CounterCount] = {
     "loop_pump", "loop_pump_us",
     "pump_peek", "pump_peek_us", "pump_dispatch", "pump_dispatch_us",
     "pump_peek_miss", "pump_peek_miss_us",
+    "pump_timer_full", "pump_timer_split",
     "engine_heap_alloc", "engine_heap_alloc_us", "engine_heap_alloc_kib",
     "engine_heap_big", "engine_heap_big_us",
     "engine_heap_free", "engine_heap_free_us",
@@ -114,20 +120,31 @@ const char* const kCounterNames[CounterCount] = {
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");
+static_assert(sizeof(kPhaseNames) / sizeof(kPhaseNames[0]) == PhaseCount,
+              "every phase needs a CSV column name");
 
 // The panel's 3x5 font has A-Z, 0-9, space, '.', ':', '-', '/' and '>' and
 // nothing else, so the CSV's snake_case names cannot be drawn as they stand.
-const char* const kPhaseShortNames[PhaseCount] = {
+const char* const kPhaseShortNames[] = {
     "PRESENT", "GRASS-PRES", "STREAM", "OVL-RAST", "OVL-DRAW", "SMAA", "BLOOM",
-    "SHADER", "TEXTURE", "BUFFER", "GRASS-FILL", "GRASS-CROSS", "PRESENT-CALL"
+    "SHADER", "TEXTURE", "BUFFER", "GRASS-FILL", "GRASS-CROSS", "PRESENT-CALL",
+    "DRAW", "MAP"
 };
+static_assert(sizeof(kPhaseShortNames) / sizeof(kPhaseShortNames[0])
+                  == PhaseCount,
+              "every phase needs an overlay-panel name");
 
-const char* const kGpuNames[GpuPhaseCount] = {
+const char* const kGpuNames[] = {
     "gpu_frame", "gpu_shadow_dir", "gpu_shadow_point", "gpu_grass", "gpu_smaa",
     "gpu_bloom"
 };
+static_assert(sizeof(kGpuNames) / sizeof(kGpuNames[0]) == GpuPhaseCount,
+              "every GPU phase needs a CSV column name");
 
 Mode g_mode = ModeOff;
+// Held separately from detail::drawTiming so the header can record what was
+// asked for even on a boot where the probe then failed to arm.
+bool g_drawTimingRequested = false;
 // What counts as a hitch. Fixed rather than configurable: it exists to make
 // rows self-selecting, not to be tuned per run.
 const float g_hitchMs = 20.0f;
@@ -274,6 +291,13 @@ void writeHeader() {
     // or only its hitches, instead of guessing from index contiguity.
     snprintf(line, sizeof(line), "# performance_trace=%s\r\n",
              g_mode == ModeFull ? "full" : "hitch");
+    appendLog(line);
+    // Its own line, so the performance_trace marker above keeps parsing as it
+    // did. draw_submit_ms and map_resource_ms read 0 either way, and a reader
+    // has to be able to tell "the game did not spend time there" from "nobody
+    // was holding a stopwatch".
+    snprintf(line, sizeof(line), "# draw_timing=%s\r\n",
+             detail::drawTiming ? "1" : "0");
     appendLog(line);
     int n = snprintf(line, sizeof(line), "frame,ms");
     for (unsigned i = 0; i < PhaseCount && n > 0 && n < (int)sizeof(line); ++i)
@@ -456,7 +480,9 @@ void resolveSlot(ID3D11DeviceContext* context, GpuSlot& slot) {
 
 void readOptions(const wchar_t* iniPath) {
     detail::active = false;
+    detail::drawTiming = false;
     g_mode = ModeOff;
+    g_drawTimingRequested = false;
     if (!iniPath) return;
     wchar_t value[32];
     GetPrivateProfileStringW(L"debug", L"performance_trace", L"0", value, 32,
@@ -467,6 +493,13 @@ void readOptions(const wchar_t* iniPath) {
            : (!_wcsicmp(value, L"1") || !_wcsicmp(value, L"on")
               || !_wcsicmp(value, L"hitch")) ? ModeHitch : ModeOff;
     if (g_mode == ModeOff) return;
+
+    // A clock pair on a hook that runs 1500-2700 times a frame, so it is asked
+    // for rather than assumed. It cannot arm without the probe: there is no
+    // frame record to add a phase to.
+    GetPrivateProfileStringW(L"debug", L"draw_timing", L"0", value, 32,
+                             iniPath);
+    g_drawTimingRequested = !_wcsicmp(value, L"1") || !_wcsicmp(value, L"on");
 
     if (!g_csvPath[0]) {
         // Beside the executable, like every other file this mod writes.
@@ -490,6 +523,7 @@ void readOptions(const wchar_t* iniPath) {
     memset(&g_current, 0, sizeof(g_current));
     ensureWriter();
     detail::active = true;
+    detail::drawTiming = g_drawTimingRequested;
 }
 
 void setOutputPath(const wchar_t* csvPath) {
@@ -779,6 +813,12 @@ uint32_t counterForTest(unsigned framesBack, Counter counter) {
     FrameRecord* record = framesBack < g_frameIndex
                         ? recordAt(g_frameIndex - 1 - framesBack) : nullptr;
     return record && counter < CounterCount ? record->counters[counter] : 0u;
+}
+
+float phaseForTest(unsigned framesBack, Phase phase) {
+    FrameRecord* record = framesBack < g_frameIndex
+                        ? recordAt(g_frameIndex - 1 - framesBack) : nullptr;
+    return record && phase < PhaseCount ? record->phaseMs[phase] : 0.0f;
 }
 
 void resetForTest() {

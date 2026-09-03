@@ -24,10 +24,19 @@ namespace probe {
 // the only cost that remains compiled in is one cached-bool branch at each
 // instrumented call site.
 //
-// Deliberately not instrumented with timers: Map, Unmap and PSSetShaderResources
-// run 2400-5000 times a frame, and a QueryPerformanceCounter pair on each would
-// cost more than the work it measured. Those get counters, and their real cost
-// is priced by turning the feature off in the INI instead.
+// Not instrumented with timers by default: Map, Unmap, the draws and
+// PSSetShaderResources run 1500-5000 times a frame, and a
+// QueryPerformanceCounter pair on each is not free. Those get counters, and
+// their real cost is priced by turning the feature off in the INI instead.
+//
+// The one exception is `[debug] draw_timing`, which arms a clock pair around
+// the game's own Draw/DrawIndexed and Map calls -- the driver call itself, not
+// the hook body. Findings §35 is why: on the in-play stutter frame, 29-54% of
+// `Engine::Render` is left after the game's resource loader and every other
+// named cost, and the frame after it costs a further 89-179 ms while loading
+// nothing and drawing a scene the frame after *that* draws in 20 ms. That
+// residual can only be in the D3D11 submission path, and these two phases are
+// what split it. Off by default, and off it costs one predictable branch.
 
 // ---------------------------------------------------------------------------
 // CPU phases. The order is the CSV column order and must not be reshuffled
@@ -50,6 +59,15 @@ enum Phase {
     // where the frame waits, so it is what separates "slow because of work on
     // this thread" from "slow because the GPU is behind".
     PhasePresentCall,
+    // Appended after PhasePresentCall rather than filed beside the other
+    // creation phases, because the phase order is the CSV column order: a run
+    // recorded before these existed still reads correctly, with two columns
+    // missing off the end rather than every column after them shifted.
+    //
+    // Both are the *game's* time, not the mod's, exactly like PhasePresentCall
+    // -- tools/frames.py must not charge them to the mod's share.
+    PhaseDrawSubmit,     // the game's Draw/DrawIndexed, driver call only
+    PhaseMapResource,    // the game's Map, driver call only
     PhaseCount
 };
 
@@ -348,6 +366,14 @@ enum Counter {
     // anything the game or its window has to do.
     CounterPumpPeekMiss,
     CounterPumpPeekMissUs,
+    // [performance] pump_timer_min_ms. An empty poll costs 1 us and a
+    // retrieval costs up to 110 ms (run 35 frame 5303: three peeks, one miss
+    // at 1 us, 221,249 us across the two that returned), and §16 found 76% of
+    // slow retrievals return WM_TIMER -- which PeekMessage synthesizes on
+    // demand rather than dequeues. These count how often the unfiltered peek
+    // that can synthesize one was allowed through versus split around it.
+    CounterPumpTimerFull,
+    CounterPumpTimerSplit,
     // Engine.dll's array allocator, reached through its import table. Run 23
     // broke the freeze frame down and found 795 ms of 1,310 -- 61% -- inside
     // Engine::Render and named by nothing: not the level load, not resource
@@ -488,9 +514,16 @@ namespace detail {
 // Read once at install and never written again from the render thread, so the
 // hot-path test is a plain load. Exposed only so enabled() can be inlined.
 extern bool active;
+// [debug] draw_timing, folded with `active` at readOptions so the hot path is
+// one load rather than two. Same discipline as `active`: written once at
+// install, read from the render thread thereafter.
+extern bool drawTiming;
 }
 
 inline bool enabled() { return detail::active; }
+
+// True when the draw and map hooks should take a clock pair. Implies enabled().
+inline bool drawTimingEnabled() { return detail::drawTiming; }
 
 // Reads [debug] performance_trace from the INI beside the executable. Called
 // once from the visual install, before anything else here. Taking the path
@@ -612,6 +645,7 @@ float phaseMillisecondsForTest(unsigned framesBack, Phase phase);
 // GPU side actually reports rather than merely not crashing.
 bool gpuResolvedForTest(unsigned framesBack);
 uint32_t counterForTest(unsigned framesBack, Counter counter);
+float phaseForTest(unsigned framesBack, Phase phase);
 void resetForTest();
 #endif
 

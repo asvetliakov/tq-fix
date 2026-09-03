@@ -2777,7 +2777,12 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
                        UINT subresource, D3D11_MAP type, UINT flags,
                        D3D11_MAPPED_SUBRESOURCE* mapped) {
     tq::probe::count(tq::probe::CounterMap);
+    // The driver call only. grass::noteMap below is ours and is already
+    // accounted elsewhere; including it here would charge the game for it.
+    const int64_t mapStart =
+        tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
     HRESULT result = g_map(context, resource, subresource, type, flags, mapped);
+    if (mapStart) tq::probe::addPhase(tq::probe::PhaseMapResource, mapStart);
     if (SUCCEEDED(result) && mapped)
         tq::grass::noteMap(resource, subresource, mapped);
     return result;
@@ -2835,7 +2840,12 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
-    g_draw(context, count, start);
+    {
+        const int64_t started =
+            tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
+        g_draw(context, count, start);
+        if (started) tq::probe::addPhase(tq::probe::PhaseDrawSubmit, started);
+    }
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -2860,7 +2870,16 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         tq::probe::count(tq::probe::CounterGrassDraw);
         tq::probe::gpuBegin(context, tq::probe::GpuGrass);
     }
-    g_drawIndexed(context, count, start, base);
+    {
+        // Brackets the game's own call and nothing else. Our grass cross draw
+        // below has its own phase, and SMAA and bloom take theirs; a bracket
+        // around the whole hook body would swallow all three and make the
+        // game's submission look like whatever the mod did around it.
+        const int64_t started =
+            tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
+        g_drawIndexed(context, count, start, base);
+        if (started) tq::probe::addPhase(tq::probe::PhaseDrawSubmit, started);
+    }
     if (grassDraw) {
         {
             tq::probe::Scope timing(tq::probe::PhaseGrassCross);

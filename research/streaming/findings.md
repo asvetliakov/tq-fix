@@ -3142,6 +3142,758 @@ That was right, and the classes it named were nearly right -- but it put
 class A and class B in the same list as if they were comparable, and it
 mis-anatomised B by leaving out the column that explains it.
 
+## 35. `game_collisions` is not "in the world", and the stutter is somewhere else
+
+§34 was right that every headline number had included the menu, right that the
+worst in-game frame was a different animal from the load-game frame, and right
+that `engine_res_load_main_us` had been sitting unread. It was wrong about
+where the boundary is, and that moves both classes it named.
+
+### The marker, and the ten to fourteen seconds it hides
+
+`game_collisions` fires when a character exists in a world. It does not fire
+when the player can see one. Across runs 14-33 the game simulates collisions
+for another **646-1,670 frames -- 8.8 to 14.4 seconds** -- while `draw_indexed`
+sits at **1** a frame and nothing is on screen but a loading screen.
+
+`draw_indexed` separates them and does it with enormous margin:
+
+| | draw_indexed |
+| --- | ---: |
+| loading screen | **1** |
+| menu, character preview | 77-80 |
+| first frame that draws the world | **1,753-1,802** |
+
+Any threshold between 100 and 1,400 works. It is also the only marker of the
+two that runs 9-13 can use, since `game_collisions` did not exist yet, and it
+puts world entry in all twenty-four recorded runs.
+
+### So the session has four parts, not two, and it is the same in 19 of 19 runs
+
+```
+menu                  1,719-5,454 frames    p50 7.3-8.2 ms
+  load-game frame     1,302-1,666 ms        Region::LoadLevel ~513 ms   (class A)
+loading screen          646-1,670 frames    8.8-14.4 s, one draw a frame
+  first world frame     578-1,938 ms        3,811 ms in run 33          (was "class B")
+play                  3,853-4,656 frames    p50 13.5-14.3 ms
+```
+
+The route is scripted and the shape is identical in every run: an outdoor
+stretch, an indoor stretch, an outdoor stretch, then the exit.
+
+### §34's class B is the frame that ends the loading screen
+
+The 578-1,938 ms frame is not "~1,000-1,600 frames into play". **It is the
+first frame of play**, in **19 of 19 runs, not 16** -- and it is the same frame
+by identity, not by resemblance:
+
+| | frame before | the frame |
+| --- | ---: | ---: |
+| `draw_indexed` | **1** | 1,753-1,802 |
+| `buffer_create` | 0 | 1,275-1,325 |
+| `shader_create` | 0 | 55-67 |
+| `engine_render_us` | 1.6-4.1 ms | 501-3,682 ms |
+
+That is the whole visible world being created at once. It is the last third of
+a loading pause the player is already sitting through. From the load-game
+frame to the first world-drawing frame inclusive is **11.5 to 19.2 seconds**,
+and this frame is 3.4-22.1% of it. It belongs
+with class A, and calling it "the only large thing that happens while the
+player is playing" put the project back on a loading screen for a third time.
+
+### The real in-game stutter is smaller, and far more consistent
+
+Split at the first world-drawing frame and take the worst render-dominated
+frame after it. It is there in **19 of 19 runs**, at the same point on the
+route every time, and it is a different size from what §34 measured:
+
+| | |
+| --- | ---: |
+| when | play + **3,245-3,527 frames**, median 3,326 |
+| frame | **290.6-439.2 ms**, median 337.9 |
+| `Engine::Render` | 283.9-421.4 ms -- **96-99% of the frame** |
+| `Engine::Update` | 2.8-14.2 ms |
+| `Region::LoadLevel` main | **0.0 ms** |
+| main-thread `Sleep` | **0.0 ms** |
+| main-thread `EnterCriticalSection` | **0.0 ms** |
+| main-thread object wait | **0.0 ms** |
+| `engine_res_load_main_us` | 146.6-221.1 ms, **42-69% of Render**, median 54% |
+| `texture_create_ms` (nested in it) | 34.1-78.9 ms |
+| archive inflate | 56.5-86.6 ms |
+| archive read | 16.5-22.1 MiB |
+| `draw_indexed` | 1,456-1,648, against **211-217 the frame before** |
+
+So §34's mechanism survives its own relocation: the main thread does
+synchronously run `ResourceLoader::LoadResource` inside `Engine::Render`, and
+it is the largest named thing on the frame. It just does it on a 340 ms frame
+during play rather than on a 1,100 ms frame on a loading screen.
+
+`draw_indexed` going 213 -> 1,500 **and staying there** says what the frame is:
+the player steps from an indoor stretch back outdoors, and the outdoor scene is
+created and drawn in one frame. It is the loading-screen frame again, one order
+of magnitude down and with the player in control.
+
+### One correction inside the anatomy: the nesting
+
+§34's tree hung "off-thread texture creation" under `LoadResource, MAIN THREAD`
+and put `texture_create` beside it. Both are backwards, and the columns settle
+it without a boot:
+
+- `engine_tex_create_off_us` is `CreateTexture2D` **not** on the render thread
+  (`visual.cpp:1281`). It cannot be inside a main-thread call.
+- `texture_create_ms` **is** the render thread, and it nests: from world entry
+  on it exceeds `engine_res_load_main_us` on 14-20 frames a run and never by
+  more than 0.67 ms. (It exceeds it by 141 ms on frame **0** of run 26 -- the
+  device creating its own resources before any load exists. That is the only
+  large exception in any run, and it is not a counterexample.) It is a child,
+  not a sibling.
+- archive inflate does **not** nest -- it exceeds the main-thread load on
+  779-990 frames a run, because it runs on the loader thread.
+
+### What the remaining share is made of
+
+Subtract the main-thread resource load and everything else named on the frame
+-- grass 3.0-11.7 ms, buffer and shader creation 2.6-5.6 ms, `PresentSurface`
+0.1-2.9 ms, and lock and object waits which are exactly zero -- and
+**87-230 ms is left, 29-54% of `Engine::Render`, median 43%.**
+
+The frame after it says what that is, and it says it in all nineteen runs:
+
+| | frame N | **N+1** | N+2 |
+| --- | ---: | ---: | ---: |
+| frame | 290-439 ms | **120-218 ms** | 18-57 ms |
+| `Engine::Render` | 284-421 ms | **101-194 ms** | 12-31 ms |
+| `engine_res_load_main_us` | 147-221 ms | **0.0 ms** | 0-17 ms |
+| `arc_open` | 65-92 | **0-8** | 0-14 |
+| `texture_create` | 50-70 | **0** | 0-4 |
+| `buffer_create` | 134-356 | **0-36** | 4-47 |
+| `draw_indexed` | 1,456-1,648 | 1,437-1,630 | 1,467-1,686 |
+| `gpu_frame_ms` | 398-583 | **19.7-25.6** | 19.6-56.4 |
+
+**N+1 draws the same scene as N+2, loads nothing, creates nothing, and the GPU
+finishes it in the normal 20 ms -- and it still costs 89-179 ms more
+`Engine::Render` than N+2, median 129 ms.**
+
+That is not the game's loader and it is not the GPU. It is CPU time inside
+`Engine::Render`, charged to the first frames that *use* the 134-356 buffers
+and 50-70 textures created on frame N. Every other candidate is already
+excluded by a column that reads zero: no level load, no sleep, no lock wait, no
+object wait, no heap, no I/O, and creation itself is timed at 2.6-5.6 ms for
+all of it.
+
+**Two candidates remain and the data cannot separate them.** Either the time is
+*inside* the D3D11 calls -- the layer below doing first-use work, which under
+CrossOver is DXMT rather than the DXVK an earlier draft of this section named
+-- or it is the *game's own code between* the calls, per-object setup the
+engine does the first time a batch of objects comes into view.
+
+**The reporter's evidence weighs against the first.** This stutter is well
+known on Titan Quest on native Windows, where there is no translation layer at
+all. That does not eliminate a translation-layer contribution, but it makes the
+engine's own first-use work at least as likely, and it is the reason not to
+write this section as if the answer were already known. The instrument settles
+it either way, because it brackets the driver call and nothing else.
+
+### Two costs, not one: what the correlations say
+
+Across the nineteen in-play stutter frames, and the route has two variants
+(~1,460 draws with 134-170 buffers, and ~1,630 draws with 338-356), so draws,
+maps, buffers and SRV binds all move together and cannot be told apart here:
+
+| | frame N residual (87-230 ms) | frame N+1 excess (89-179 ms) |
+| --- | ---: | ---: |
+| `buffer_create` | **r = +0.81** | +0.17 |
+| `draw_indexed` | **r = +0.81** | +0.07 |
+| `map` | **r = +0.81** | +0.12 |
+| `ps_set_srv` | **r = +0.80** | -0.00 |
+| `texture_create` | -0.10 | -0.03 |
+| `engine_arc_kib` | -0.38 | -0.13 |
+| `engine_res_load_main_us` | -0.16 | +0.22 |
+
+**Frame N's residual scales with scene size and not at all with textures
+created or bytes inflated. Frame N+1's excess correlates with nothing** -- it
+is a flat ~129 ms whatever the scene size. So there are two costs here, one
+per-object and one fixed, and they need separating before either can be
+attacked. A fixed cost that is independent of object count is what a fixed set
+of shader or material state being prepared once looks like; `shader_create` is
+0 on frame N, so whatever is being prepared, it is not the game creating D3D
+shaders.
+
+### Does it need a new hook? No new patch site -- two phase counters. Built.
+
+`hookDrawIndexed`, `hookDraw` and `hookMap` already exist as device-context
+vtable patches (`visual.cpp:2776`, `2825`, `2843`) and are already installed on
+every run. They counted and did not time.
+
+Built as `[debug] draw_timing`, default `0`, adding two phases:
+`draw_submit_ms` around the game's own `Draw`/`DrawIndexed` and
+`map_resource_ms` around its `Map` -- **the driver call only**, not the
+surrounding hook, so the mod's own SMAA, bloom and grass-cross work does not
+nest inside them. No new bytes, no new import, nothing added to
+`verify-sites.py`, which stays at 139 checks.
+
+Three things the build had to get right, and one it caught:
+
+- **The columns are the game's time, not the mod's.** `tools/frames.py` now
+  reports them in their own bucket beside `present_call`; charging them to the
+  mod's share would invert the one number that script exists to print.
+- **The switch cannot arm itself.** `draw_timing=1` with the probe off does
+  nothing -- there is no frame record for a phase to land in -- and the probe
+  alone leaves it off. Both are self-test assertions.
+- **A zero column has to be readable.** The CSV carries a `# draw_timing=`
+  header line, so `draw_submit_ms = 0` can be told from nobody holding a
+  stopwatch.
+- **The names-array assertions were tautological.** `kPhaseNames[PhaseCount]`
+  makes `sizeof / sizeof` the declared bound rather than the initializer count,
+  so the existing `static_assert` on `kCounterNames` would have held however
+  many names were written, and a phase added without one would have shipped an
+  empty CSV column. All four arrays now declare no bound and all four assert
+  their count; removing a name fails the build, which was checked.
+
+The cost is the remaining objection and `hookUnmap` already states it: a clock
+pair on a hook that runs 1,500-2,700 times a frame is not free. **Run 34
+validates itself against it**: in-play p50 across runs 14-33 is 13.5-14.3 ms,
+and if the run lands inside that band the instrument is cheap enough and its
+numbers stand. If it lands above, arm the timers only on the frame after a long
+frame -- N+1 is the cleaner measurement anyway, since it loads nothing.
+
+### And the five-second frames are not in play at all
+
+The reporter says they do not remember a five-second stutter in game. They are
+right, and this is the third thing the marker moves.
+
+| | run 16 | run 33 |
+| --- | ---: | ---: |
+| frame | 2856 | 3369 |
+| frame time | 5,016.9 ms | 5,024.9 ms |
+| `engine_render_us` | 5,007.5 ms | 5,007.9 ms |
+| where | **loading screen** | **loading screen** |
+| frames before the world is drawn | 55 | 105 |
+| `draw_indexed` | 1 | 1 |
+
+Both sit inside the loading screen, near its end, with nothing on screen. They
+are `game_collisions`-positive, which is exactly why §34 read them as in-game.
+So class C is a five-second addition to a loading pause the player is already
+waiting through, in 2 of 19 runs -- unpleasant, but not the freeze anyone
+feels, and it drops below the 340 ms in-play stutter in priority.
+
+What it *is* remains open, and run 33 carries the one clue the mod recorded:
+
+```
+frame 3369, 5,024.9 ms
+  engine_render                       5,007.9 ms   main thread
+    |- everything hooked inside it          0.0 ms
+  engine_obj_wait_main_us                  0.024 ms
+  engine_cs_wait_main_us                   0.032 ms
+  engine_obj_wait_us (all threads)      5,023.6 ms   <-- one non-main thread
+  engine_sleep_us    (all threads)      9,343.0 ms   3,582 calls
+```
+
+A 5,023.6 ms object wait on a loader thread is a `WaitForSingleObject` with a
+5,000 ms timeout expiring. The main thread's own 5.007 s is *not* any of the
+four blocking primitives -- `Sleep`, `WaitForSingleObject`,
+`WaitForMultipleObjects`, `EnterCriticalSection` are all hooked and all read
+zero on the main thread. But they are hooked **in `Engine.dll`'s import table
+only**, so a wait issued from `Game.dll`, from `TQ.exe`, or from inside
+d3d11/DXMT is invisible. That is where to look, and `patchImport` on a second
+module is the cheap way to look.
+
+### What this leaves
+
+| class | size | when | status |
+| --- | ---: | --- | --- |
+| **A** menu load-game | 1.30-1.67 s | once | loading pause; ~513 ms `LoadLevel`, rest of `World::Load` uninstrumented |
+| **A2** loading screen | 8.8-14.4 s | once, straight after A | never measured as a unit; the largest number in the project |
+| **A3** first world frame | 0.58-3.81 s | once, ends the loading screen | §34's "class B". Creates the whole scene: ~1,780 draws, ~1,300 buffers |
+| **B** the in-play stutter | **0.29-0.44 s** | play + ~3,300 frames, **19/19** | **the real target.** 42-69% main-thread `LoadResource`; 29-54% in the D3D11 path |
+| **C** the five-second stall | ~5.007 s | in the **loading screen**, 2/19 | a 5-second timeout; the main thread's wait is outside `Engine.dll`'s IAT |
+| **D** the message pump | ~0.3-1.5 s | scattered, and at exit | closed as a host question, §17 |
+
+### And what it costs the plan
+
+**4.3 (libdeflate) shrinks.** §34 re-founded it on 106-366 ms of inflate inside
+the main-thread load. On the real in-play frame the whole archive inflate,
+across all threads, is **56.5-86.6 ms**, median 71.9. At 2-3x that is 35-50 ms
+off a 340 ms frame, against a rewrite of the decompressor. It is still the
+largest lever on class A3 and on the loading screen, and those are loading
+pauses.
+
+**`timeBeginPeriod` shrinks to nothing on class B.** Main-thread `Sleep` is
+0.0 ms on all nineteen in-play stutter frames.
+
+**The 87-230 ms inside `Engine::Render` is now the largest unattributed thing
+that happens while the player is playing**, and it is the cheapest thing left
+to measure. Run 34 measures it.
+
+## 36. Run 34: the residual is the game's own `DrawIndexed`, and it is 13-15x
+
+> **Read §37 before acting on this section.** The measurement here holds --
+> `draw_submit` really is 31% of the stutter frame and 92.6% of the frame after
+> -- but the *attribution* below, that it is a per-draw first-use cost in the
+> driver, is **withdrawn**. Run 35's control and run 34's own `gpu_frame`
+> column show it is GPU backpressure surfacing inside `DrawIndexed`, and that
+> the GPU work is the mod's enhanced shadows and grass.
+
+`draw_timing=1`, 6,892 frames, 97.3 s, same route: 1,948 menu frames, a
+951-frame loading screen, 3,993 frames of play -- all three inside the bands
+runs 14-33 set, so this run is comparable to them.
+
+### First, the instrument is affordable
+
+In-play p50 **13.7 ms**, against 13.5-14.3 ms across runs 14-33. The clock
+pairs on 1,500-2,700 calls a frame do not move the median out of the band, so
+the numbers below stand as measured and the conditional-arming fallback is not
+needed.
+
+### The residual was `DrawIndexed`, and there is essentially nothing left
+
+Frame 6285, world+3,386 -- the in-play stutter, in the 3,245-3,527 band:
+
+| | ms | of `Engine::Render` |
+| --- | ---: | ---: |
+| `Engine::Render` | 404.7 | 100% |
+| `engine_res_load_main_us` | 256.8 | 63.5% |
+| **`draw_submit_ms`** | **127.1** | **31.4%** |
+| `map_resource_ms` | 1.7 | 0.4% |
+| everything else named | 8.9 | 2.2% |
+| **still unaccounted** | **10.1** | **2.5%** |
+
+**The 87-230 ms (29-54%) §35 could not account for is 10 ms (2.5%).** And the
+frame after is the cleaner statement of it, because it loads nothing at all:
+
+| frame 6286 | ms | of `Engine::Render` |
+| --- | ---: | ---: |
+| `Engine::Render` | 154.8 | 100% |
+| `engine_res_load_main_us` | **0.0** | 0% |
+| **`draw_submit_ms`** | **143.4** | **92.6%** |
+
+§35 predicted a flat ~129 ms on N+1 that correlated with nothing. It is
+143.4 ms of the game's own `DrawIndexed` calls.
+
+### `Map` is innocent, and that kills half the hypothesis outright
+
+`map_resource_ms` is **1.7 ms** on the stutter frame and 1.6 ms on the frame
+after, against 2,217 and 1,983 `Map` calls. Session-wide it is 1,549 ms against
+`draw_submit`'s 25,115. The 2,200-2,750 dynamic-buffer maps a frame that §35
+listed as a candidate cost nothing. `hookUnmap`'s standing comment -- that a
+clock pair on these would cost more than the work it measured -- was right
+about `Map` and wrong about the draws.
+
+### It is a per-draw first-use cost, it is 13-15x, and it lasts exactly two frames
+
+Steady state over the 120 full-scene frames after the event: `Engine::Render`
+17.1 ms, `draw_submit` 9.8 ms (57% of render), 1,608 draws -- **6.1 us a
+draw**. That 57% is not pathological; it is what a 1,600-draw-call frame costs.
+
+| frame | per draw | vs steady | `buffer_create` | `texture_create` |
+| --- | ---: | ---: | ---: | ---: |
+| 6284 | 0.6 us | 0.1x | 0 | 0 |
+| **6285** | **79.6 us** | **13.1x** | 162 | 79 |
+| **6286** | **90.7 us** | **14.9x** | **7** | **0** |
+| 6287 | 3.4 us | 0.6x | 16 | 0 |
+| 6288 | 5.2 us | 0.9x | 24 | 0 |
+
+**Two frames, no decay, straight back to normal.** And the highest per-draw
+cost is on the frame that creates almost nothing -- 7 buffers, 0 textures. So
+the cost is not creation and it is not proportional to what is created on the
+frame: **it is charged to the first draws that *use* what the previous frame
+created**, and it takes two frames to work through. Total excess over steady
+state across N..N+2 is **247 ms**.
+
+The first world frame, class A3, is the same animal one size up: frame 2899,
+825.6 ms, `Engine::Render` 748.5 -- `res_load_main` 418.1 (55.9%),
+`draw_submit` **175.3 (23.4%)**, after creating 1,297 buffers and 98 textures.
+
+### What this does and does not say about the layer below
+
+`draw_submit` brackets `g_drawIndexed` and nothing else, so the 127 and
+143 ms are **inside the D3D11 call**, not in the game's code between calls.
+That was one of §35's two candidates and it is the one that held.
+
+**It does not make this a CrossOver problem.** The reporter's point stands and
+this measurement is consistent with it: D3D11 defers state validation and
+pipeline construction to draw time on *every* implementation, native Windows
+included, so "the first draws after a batch of new resources are 13-15x" is
+exactly the shape the well-known Titan Quest new-area hitch would have on
+native hardware too. DXMT may make the constant worse. Nothing here shows that
+it invented the effect, and §35 should not have implied it.
+
+### So what is actually left, and the one question worth a run
+
+The in-play stutter is now fully attributed:
+
+| | frame 6285 | frame 6286 |
+| --- | ---: | ---: |
+| the game loading resources synchronously | 256.8 ms | 0 |
+| the game's first draws with them | 127.1 ms | 143.4 ms |
+| unaccounted | 10.1 ms | ~0 |
+
+Neither half is the mod's. **The one thing that could be** is whether the
+mod's own state changes multiply the number of distinct pipeline states the
+driver has to build on first use: `enhanceShadowPcf` rewrites pixel shaders at
+creation, `bindRegionalCompositeShader` swaps a pixel shader on some draws, and
+the shadow-map scaling changes texture dimensions. More distinct states means
+more first-use work on exactly these two frames.
+
+That is one control run, and it is the discipline the README already states for
+`Map` and `Unmap`: **price it by turning the feature off in the INI.** Same
+route with the visual enhancements off, and compare the 247 ms excess. If it
+does not move, the mod contributes nothing to this and the in-play stutter is
+the game's, end to end -- which would close it the way §17 closed the pump, but
+with an attribution rather than a shrug.
+
+## 37. Run 35: the control lands, and §36's reading of `draw_submit` was wrong
+
+Same route with the visual enhancements off. 8,986 frames, 95.3 s, 1,976 menu,
+a 1,010-frame loading screen, 6,000 frames of play.
+
+**One defect in the control, and it is mine.** The ini set `aa=off`, but
+`visual.cpp:328` reads `g_options.smaa = _wcsicmp(value, L"fxaa") != 0` -- only
+the literal `fxaa` disables it. **SMAA stayed on for run 35.** What the run
+actually turned off is enhanced shadows, enhanced grass, enhanced bloom, and
+the FP16/AgX HDR path. The conclusions below are about those four.
+
+### The mod's visual work owns essentially all of `draw_submit`
+
+| | run 34, all on | run 35, four off |
+| --- | ---: | ---: |
+| in-play p50 | 13.7 ms | **9.1 ms** |
+| steady in-play frame | 25.4 ms | **10.9 ms** |
+| steady `Engine::Render` | 20.3 ms | 5.6 ms |
+| steady `draw_submit` | 11.9 ms | **0.3 ms** |
+| steady us per draw | 5.7 | **0.2** |
+| stutter frame `draw_submit` | 127.1 ms | **0.4 ms** |
+| N+1 `draw_submit` | 143.4 ms | **0.2 ms** |
+| excess over N..N+2 | 247 ms | **0 ms** |
+
+### But it is not a first-use cost. It is GPU backpressure.
+
+§36 read the 13-15x per-draw spike as the driver doing first-use pipeline work.
+The control says otherwise and so does run 34's own GPU column, which was in
+the same rows:
+
+| run 34, steady in-play (median of 1,051 frames) | |
+| --- | ---: |
+| CPU frame | 25.39 ms |
+| **`gpu_frame_ms`** | **25.39 ms** |
+| `present_call_ms` | **0.0 ms** |
+
+**The GPU frame time equals the CPU frame time exactly, and the frame does not
+wait in Present.** So the backpressure surfaces where the driver applies it --
+inside the draw calls. `r(draw_submit, gpu_frame)` is **+0.51** in run 34 and
+**+0.08** in run 35, where the GPU is no longer the limit.
+
+The two-frame shape follows without any appeal to pipeline compilation:
+
+| frame | CPU | `draw_submit` | `gpu_frame` | `gpu_shadow_dir` |
+| --- | ---: | ---: | ---: | ---: |
+| 6285 | 421.2 ms | 127.1 ms | **563.5 ms** | **351.6 ms** |
+| 6286 | 181.9 ms | **143.4 ms** | 20.6 ms | 6.6 ms |
+| 6287 | 22.9 ms | 5.5 ms | 23.4 ms | 7.5 ms |
+
+Frame 6285 submits **563 ms of GPU work**, of which **351.6 ms is the enhanced
+directional shadow pass** re-rendering a newly visible outdoor scene into its
+cascades at `shadow_map_scale=4`. Frame 6286 then blocks 143 ms inside
+`DrawIndexed` draining that backlog while its *own* GPU span is 20.6 ms -- which
+is exactly why §35 found N+1's cost correlated with nothing on N+1. It was
+never about N+1. It was the previous frame's queue.
+
+**So §36's "13-15x per-draw first-use cost" is withdrawn.** The measurement was
+right, the attribution was not: `draw_submit` is where a GPU-bound frame waits,
+not where a pipeline gets built. The instrument earned its keep anyway -- it is
+what made the residual visible, and the control is what corrected it.
+
+### Where the mod's GPU time goes
+
+Median over 1,051 steady full-scene in-play frames, run 34:
+
+| | ms | of the 25.39 ms GPU frame |
+| --- | ---: | ---: |
+| **`gpu_shadow_dir`** | **8.09** | **32%** |
+| **`gpu_grass`** | **4.47** | **18%** |
+| `gpu_smaa` | 0.74 | 3% |
+| `gpu_bloom` | 0.37 | 1% |
+
+With those off the GPU frame is 11.25 ms and `gpu_shadow_dir` is 0.00. **The
+enhanced shadows and grass roughly double the GPU frame at 5120x1440 and turn
+a new-area transition into a 421 ms frame followed by a 182 ms one.**
+
+That is the reporter's stutter, or a large part of it, and it is the mod's --
+which is the first time in this project that has been true of anything.
+
+### And what remains once they are off, because the reporter still feels it
+
+The reporter ran run 35 and reported stutters remaining. They are right, and
+they are a different class. Worst in-play frames in run 35, excluding the first
+world frame:
+
+```
+frame 5303   234.8 ms   Engine::Render 3.2 ms   Engine::Update 2.2 ms
+   loop_pump_us        223,614 us      <-- 95% of the frame
+   pump_peek_us        221,250 us      in THREE PeekMessageA calls
+   engine_sleep_us     453,308 us      196 calls, background threads
+   draw_submit             0.2 ms
+```
+
+Frames 5303, 5542, 6873, 7921, 8578 and 7557 are all this shape: 160-235 ms
+with `Engine::Render` under 7 ms. **That is class D, the message pump, §13-§17**
+-- and with the mod's GPU cost removed it is now the largest in-play stutter
+left. It was closed as a host question in §17 on the grounds that the timer is
+not the game's and the pump has no lever. That closure was made when the pump
+was one class among three; it is worth reopening now that it is the last one.
+
+The other survivor is the first world frame: 533.6 ms, `res_load_main` 336.4 ms,
+`draw_submit` 0.9 ms. That is class A3, the game's own loading, unchanged.
+
+### What to do
+
+**`shadow_map_scale` is the lever and it is one line of INI.** It defaults to
+4 (`visual.cpp:375`) and its own comment says 2 is the cheaper setting that
+visibly softens the shadows. Shadow-map cost goes as the square of the scale,
+so 4 -> 2 should take `gpu_shadow_dir` from 8.09 ms toward ~2 ms steady and cut
+the 351.6 ms transition spike hard, while keeping enhanced shadows. That is run
+36, single variable, everything else at the reporter's normal settings.
+
+## 38. Run 36: halving the shadow map barely helps, so the pass is not fill-bound
+
+`shadow_map_scale` 4 -> 2, single variable, everything else the reporter's
+normal configuration. 4,013 in-play frames against run 34's 3,993, so the runs
+are directly comparable.
+
+| steady in-play, median | run 34 scale=4 | **run 36 scale=2** | run 35 visuals off |
+| --- | ---: | ---: | ---: |
+| frame | 25.4 ms | **24.5 ms** | 10.9 ms |
+| `gpu_frame` | 25.39 | **24.36** | 11.25 |
+| **`gpu_shadow_dir`** | 8.09 | **5.06** | 0.00 |
+| `gpu_grass` | 4.47 | 4.43 | 0.00 |
+| `draw_submit` | 11.9 | 10.6 | 0.3 |
+| in-play p50 | 13.7 | **12.4** | 9.1 |
+
+| the outdoor transition | run 34 | **run 36** |
+| --- | ---: | ---: |
+| frame N | 421.2 ms | **350.4 ms** |
+| its `gpu_frame` | 563.5 | 453.5 |
+| its `gpu_shadow_dir` | 351.6 | **243.2** |
+| frame N+1 | 181.9 ms | 144.2 ms |
+
+**Quartering the shadow-map area cut the directional pass by 37%, not 75%.**
+`gpu_grass` is unchanged at 4.43 against 4.47, which confirms the run really
+did move one variable.
+
+### What that rules out, and where it points
+
+If the pass were fill-rate bound, halving each dimension would have taken 8.09
+to about 2 ms. It took it to 5.06. **So the directional shadow pass is bound by
+the geometry going into it, not by the resolution it rasterises at** -- the same
+meshes are submitted to the same cascades whatever the map size, and only the
+per-texel work shrank.
+
+The geometry knob is `shadow_split`, and the mod already widens it:
+
+```
+shadow_fix.cpp:23   kNativeSplit  = 0.325f     what the game uses
+shadow_fix.cpp:24   kDefaultSplit = 0.450f     what this mod uses
+README:197          coverage scales as split^1.90
+```
+
+`(0.45 / 0.325)^1.90 = 1.86`. **The mod's directional shadow map covers 1.86x
+the area the game's does, so it takes nearly double the geometry**, which is
+exactly the quantity run 36 says the cost is proportional to. The
+cross-references already suspected the widened split of enlarging the region
+set (§2, item 3); this prices it.
+
+That makes `shadow_split=0.325` the next single variable -- native coverage,
+keeping the mod's filtering, stabilisation and map scale. Expect
+`gpu_shadow_dir` toward 8.09 / 1.86 = ~4.3 ms at scale 4, on the same axis run
+36 could not move, and the two levers multiply if both hold.
+
+### What did not move, in any of the three runs
+
+- **The first world frame**: 825.6 / 771.4 / 533.6 ms. The game's own resource
+  loading, class A3.
+- **The pump frames**: in-play frames over 100 ms are 10, 12 and 20 across runs
+  34, 36 and 35 -- 0.25%, 0.30% and 0.33% of play. `Engine::Render` under 7 ms
+  on all of them. Nothing on the GPU axis touches them, as expected, and they
+  are still the class to reopen once the GPU cost is down.
+
+## 39. Run 37: the split is the transition lever, and the two axes are independent
+
+`shadow_split` 0.45 -> 0.325 (the game's native value), `shadow_map_scale` back
+at its default 4. One variable from the live config.
+
+### The number that matters is the transition, and it moved a long way
+
+| N + N+1, the outdoor transition | |
+| --- | ---: |
+| run 34, stock | 421 + 182 = **603 ms** |
+| run 36, `shadow_map_scale=2` | 350 + 144 = **495 ms** |
+| **run 37, `shadow_split=0.325`** | 263 + 86 = **349 ms** |
+| run 35, visual enhancements off | 118 + 24 = 142 ms |
+
+`gpu_shadow_dir` on the transition frame: 351.6 -> 243.2 -> **131.8** -> 0.0.
+**The split takes 62% off the shadow spike where halving the map took 31%**, and
+`gpu_grass` held at 4.39 against 4.47 and 4.43, so the run moved one variable.
+
+**42% off the stutter the reporter actually feels, from one line of INI.**
+
+### Steady state improves, and the earlier p50 comparison was the wrong one
+
+Whole in-play p50 read 13.7 / 12.4 / **14.4** ms across runs 34 / 36 / 37, which
+looks like a regression and is an artefact: play alternates between full-scene
+outdoor stretches and much cheaper indoor ones, and the proportion of each
+varies with how the route is walked. Compared on the frames that are actually
+comparable -- full-scene in-play frames under 60 ms:
+
+| | run 34 | run 36 | run 37 |
+| --- | ---: | ---: | ---: |
+| frames | 1,051 | 1,085 | 1,102 |
+| p25 | 22.1 ms | 20.9 | **20.4** |
+| p50 | 25.4 ms | 24.5 | **24.1** |
+| p75 | 27.8 ms | 27.7 | **27.2** |
+
+Monotone improvement at every quartile. **Whole-session in-play p50 is not a
+usable comparator between these runs and should not be quoted as one** -- the
+same trap §34 found with menu frames, one level down.
+
+### The first world frame did not regress; it loaded twice as much
+
+Run 37's first world frame reads 1,370.5 ms against 825.6 and 771.4, which is
+not the split:
+
+| run | frame | `res_load_main` | `engine_arc_kib` |
+| --- | ---: | ---: | ---: |
+| 34 | 825.6 ms | 418.1 ms | 34,204 |
+| 36 | 771.4 ms | 328.8 ms | 28,480 |
+| **37** | **1,370.5 ms** | **792.4 ms** | **63,293** |
+| 35 | 533.6 ms | 336.4 ms | 28,185 |
+
+**It inflated 63 MiB where the others inflated 28-34.** That is class A3
+streaming variance -- the same frame ranged 578-3,811 ms across runs 14-33 with
+no setting changed at all -- and `gpu_shadow_dir` on it is 40.1 ms against run
+34's 40.3, so the shadow pass is not what moved.
+
+### The two axes are independent, so combine them
+
+Split and scale act on different quantities, which is why each is weak where the
+other is strong:
+
+| | steady `gpu_shadow_dir` | transition spike |
+| --- | ---: | ---: |
+| stock | 8.09 ms | 351.6 ms |
+| `scale=2` (quarter the texels) | **5.06 ms** | 243.2 ms |
+| `split=0.325` (54% of the area) | 6.23 ms | **131.8 ms** |
+
+Scale wins the steady-state number, split wins the transition by a mile.
+Nothing couples them: one changes texel density, the other changes how much
+geometry is in the frustum. Run 38 sets both -- expect steady `gpu_shadow_dir`
+near 3.9 ms and a transition spike near 90 ms.
+
+## 40. Run 39: the pump filter does nothing, and §17 was right
+
+`pump_timer_min_ms=50` -- an unfiltered `PeekMessageA` allowed through at most
+once every 50 ms, every other poll asking for everything below `WM_TIMER` and
+then everything above it. The mod owns `TQ.exe`'s import slot, so this is the
+one lever §17 never tried.
+
+**The filter engaged exactly as designed**: 1,047 unfiltered peeks against
+4,914 split ones over 65 seconds of play -- 16 a second, matching the 50 ms
+floor, against a couple of hundred a second before. **82% of the peeks that
+could synthesize a `WM_TIMER` were removed.**
+
+**The stalls did not follow.**
+
+| | stalls/min | ms/min | `pump_peek` % of play |
+| --- | ---: | ---: | ---: |
+| run 34 stock | 7.1 | 1,329 | 9.06% |
+| run 36 `scale=2` | 10.1 | 1,713 | -- |
+| **run 39 `pump_timer_min_ms=50`** | **11.1** | **1,734** | **9.83%** |
+| run 37 `split=0.325` | 16.5 | 3,066 | 10.31% |
+| run 35 visuals off | 20.9 | 3,211 | 18.33% |
+
+11.1 a minute sits in the middle of a 7.1-20.9 spread that four runs produced
+with no pump change at all. **The run-to-run variance is larger than the effect
+being tested**, which is itself the most informative number here.
+
+### And the premise the filter was built on is false
+
+Two of the twelve stall frames settle it, and they were in the same rows:
+
+```
+frame 3721   176.5 ms   pump_peek 1   pump_peek_miss 1   pump_peek_miss_us 154,594
+frame 5289   198.9 ms   pump_peek 1   pump_peek_miss 1   pump_peek_miss_us 185,129
+```
+
+**The peek that came back EMPTY cost 154 and 185 milliseconds.** Run 35's frame
+5303 -- one empty poll at 1 us, two retrievals at 221,249 us -- was not the
+rule, and §39's build was designed around it as if it were. Four of the twelve
+stall frames took no unfiltered peek at all, so their stall happened on the
+filtered path, **which cannot synthesize a `WM_TIMER`.**
+
+So `PeekMessageA` sometimes simply blocks, whether or not it has anything to
+return, and whether or not a timer is in range. `WM_TIMER` was a correlate --
+§16 offered exactly that reading as one of its two, and this is the run that
+chooses between them. It chose the other one.
+
+### The pump is closed, for the second time and now on a test rather than an argument
+
+§17 closed it on four converging lines of evidence and the judgement that the
+mod "has nothing useful to put in its place, because the work is the round trip
+itself". That judgement was about re-arming the timer. This run tried it on the
+peek itself, which was the untested part, and the answer is the same. **Nothing
+inside the process moves this.** It is 1.3-3.2 seconds of stall per minute of
+play, 7-21 events a minute, 60-460 ms each, and it is the host.
+
+`pump_timer_min_ms` stays in the build the way `async_level_load` does:
+verified, inert, default `0`, its own counters, and correct if a use is ever
+found. It is worth nothing on this install and the measurement that says so is
+in the table above.
+
+### What is actually true about this install, after seven runs
+
+| what | size | whose | can the mod help? |
+| --- | ---: | --- | --- |
+| the message pump in play | **1.3-3.2 s per minute of play** | the host | **no.** Two closures, §17 and this one |
+| the mod's GPU cost | doubles the GPU frame; 603 ms on the outdoor transition | **the mod's** | **yes**, and it is the one thing here that is ours |
+| the game's synchronous resource load | 147-336 ms on the transition frame | the game | not without a rewrite |
+| the loading screen and first world frame | 11.5-19.2 s once a session | the game | no |
+
+**The only lever this project owns is the mod's own GPU cost**, and the honest
+version of that is: `shadow_map_scale=2` takes the outdoor transition from
+603 ms to 495 ms and the steady GPU frame from 25.4 to 24.4 ms without touching
+shadow distance. `shadow_split` would be worth more and is not available -- it
+exists to fix shadow distance, which is the feature.
+
+The reporter has reported stutters after every one of these runs, and the
+stalls that remain are the pump.
+
+### And the host reading is probably wrong too
+
+This section first ended by proposing a Windows comparison, on the theory that
+`pump_peek_us` would read near zero there. **The reporter has since said that
+Titan Quest stutters on Windows as well, without this mod at all**, and they
+said the same thing earlier about the in-play hitch, where it was also right
+and also corrected a section of mine (§35 -> §36).
+
+That is testimony rather than a measurement in this dataset, but it is the only
+evidence anyone has about the other platform, and it does not fit "CrossOver's
+event path is the cause". Two readings survive it:
+
+1. `PeekMessageA` blocking really is a Wine property, and it is a *different*
+   thing from what the reporter feels -- in which case this project has spent
+   four runs measuring an artefact of the host and calling it the stutter, and
+   the felt stutter has never been isolated at all.
+2. The pump blocking is where the game's own stall *surfaces* under Wine -- the
+   main thread is waiting for something the game does, and `PeekMessage`
+   happens to be the call it is inside -- in which case the cause is upstream
+   of the pump and the pump columns have been a dead end pointing at a symptom.
+
+**Nothing in the recorded data distinguishes these, and both make every
+"whose time was it" conclusion in §14-§17 and §40 suspect.** That is the state
+this line is actually in, and it is worth saying plainly rather than filing the
+pump as closed for a second time: it is closed as a *lever*, twice tested, but
+the attribution behind the closure no longer stands on the evidence available.
+
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

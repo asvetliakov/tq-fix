@@ -788,6 +788,31 @@ const unsigned kGroupBlocking = 0x2000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
+// [performance] pump_timer_min_ms. A game-behaviour change rather than an
+// instrument, so like archive_cache_mb and async_level_load it defaults off,
+// installs nothing at 0, and reaches install() with the performance probe off.
+//
+// What it is for. Across runs 34-37 the message pump is the only in-play
+// stutter class the GPU work does not touch: 7-21 frames a minute of 60-225 ms
+// with Engine::Render under 15 ms, 1.3-3.2 seconds of stall per minute of play.
+// The cost is not "asking the host" -- an empty poll is 1 us. It is the
+// retrieval: run 35's frame 5303 spent 221,249 us in the two peeks that
+// returned a message and 1 us in the one that did not. §16 found 76% of slow
+// retrievals return WM_TIMER, which PeekMessage *synthesizes* when the queue is
+// otherwise empty and a timer has expired, rather than dequeues.
+//
+// So the lever §17 did not try: keep WM_TIMER out of the peek's range on most
+// calls, and let an unfiltered peek -- the only kind that can synthesize one --
+// through no more than once every pump_timer_min_ms. The game still receives
+// WM_TIMER, just not on every poll; at the 14.2 a second §16 measured, a floor
+// of 50 ms leaves the cadence essentially intact while cutting unfiltered peeks
+// from a couple of hundred a second to twenty.
+//
+// If the stalls follow the unfiltered peek, this is the lever. If they simply
+// move to the other messages, the pump really is a host property and §17's
+// closure stands -- which is worth one boot either way.
+unsigned g_pumpTimerMinMs;  // 0 = never filter, the stock pump
+LONG g_pumpLastFullTick;    // GetTickCount of the last unfiltered peek
 // [performance] async_level_load. A game-behaviour change rather than an
 // instrument, so like archive_cache_mb it defaults off, installs nothing at
 // 0, and reaches install() with the performance probe off.
@@ -1755,11 +1780,37 @@ PeekMessageFn g_peekMessage;
 DispatchMessageFn g_dispatchMessage;
 CallPatch g_peekPatch, g_dispatchPatch;
 
+// The peek the game makes, with WM_TIMER kept out of range. Two calls rather
+// than one because a message range is contiguous: everything below the timer,
+// then everything above it. Both are misses in the common case and a miss
+// measured 1 us, so the second call is not a second round trip in any sense
+// that matters.
+BOOL peekAroundTimer(LPMSG message, HWND window, UINT remove) {
+    if (g_peekMessage(message, window, 0, WM_TIMER - 1, remove)) return TRUE;
+    return g_peekMessage(message, window, WM_TIMER + 1, 0xffffffffu, remove);
+}
+
 BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
                                UINT last, UINT remove) {
     if (!g_peekMessage) return FALSE;
     const int64_t started = tq::probe::now();
-    const BOOL result = g_peekMessage(message, window, first, last, remove);
+    BOOL result;
+    // Only the unfiltered peek is touched. A caller that already asked for a
+    // range knows what it wants, and splitting it would change which messages
+    // it can see.
+    if (g_pumpTimerMinMs && !first && !last) {
+        const LONG now = (LONG)GetTickCount();
+        if ((LONG)(now - g_pumpLastFullTick) >= (LONG)g_pumpTimerMinMs) {
+            g_pumpLastFullTick = now;
+            tq::probe::engineCount(tq::probe::CounterPumpTimerFull);
+            result = g_peekMessage(message, window, first, last, remove);
+        } else {
+            tq::probe::engineCount(tq::probe::CounterPumpTimerSplit);
+            result = peekAroundTimer(message, window, remove);
+        }
+    } else {
+        result = g_peekMessage(message, window, first, last, remove);
+    }
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
     tq::probe::engineCount(tq::probe::CounterPumpPeek);
     tq::probe::engineCount(tq::probe::CounterPumpPeekUs, elapsed);
@@ -2340,15 +2391,20 @@ bool installLoop() {
 
 bool installPump(HMODULE engine) {
     unsigned installed = 0;
+    // PeekMessageA carries the filter as well as the timing, so it goes in for
+    // either reason; DispatchMessageA is pure instrument and stays behind the
+    // trace. Engine.dll's slot is the one the game's pump calls through.
     installed += redirectImport(g_peekPatch, engine, "user32.dll",
                                 "PeekMessageA", (void**)&g_peekMessage,
                                 (const void*)&hookPeekMessage) ? 1u : 0u;
-    installed += redirectImport(g_dispatchPatch, engine, "user32.dll",
-                                "DispatchMessageA",
-                                (void**)&g_dispatchMessage,
-                                (const void*)&hookDispatchMessage) ? 1u : 0u;
-    tq::hdr::log("Engine trace: message pump %u/2 imports redirected\r\n",
-                 installed);
+    if (g_tracing)
+        installed += redirectImport(g_dispatchPatch, engine, "user32.dll",
+                                    "DispatchMessageA",
+                                    (void**)&g_dispatchMessage,
+                                    (const void*)&hookDispatchMessage)
+                                        ? 1u : 0u;
+    tq::hdr::log("Engine trace: message pump %u imports redirected"
+                 " (pump_timer_min_ms=%u)\r\n", installed, g_pumpTimerMinMs);
     if (installed) ++g_installedHooks;
     return installed != 0;
 }
@@ -2584,6 +2640,18 @@ void readOptions(const wchar_t* iniPath) {
     g_asyncLevelLoad = iniPath && iniPath[0]
         && GetPrivateProfileIntW(L"performance", L"async_level_load", 0,
                                  iniPath) != 0;
+    // Keeps WM_TIMER out of the game's unfiltered peek except once every this
+    // many milliseconds. Like archive_cache_mb and async_level_load it is a
+    // fix rather than an experiment, so install() lets it in without the
+    // trace. Clamped to a second: beyond that the game's timer cadence is
+    // being changed rather than its polling, which is a different experiment
+    // and one §17 already refused.
+    const int floorMs = iniPath && iniPath[0]
+        ? GetPrivateProfileIntW(L"performance", L"pump_timer_min_ms", 0,
+                                iniPath)
+        : 0;
+    g_pumpTimerMinMs = floorMs > 0 && floorMs <= 1000 ? (unsigned)floorMs : 0u;
+    g_pumpLastFullTick = (LONG)GetTickCount();
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -2602,8 +2670,9 @@ bool install(HMODULE engine) {
     // neither of them brings the instrument along.
     const bool cache = tq::arccache::configured();
     const bool async = g_asyncLevelLoad;
+    const bool pumpFilter = g_pumpTimerMinMs != 0;
     decideTracing();
-    if (!g_tracing && !cache && !async) return false;
+    if (!g_tracing && !cache && !async && !pumpFilter) return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
     if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
@@ -2638,17 +2707,18 @@ bool install(HMODULE engine) {
     if (wants(kGroupFrame)) installFrame(engine);
     if (wants(kGroupGame)) installGame();
     if (wants(kGroupLoop)) installLoop();
-    if (wants(kGroupPump)) installPump(engine);
+    if (wants(kGroupPump) || pumpFilter) installPump(engine);
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
     if (async) installAsyncLoad(engine);
 
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
-                 " hooks=%u, main thread id at %p\r\n",
+                 " pump timer floor %u ms, hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
-                 g_installedHooks, (const void*)g_mainThreadId);
+                 g_pumpTimerMinMs, g_installedHooks,
+                 (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
     InterlockedExchange(&g_installed, 0);
     return false;
@@ -2750,6 +2820,8 @@ void shutdown() {
 }
 
 #ifdef TQ_SELFTEST
+unsigned pumpTimerFloorForTest() { return g_pumpTimerMinMs; }
+
 unsigned installedForTest() { return g_installedHooks; }
 void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
     hookEnterCriticalSection(section);

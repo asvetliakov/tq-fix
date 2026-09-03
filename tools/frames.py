@@ -27,6 +27,58 @@ from collections import Counter, defaultdict
 # overstates that share by a lot.
 WAIT = "present_call"
 
+# Also timed by us and also not ours: the game's own Draw/DrawIndexed and Map,
+# bracketed around the driver call and nothing else when [debug] draw_timing is
+# on. These columns exist to split the residual in findings.md §35, and they are
+# the game's time in the D3D11 path -- charging them to the mod would invert the
+# one number this script exists to print. They read 0 with draw_timing off; the
+# `# draw_timing=` header line says which kind of zero it is.
+THEIRS = ("draw_submit", "map_resource")
+NOT_OURS = (WAIT,) + THEIRS
+
+# Where the session divides, and why these two columns.
+#
+# `game_collisions` counts InterpenetrationManager::FixupCharacterCollisions,
+# which cannot run without a character in a world, so its first non-zero row is
+# where the menu ends. It is NOT where play begins: across runs 14-33 the game
+# simulates collisions for another 646-1,670 frames -- 8.8 to 14.4 seconds --
+# while a loading screen is still up and the world is not drawn.
+# Splitting on it alone puts that whole loading screen in the "in play" half,
+# and the frame that ends it is the largest frame of the session.
+#
+# `draw_indexed` separates them. The loading screen issues one indexed draw a
+# frame; the menu's character preview issues 77-80; the first frame that draws
+# the world issues 1,456-1,793 and never falls that low again. Any threshold
+# between 100 and 1,400 works and 500 was chosen for the margin on both sides.
+# It is also the only marker of the two that runs 9-13 can use, since
+# `game_collisions` did not exist yet.
+PLAY_DRAW = 500
+PLAY_COLUMN = "draw_indexed"
+MENU_COLUMN = "game_collisions"
+
+
+def sections(rows, every_frame):
+    """Split a full-session file into menu / loading screen / play.
+
+    Returns [(label, rows), ...], one entry when the file gives no reason to
+    split. A hitches-only file is never split: its rows are the hitches, so a
+    row above the threshold says the world was drawn at some point, not that
+    the rows before it were the menu.
+    """
+    if not every_frame:
+        return [("whole file", rows)]
+    play = next((i for i, row in enumerate(rows)
+                 if number(row, PLAY_COLUMN) >= PLAY_DRAW), None)
+    if play is None or play == 0:
+        return [("whole file", rows)]
+    menu = next((i for i, row in enumerate(rows)
+                 if number(row, MENU_COLUMN) > 0), None)
+    if menu is None or not 0 < menu < play:
+        return [("before play", rows[:play]), ("in play", rows[play:])]
+    return [("menu", rows[:menu]),
+            ("loading screen", rows[menu:play]),
+            ("in play", rows[play:])]
+
 
 def percentile(values, fraction):
     if not values:
@@ -75,6 +127,7 @@ def summarize(path):
     total = sum(frame_ms)
     ours = 0.0
     waiting = 0.0
+    theirs = 0.0
     per_phase = defaultdict(float)
     for row in rows:
         # Every _ms column is exclusive by construction -- the probe subtracts
@@ -82,9 +135,9 @@ def summarize(path):
         # (Files from before 1.7 wrote `present` inclusive; re-analyse those
         # knowing their present column double-counts its children.)
         values = {p: number(row, p + "_ms") for p in phases}
-        mine = sum(values.values()) - values.get(WAIT, 0.0)
-        ours += mine
+        ours += sum(v for k, v in values.items() if k not in NOT_OURS)
         waiting += values.get(WAIT, 0.0)
+        theirs += sum(values.get(k, 0.0) for k in THEIRS)
         for name, value in values.items():
             per_phase[name] += value
 
@@ -100,14 +153,47 @@ def summarize(path):
     print(f"\n  whose time was it, across those {len(rows)} rows")
     print(f"    the mod            {ours:8.0f} ms  {ours / total * 100:5.1f}%")
     print(f"    waiting on Present {waiting:8.0f} ms  {waiting / total * 100:5.1f}%")
-    print(f"    the game's frame   {total - ours - waiting:8.0f} ms  "
-          f"{(total - ours - waiting) / total * 100:5.1f}%")
+    if theirs:
+        print(f"    the game's D3D     {theirs:8.0f} ms  {theirs / total * 100:5.1f}%"
+              f"   (draw_submit + map_resource)")
+    rest = total - ours - waiting - theirs
+    print(f"    the game's frame   {rest:8.0f} ms  {rest / total * 100:5.1f}%")
+
+    # Every number above this line is the whole file, menu included, and the
+    # menu is a quarter to nearly half of the rows and far cheaper than play --
+    # so read the split below instead. It also varies: runs 14-33 hold
+    # 1,719-5,454 menu rows against a near-constant 3,853-4,656 rows of play,
+    # which is what made run-to-run p50 comparisons compare a varying amount
+    # of menu. Menu p50 is 7.3-8.2 ms and play p50 13.5-14.3 ms, so a
+    # whole-file p50 lands between the two and describes neither.
+    parts = sections(rows, every_frame)
+    if len(parts) > 1:
+        print("\n  by phase of the session")
+        print(f"    {'':<15} {'rows':>6} {'p50':>7} {'p99':>8} {'max':>9}"
+              f" {'total':>9} {'mod':>7}")
+        for label, part in parts:
+            times = [number(row, "ms") for row in part]
+            if not times:
+                continue
+            elapsed = sum(times)
+            mine = sum(sum(number(row, name + "_ms") for name in phases
+                           if name not in NOT_OURS) for row in part)
+            print(f"    {label:<15} {len(part):>6} {percentile(times, 0.50):>6.1f}ms"
+                  f" {percentile(times, 0.99):>7.1f}ms {max(times):>8.1f}ms"
+                  f" {elapsed:>8.0f}ms"
+                  f" {mine / elapsed * 100 if elapsed else 0:>6.1f}%")
 
     print("\n  the mod's share, by phase")
     for name, value in sorted(per_phase.items(), key=lambda item: -item[1]):
-        if value < 0.5 or name == WAIT:
+        if value < 0.5 or name in NOT_OURS:
             continue
         print(f"    {name:<16} {value:8.1f} ms")
+
+    timed = [(name, per_phase[name]) for name in THEIRS if per_phase.get(name)]
+    if timed:
+        print("\n  the game's own D3D11 calls, timed but not ours")
+        for name, value in timed:
+            print(f"    {name:<16} {value:8.1f} ms")
 
     counters = [k for k in rows[0]
                 if not k.endswith("_ms") and k not in ("frame", "ms", "unusual")]

@@ -76,12 +76,14 @@ loose_texture_max=0
 archive_cache_mb=0
 async_level_load=0
 timer_period_ms=0
+pump_timer_min_ms=0
 
 [debug]
 frame_overlay=0
 trace=0
 performance_trace=0
 engine_trace=1
+draw_timing=0
 ```
 
 `loose_texture_max` refuses a loose texture whose base level is larger than
@@ -192,6 +194,20 @@ game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
 `shadows=original`, which restores every shadow path at once. The in-game AA
 toggle remains authoritative: SMAA replaces the FXAA draw only while the game
 has AA enabled. Shadow Quality should remain High for the intended result.
+
+`pump_timer_min_ms` keeps `WM_TIMER` out of the game's unfiltered
+`PeekMessageA` except once every that many milliseconds; every other poll asks
+for everything below the timer and then everything above it. It is off at `0`.
+It exists because the message pump is the only in-play stutter class that GPU
+settings do not touch -- 7-21 frames a minute of 60-225 ms with `Engine::Render`
+under 15 ms -- and because the cost is the *retrieval*, not the asking: one
+measured frame spent 221,249 us in the two peeks that returned a message and
+1 us in the one that came back empty, and 76% of slow retrievals return
+`WM_TIMER`, which `PeekMessage` synthesizes on demand rather than dequeues. The
+game still receives `WM_TIMER`; at the 14.2 a second measured, a floor of 50 ms
+leaves its cadence intact while cutting unfiltered peeks from a couple of
+hundred a second to twenty. `pump_timer_full` and `pump_timer_split` count
+which path each poll took. Values above 1000 are refused rather than clamped.
 
 `shadow_split` sets how far the directional map reaches; coverage scales as
 `split^1.90`, so a wider split costs texel density and `shadow_map_scale`
@@ -313,8 +329,25 @@ default, nothing is measured, allocated, or written; what remains compiled in
 is one branch per instrumented call site.
 
 `tools/frames.py cache/run.csv` summarizes one or more runs: the frame-time
-distribution, the hitch count, and a ranking of which phase dominated the
-hitches and what it cost above its own baseline.
+distribution split into menu, loading screen and play, the hitch count, and a
+ranking of which phase dominated the hitches and what it cost above its own
+baseline. It splits at the first frame that draws the world -- `draw_indexed`
+of 500 or more -- because the loading screen draws one indexed primitive a
+frame and lasts nine to fourteen seconds, so a whole-file median describes
+neither half.
+
+`draw_timing=1` adds two columns, `draw_submit_ms` and `map_resource_ms`,
+bracketing the game's own `Draw`/`DrawIndexed` and `Map` -- the driver call
+itself, not the surrounding hook. These are the *game's* time, not the mod's,
+and `tools/frames.py` reports them separately for that reason. It is off by
+default because those hooks run 1,500 to 2,700 times a frame and a
+`QueryPerformanceCounter` pair on each is not free; it does nothing without
+`performance_trace`, and the CSV records which it was in a `# draw_timing=`
+header line so a zero column can be told from an unarmed one. It exists to
+split the residual in `research/streaming/findings.md` §35: on the in-play
+stutter frame, 29-54% of `Engine::Render` is left over after the game's own
+resource loader and every other named cost, and these two columns say whether
+that time is inside the D3D11 calls or in the game's code between them.
 
 While the performance trace is on, the `engine_*` columns report Titan Quest's
 own resource work rather than the mod's: forced level loads and how much of

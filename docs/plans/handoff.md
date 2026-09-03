@@ -2,21 +2,90 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 33** on
+built, what is measured, and what to do next. Current as of **run 39** on
 branch `stutter-mitigation`.
 
-**Start at "The order of work" near the end, and read findings.md §34 before
-anything else.** §34 is a fresh-eyes review of all nineteen recorded runs and
-it invalidates the framing of a lot of what sits above it here: the frame this
-project chased from run 21 to run 33 is the menu's load-game, not an in-game
-stutter, and the real in-game stutter had been mis-anatomised since §25.
-Everything above "The order of work" is history and should be read as such.
+---
+
+## READ THIS FIRST: the brief for the next session
+
+**The reporter has asked for a fresh-eyes review of everything, and the request
+is well founded.** Over runs 34-39 this project made a correct measurement and
+then attributed it wrongly three times in a row, and the reporter corrected it
+each time from their own experience of playing the game:
+
+| I claimed | they said | who was right |
+| --- | --- | --- |
+| the five-second frame is the largest in-play event (§34) | "I don't remember a 5-second stutter in game" | **them** -- it is in the loading screen (§35) |
+| `draw_submit` is a per-draw first-use cost in the driver (§36) | "this is not a host issue, TQ stutters on real Windows too" | **them** -- it is GPU backpressure (§37) |
+| shadow settings are the lever | "you are chasing the wrong variable, and shadow_split is a necessary option" | **them** -- §40 |
+| the remaining stalls are CrossOver's event path (§17, §40) | "I don't have Windows to test and I don't think CrossOver matters; the game stutters on Windows without the mod" | **unresolved, and probably them** |
+
+**Three of the four framings in §34-§40 were wrong, and every one of them was
+overturned by a sentence from the person playing the game rather than by the
+next measurement.** That is the single most important fact for a fresh reader,
+and it should shape how much weight the documents below get relative to the
+CSVs. Sections are corrected in place with pointers forward; do not read any
+section without checking whether a later one overturns it.
+
+**The specific thing to re-derive from scratch:** nobody has ever isolated the
+stutter the reporter actually feels. What has been isolated is:
+
+- a **loading pause** of 11.5-19.2 s once a session (classes A, A2, A3) --
+  the game's, not felt as a stutter;
+- an **outdoor-transition frame** of 290-439 ms plus a 120-218 ms successor,
+  once or twice a session -- about half the game's synchronous resource load
+  and about half GPU backpressure from **the mod's own** enhanced shadows and
+  grass;
+- **`PeekMessageA` stalls** of 60-460 ms, 7-21 a minute, 1.3-3.2 seconds per
+  minute of play, which vary 3x between identical runs, respond to nothing
+  tried, and whose attribution the reporter's Windows testimony contradicts.
+
+The third is the only candidate with the right *frequency* to be a stutter
+someone complains about after every run. It is also the one whose explanation
+is weakest. **Start there, and start by doubting §14-§17 and §40 rather than by
+building on them.**
+
+### Three concrete things nobody has tried
+
+1. **Nobody has ever asked the reporter *when* it stutters.** Every claim in
+   this project about "the stutter" is inferred from `max()` over a CSV, and
+   §34 and §35 are two separate occasions where that inference picked a frame
+   the reporter was not even looking at the game for. The mod owns the message
+   pump and already has a hotkey path (`bloom_toggle`). **A keypress that
+   writes a marker column into the frame record would tie a felt stutter to a
+   frame index for the first time**, and it is perhaps thirty lines. Every
+   attribution in §34-§40 would have been checkable against it.
+2. **`PeekMessageA` runs inter-thread `SendMessage` handlers inline, on
+   Windows as much as under Wine.** A blocking `PeekMessage` that returns
+   *nothing* -- run 39 frames 3721 and 5289, 154 and 185 ms with
+   `pump_peek_miss` of 1 -- is exactly the shape of the pump dispatching a
+   message another thread sent to the main window and waiting for the window
+   procedure. That mechanism is platform-independent, which fits the
+   reporter's Windows testimony where "CrossOver's event path" does not. It
+   has never been looked at; `hookDispatchMessage` only sees `DispatchMessageA`,
+   which is not the path a sent message takes.
+3. **The stall rate varies 3x between runs of the same route with no relevant
+   setting changed** -- 7.1, 10.1, 11.1, 16.5 and 20.9 a minute across runs
+   34, 36, 39, 37 and 35. Nothing in this project has explained that variance,
+   and it is larger than every effect the last six runs tried to measure. Until
+   it is explained, no A/B on this route can resolve anything smaller than 3x,
+   and several of the conclusions above were drawn from smaller differences
+   than that.
+
+---
+
+**After that brief, start at "The order of work" near the end.** Everything
+between here and it is history and should be read as such.
 
 ## Read these first
 
-1. `research/streaming/findings.md` **§34** — the corrected freeze taxonomy
-   (classes A–D) and what each is worth. Then **§31 and §33** for how Stage 5
-   ended, and **§25** for the three-class split §34 corrects.
+1. `research/streaming/findings.md` **§40** (the pump, closed as a lever twice
+   and with its attribution withdrawn), **§39, §38, §37** (the shadow series
+   and the correction to §36), **§36** (marked withdrawn in place), **§35**
+   (the corrected world-entry marker and the four-part session). Then **§34**,
+   which §35 corrects, **§31 and §33** for how Stage 5 ended, and **§25** for
+   the three-class split all of them correct.
 2. `docs/plans/game-stutter-mitigation.md` — the plan, and its Status section,
    which corrects two of its five headline findings and records what Stage 3
    measured away. Note it predates §34.
@@ -451,85 +520,96 @@ discipline is the reason to keep resisting the urge to build first.
 
 ## The order of work, as it now stands
 
-**Read findings.md §34 first.** A fresh-eyes review of all nineteen runs, once
-`game_collisions` gave a reliable marker for "the player is in the world",
-found that the frame this project has been chasing since run 21 is the menu's
-load-game, that the real in-game stutter was mis-anatomised, and that there is
-a five-second frame nobody has ever looked at. §31 and §33 are the background.
+**This section is the most-rewritten thing in the file and has been wrong at
+every version.** Read the brief at the top before it.
 
-1. **Class B — the in-game stutter — and it already has an answer waiting.**
-   578–1,938 ms, ~1,000–1,600 frames after the player enters the world,
-   reproduced in 16 of 19 runs, `Region::LoadLevel` 0.0 ms on every one.
-   **`engine_res_load_main_us` names 33–68% of `Engine::Render` on it (median
-   44%)** — the main thread synchronously running
-   `ResourceLoader::LoadResource`, with the archive inflate and texture
-   creation nested inside. The column has existed since run 10; §25 left it
-   out of the frame-3168 table and called the remainder unaccounted. **Start
-   by re-reading these frames, not by building an instrument.**
-2. **Class C — the five-second frame.** Runs 16 and 33 each hold one in-game
-   frame of 5,016.9 / 5,024.9 ms, `engine_render` 5,007.5 / 5,007.9 ms, with
-   nothing else named at all. Two runs within 0.4 ms of 5.007 s is a timeout,
-   not a coincidence. Largest event in the dataset and never investigated.
-3. **`tools/frames.py`: split the session at world entry.** First frame with
-   `game_collisions` non-zero. Menu is 25–47% of every session and has been in
-   every p50, p99 and "mod's share" ever quoted; in-game p50 is 12.1–13.4 ms
-   against the 8.3–10.0 ms reported. Menu length also varied 1,719–5,454
-   frames between runs while in-game frames stayed near-constant, so
-   run-to-run comparisons were differencing a varying amount of menu.
-4. **4.3 (libdeflate)** — now re-founded on class B rather than on a session
-   total: 106–366 ms of inflate sits *inside* the main-thread resource load on
-   the frame the player actually feels. Still the riskiest item in the plan.
-5. **`timeBeginPeriod` behind a switch** — ~100 ms a session, and 85 ms of it
-   is on class A, which is a loading screen. Nearly free, nearly pointless.
-6. ~~**Stage 5 / `async_level_load`**~~ — **finished and measured out (§33).**
-   All three synchronous `Region::LoadLevel` sites found, attributed, priced;
-   4,191 calls through them in run 33 and zero deferrals. Traversal was
-   already asynchronous all along. The switch stays: verified, inert, default
-   `0`.
-7. **The instruments stay and are the reason any of this was settled.**
-   `hookLoadLevel` / `hookGuaranteedGetLevel` record slow callers; the stack
-   scan names the whole path across `Engine.dll`, `Game.dll` and `TQ.exe`.
-   Decode the call in front of each return address rather than trusting
-   nearest-export names; treat a repeated group as stale, with the per-frame
-   CSV columns as the arbiter.
-8. ~~4.2, bounded prefetch~~ — **struck**, run 24.
-9. ~~Pooling the archive scratch buffers~~ — **struck**, run 24.
-10. ~~The archive block cache beyond 8 MiB~~ — **struck**, run 22.
+1. **Isolate the stutter the reporter actually feels, and stop inferring it.**
+   The marker keypress in the brief. Nothing else in this list is worth doing
+   before it, because three of the last four things this list called "the
+   target" were not what the reporter was reporting.
+2. **Explain the 3x run-to-run variance in the pump stall rate** before running
+   another A/B on this route. It is larger than every effect runs 34-39 tried
+   to measure.
+3. **The pump, reopened on a different mechanism.** Inter-thread `SendMessage`
+   dispatch inside `PeekMessageA`, which is platform-independent and fits the
+   reporter's testimony. §14-§17 and §40 assumed a host round trip and never
+   looked at this; §40's own data (a 185 ms peek that returned nothing)
+   contradicts the round-trip reading.
+4. **The mod's own GPU cost — the one lever this project owns, and it works.**
+   Enhanced shadows are 8.09 ms and grass 4.47 ms of a 25.4 ms steady GPU
+   frame at 5120x1440, and the outdoor transition is 421 + 182 ms of which the
+   directional shadow pass is 351.6 ms. `shadow_map_scale=2` takes the
+   transition to 350 + 144 and the steady frame to 24.4 ms **without touching
+   shadow distance** (§38). `shadow_split=0.325` is worth far more (263 + 86)
+   and is **refused**: it exists to fix shadow distance, which is the feature
+   (§39, the reporter's call). Grass has never been priced on its own.
+5. **The game's synchronous resource load**, 147-336 ms on the transition
+   frame, inside `Engine::Render` on the main thread. Real, the game's, and
+   nothing short of the archive work already measured out touches it.
+6. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
+   item in the plan for the smallest remaining return. **Struck** unless the
+   loading screen becomes the target.
+7. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
+   in-play stutter frame in nineteen runs.
+8. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
+9. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
+   struck, runs 22 and 24.
 
-**State a new session needs, beyond the repo:**
+**Switches that are built, verified, inert and worth nothing on this route.**
+All default `0`, all reach `install()` with the probe off, none bring a trace
+group: `archive_cache_mb` (§20), `async_level_load` (§33),
+`pump_timer_min_ms` (§40). They cost nothing and they are correct; none of them
+is a fix for anything measured here.
 
-- `cache/` is gitignored but present: `cache/runs/` holds the run inis
-  (`run27`–`run33` are this session's), each with its reasoning in the header,
-  and `cache/runs/live-config.ini` is the reporter's normal `tqflicker.ini`,
-  which every run ini is built from and diffed against.
-- The CSVs and logs live in the game directory as
-  `tqflicker-{frames,debug}.runN.{csv,log}`, runs 9–33. §34's whole argument is
-  a re-read of those nineteen files; nothing was thrown away.
-- The reporter's live `tqflicker.ini` has been restored (trace off, so the mod
-  is inert), and `winmm.dll` in the game directory is byte-identical to
-  `build/winmm.dll` at HEAD — functionally the run 33 build, since only
-  comments changed after that run.
-- The pinned `Engine.dll` is SHA-256 `0aedbb18…f694f6`; `verify-sites.py`
-  checks every byte table in `src/engine_probe.cpp` against it and the other
-  two modules.
+**Instruments added this session.** `[debug] draw_timing` adds `draw_submit_ms`
+and `map_resource_ms` around the game's own `Draw`/`DrawIndexed` and `Map` --
+the driver call only. It is what made the residual visible and then what
+disproved §36's reading of it. In-play p50 is unchanged with it on (13.7 ms
+against a 13.5-14.3 ms band), so it is affordable. `tools/frames.py` now splits
+the session into menu / loading screen / play on `draw_indexed >= 500` and
+reports the two D3D columns as the game's time, not the mod's.
 
-**Deferred at the reporter's request:** `cache/runs/play-with-cache-verify.ini`
-and `play-with-cache.ini` — the long-play validation and then serving. To be
-done once the project is otherwise finished, since hour-long sessions are a
-poor fit for the measure-fix loop. `archive_cache_mb` stays at `0` until then.
+**Two traps this project has fallen into twice each, both now documented.**
+`game_collisions` is not world entry (§35). Whole-session p50 -- and then whole
+*in-play* p50 -- are not comparable between runs, because the menu share and
+then the indoor/outdoor share both vary with how the route is walked (§34,
+§39). Compare full-scene in-play frames under 60 ms, or compare nothing.
 
-**Stage 5 is no longer parked, and the reason it was parked has been
-answered.** The old objection was that exactly one frame in 7,347 has a
-`Region::LoadLevel` costing over a millisecond, so it fixes the worst frame of
-a session and nothing else. That is still true — and after six more runs it is
-now the *best* remaining trade in the plan, because everything else has been
-measured smaller: the cache is worth 140 ms, `timeBeginPeriod` 85 ms, and
-libdeflate ~110 ms on the same frame, against 5.1's ~513 ms. "The worst frame
-of a session" is also the only frame the reporter actually notices.
+## State a new session needs, beyond the repo
 
-Run 26 added what was not known when it was parked: **the forced load is 85%
-a `Sleep(1)` poll loop**, so it is mostly waiting, not working — which both
-explains why it is so expensive and predicts that the pop-in will be brief.
+- **`cache/` is gitignored but present on the reporter's machine.**
+  `cache/runs/` holds every run ini, each with its reasoning in the header;
+  `run34`-`run39` are this session's and their headers carry the argument for
+  each experiment and, where it failed, what it disproved.
+  `cache/runs/live-config.ini` is the reporter's normal `tqflicker.ini`, which
+  every run ini is built from and diffed against, and which restores the
+  playable configuration:
+  `cp cache/runs/live-config.ini "$GAME/tqflicker.ini"`.
+- **The CSVs live in the game directory** as
+  `tqflicker-frames.runN.csv`, runs 9-39, plus `tqflicker-debug.runN.log` for
+  runs 9-33. **Runs 34-39 have no debug log** because they ran with `trace=0`;
+  if the message histogram or the slow-caller tables are wanted, a run needs
+  `[debug] trace=1`.
+- **Runs 34-39 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
+  and only run 39 has `pump_timer_full` / `pump_timer_split`. Earlier CSVs are
+  missing those columns off the end rather than shifted -- `tools/frames.py`
+  and `csv.DictReader` handle it.
+- **The route is scripted and identical in all twenty-four full runs**: menu,
+  load-game, a 9-16 s loading screen, an outdoor stretch, an indoor stretch, an
+  outdoor stretch, exit. World entry is the first frame with
+  `draw_indexed >= 500`; the in-play transition stutter lands at
+  play + 3,245-3,527 frames.
+- **The reporter runs the game from the CrossOver UI. Never launch it.**
+  Prepare a run ini in `cache/runs/`, diff it against `live-config.ini`,
+  install it and the DLL, and clear any stale `tqflicker-frames.csv` so the run
+  appends to nothing.
+- **The pinned `Engine.dll` is SHA-256 `0aedbb18...f694f6`**;
+  `research/streaming/tools/verify-sites.py` checks every byte table in
+  `src/engine_probe.cpp` against it and the other two modules. **139 checks**,
+  and every constant perturbation must fail it.
+- **The installed `winmm.dll` is byte-identical to `build/winmm.dll`** and the
+  live `tqflicker.ini` is the reporter's normal one, so the mod is inert as
+  left.
 
 ## Stage 5.1, built and run. The design record, and where it was wrong
 
@@ -693,6 +773,17 @@ is told to skip the region.
   watch.
 
 ## Conventions
+
+- **Titan Quest stutters on Windows too, without this mod.** The reporter has
+  said so directly, and it is the constraint that kills "it is CrossOver" as an
+  explanation for anything felt. Any attribution that only works under Wine has
+  to explain why the same complaint exists on native hardware before it is
+  believed.
+- **When the reporter says something about how the game behaves, weight it
+  above the next measurement.** Four times in this session a sentence from them
+  overturned a conclusion drawn from the CSVs, and the CSVs were not wrong --
+  the readings of them were. See the brief at the top of this file.
+
 
 - Never launch the game. The reporter runs it from the CrossOver UI.
 - A run ini goes in `cache/runs/`, built from the live `tqflicker.ini` beside

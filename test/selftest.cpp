@@ -657,6 +657,17 @@ void testEngineProbe() {
           && tq::engineprobe::installedForTest() == 0,
           "the engine trace installs nothing while the performance probe is off");
 
+    // draw_timing puts a clock pair on a hook that runs 1500-2700 times a
+    // frame, so the one thing it must never do is arm itself. It cannot arm
+    // without the probe -- there is no frame record for a phase to land in --
+    // and it must stay off when the probe is on but the switch is not set,
+    // which is every run recorded so far.
+    WritePrivateProfileStringW(L"debug", L"draw_timing", L"1", ini);
+    tq::probe::readOptions(ini);
+    check(!tq::probe::enabled() && !tq::probe::drawTimingEnabled(),
+          "draw_timing=1 arms nothing while the performance probe is off");
+
+    WritePrivateProfileStringW(L"debug", L"draw_timing", L"0", ini);
     WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
     WritePrivateProfileStringW(L"debug", L"engine_trace", L"0", ini);
     tq::probe::readOptions(ini);
@@ -665,6 +676,52 @@ void testEngineProbe() {
     check(tq::probe::enabled() && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
           "engine_trace=0 installs nothing even with the probe on");
+
+    check(tq::probe::enabled() && !tq::probe::drawTimingEnabled(),
+          "the probe alone leaves draw_timing off");
+
+    // And with both set it arms, and the phase it arms is the one the CSV
+    // column is named after -- so a run that reads draw_submit_ms = 0 is the
+    // game not spending time there, not a switch that silently did nothing.
+    WritePrivateProfileStringW(L"debug", L"draw_timing", L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::probe::setOutputPath(csv);
+    check(tq::probe::enabled() && tq::probe::drawTimingEnabled(),
+          "performance_trace and draw_timing together arm the draw phases");
+    tq::probe::beginFrame(nullptr);
+    const int64_t drawStart = tq::probe::now();
+    while (tq::probe::now() == drawStart) {}
+    tq::probe::addPhase(tq::probe::PhaseDrawSubmit, drawStart);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::phaseForTest(0, tq::probe::PhaseDrawSubmit) > 0.0f
+          && tq::probe::phaseForTest(0, tq::probe::PhaseMapResource) == 0.0f,
+          "draw_submit records into its own column and not its neighbour");
+
+    WritePrivateProfileStringW(L"debug", L"draw_timing", L"0", ini);
+    tq::probe::readOptions(ini);
+    tq::probe::setOutputPath(csv);
+
+    // pump_timer_min_ms is a fix rather than an instrument, so like
+    // archive_cache_mb and async_level_load it must reach install() with the
+    // performance probe off -- and must bring no trace group with it.
+    DeleteFileW(ini);
+    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"50", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled() && tq::engineprobe::pumpTimerFloorForTest() == 50,
+          "pump_timer_min_ms is read with the performance probe off");
+    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"0", ini);
+    tq::engineprobe::readOptions(ini);
+    check(tq::engineprobe::pumpTimerFloorForTest() == 0,
+          "pump_timer_min_ms=0 leaves the stock pump alone");
+    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"9999", ini);
+    tq::engineprobe::readOptions(ini);
+    check(tq::engineprobe::pumpTimerFloorForTest() == 0,
+          "a pump_timer_min_ms beyond a second is refused rather than clamped in");
+    DeleteFileW(ini);
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
+    tq::probe::readOptions(ini);
+    tq::probe::setOutputPath(csv);
 
     WritePrivateProfileStringW(L"debug", L"engine_trace", L"1", ini);
     tq::engineprobe::readOptions(ini);
@@ -1857,6 +1914,9 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     char* csvText = readTextFile(csv, &size);
     bool header = csvText
                && strstr(csvText, "# performance_trace=full") == csvText
+               && strstr(csvText, "# draw_timing=") != nullptr
+               && strstr(csvText, "draw_submit_ms") != nullptr
+               && strstr(csvText, "map_resource_ms") != nullptr
                && strstr(csvText, "frame,ms") != nullptr
                && strstr(csvText, "grass_present_ms") != nullptr
                && strstr(csvText, "gpu_shadow_dir_ms") != nullptr
@@ -1870,8 +1930,16 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     // header with fewer fields than its rows is the shape that failure takes.
     bool widths = false;
     if (csvText) {
-        const char* headerLine = strchr(csvText, '\n');
-        headerLine = headerLine ? headerLine + 1 : nullptr;
+        // Skip every leading comment rather than assuming one: the file opens
+        // with performance_trace and draw_timing today, and a reader that
+        // counts comment lines breaks the next time one is added. frames.py
+        // drops all of them the same way.
+        const char* headerLine = csvText;
+        while (*headerLine == '#') {
+            const char* next = strchr(headerLine, '\n');
+            if (!next) { headerLine = nullptr; break; }
+            headerLine = next + 1;
+        }
         const char* firstRow = headerLine ? strchr(headerLine, '\n') : nullptr;
         firstRow = firstRow ? firstRow + 1 : nullptr;
         widths = headerLine && firstRow && *firstRow
