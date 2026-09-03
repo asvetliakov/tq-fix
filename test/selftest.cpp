@@ -847,6 +847,55 @@ void testEngineProbe() {
           "shutting down and re-reading no INI puts async_level_load back off");
     DeleteFileW(ini);
 
+    // The sixth way in is the one-frame directional-shadow transition reuse.
+    // It is a fix, so the same off/default/no-trace contract applies. Its data
+    // path must restore the whole 64-byte matrix paired with the retained
+    // global depth map, reject a different target, and never skip twice in a
+    // row even if the region pointer oscillates.
+    check(!tq::engineprobe::shadowTransitionReuseForTest(),
+          "shadow_transition_reuse is off with no INI at all");
+    WritePrivateProfileStringW(L"performance", L"shadow_transition_reuse",
+                               L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::shadowTransitionReuseForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "shadow_transition_reuse reaches install() with the probe off, and"
+          " still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(16384),
+          "a shadow-reuse-only boot installs no trace group");
+
+    uint32_t oldMatrix[16], outputMatrix[16];
+    for (unsigned i = 0; i < 16; ++i) oldMatrix[i] = 0x12340000u + i;
+    memset(outputMatrix, 0, sizeof(outputMatrix));
+    void* const oldRegion = (void*)0x1000;
+    void* const newRegion = (void*)0x2000;
+    void* const thirdRegion = (void*)0x3000;
+    void* const surface = (void*)0x4000;
+    tq::engineprobe::primeShadowReuseForTest(oldRegion, surface, oldMatrix);
+    check(!tq::engineprobe::reuseShadowForTest(oldRegion, surface, outputMatrix),
+          "shadow reuse does nothing while the region is unchanged");
+    tq::engineprobe::primeShadowReuseForTest(oldRegion, surface, oldMatrix);
+    check(!tq::engineprobe::reuseShadowForTest(newRegion, (void*)0x5000,
+                                               outputMatrix),
+          "shadow reuse refuses a different depth target");
+    tq::engineprobe::primeShadowReuseForTest(oldRegion, surface, oldMatrix);
+    check(tq::engineprobe::reuseShadowForTest(newRegion, surface, outputMatrix)
+          && !memcmp(outputMatrix, oldMatrix, sizeof(oldMatrix)),
+          "a region change restores all 64 bytes paired with the retained map");
+    check(!tq::engineprobe::reuseShadowForTest(thirdRegion, surface,
+                                               outputMatrix),
+          "shadow transition reuse never skips two calls in a row");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::shadowTransitionReuseForTest(),
+          "re-reading no INI puts shadow_transition_reuse back off");
+    DeleteFileW(ini);
+
     // The slow-LoadLevel caller table. Five calls a session decide where
     // Stage 5.1 should point, so a slot bug costs a boot rather than a build;
     // this drives the aggregator directly.
@@ -1948,6 +1997,7 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           "the header carries the engine channel's columns");
     check(csvText && strstr(csvText, "engine_shadow_render_us") != nullptr
           && strstr(csvText, "engine_shadow_region_change") != nullptr
+          && strstr(csvText, "engine_shadow_reuse") != nullptr
           && strstr(csvText, "engine_shadow_res_load_us") != nullptr,
           "the header carries the directional-shadow attribution columns");
     // The permanent regression test for the header buffer. snprintf truncation

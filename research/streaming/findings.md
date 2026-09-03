@@ -4417,6 +4417,95 @@ directional light record whose `+0x14` target is the one global map; the fix
 must explicitly cache and restore all 64 matrix bytes rather than assume that
 record survived a frame.
 
+## 49. Run 47 design: one-frame whole map/matrix reuse
+
+Run 47 implements exactly the A/B §48 supports behind
+`[performance] shadow_transition_reuse=1`, default `0`. It changes no split,
+map size, shader, caster rule, or steady-state cadence. On a non-null change of
+the constructor-verified `GraphicsShadowMapDx11+0x6c` region pointer, and only
+when the render target matches the last successful directional call, it:
+
+1. leaves the one global directional depth texture untouched;
+2. copies the prior successful call's complete 64-byte world-to-shadow matrix
+   into the current light record;
+3. returns the prior successful result without invoking `RenderDirectional`;
+4. forces the following call through normally, even if the region pointer
+   changes again.
+
+That is reuse of one matched pair, not skipping the inner draw after a new
+matrix has been computed. The matrix size is re-derived from two new binary
+windows: the seventh argument is saved from `[ebp+0x1c]`, and the function
+later writes `16` dwords to it with `rep movsd`. `verify-sites.py` now performs
+154 checks. Perturbing either new RVA, either byte table, or the 16-dword
+constant makes it fail.
+
+The switch is a fix rather than an instrument. It reaches `install()` with the
+performance probe off, executes no probe clocks or counters in that mode, and
+brings no trace group. With group `16384` active,
+`engine_shadow_reuse` identifies each skipped build. The self-test covers the
+default-off and trace-off gates, full 64-byte restoration, target identity,
+and the no-consecutive-skip rule.
+
+The expected result is deliberately narrow. Run 46's region-changing marked
+onset is eligible; its later frame 6981 is not. Run 47 must be judged on the
+collision-active full-scene **play** transition and F12 observation, plus
+whether any one-frame stale-shadow flash is visible. No cross-run session or
+in-play p50 is relevant.
+
+## 50. Run 47: one-frame reuse defers the work and visibly flickers
+
+Run 47 is archived as `tqflicker-frames.run47.csv`, SHA-256
+`f48562aaedc130722bc98648e3adc0a2e575a0b5f099cc7b7d969db51bdf0a12`.
+It contains 7,105 contiguous rows. The five session parts are: **menu** frames
+0-1686 (15.947 s), **load-game frame** 1687 (1.542 s), **loading screen**
+1688-2788 (10.142 s), **first world frame** 2789 (751.599 ms), and **play**
+frames 2790-7104 (65.645 s).
+
+Before the CSV was read, the reporter observed three whole-scene flickers:
+the first few near the beginning, and the last approximately 3-4 seconds after
+the felt stutter. That observation rejects the fix independently of its timing
+result. The switch fired seven times: once on the **first world frame** 2789,
+and in **play** on frames 3092, 3208, 4223, 6442, 6690, and 7024. Frame 7024
+is after collision activity ended during the exit portion of play. The last
+active-play reuse, frame 6690, begins 4.822 s after the F12 marker and is the
+strongest match for the reported last flicker. There is no flicker marker, so
+the individual visual events cannot be assigned more precisely, but the
+timing and the exact count of visible discontinuities establish that stale
+whole-map reuse is not visually safe.
+
+The one F12 marker is frame 6468 in **play**. Its reaction window contains the
+collision-active outdoor-transition onset at frame 6442. The switch worked as
+implemented there: `engine_shadow_reuse=1`, zero shadow CPU time, and zero
+directional-shadow GPU time. That frame nevertheless lasts 148.733 ms, with
+142.103 ms in `Engine::Render` and 48.482 ms in 13 main-thread resource loads
+outside the skipped shadow call. On the immediately following **play** frame
+6443, the forced normal call lasts 119.249 ms, including 117.641 ms in 58
+synchronous resource loads, beside a 217.272 ms directional GPU interval; the
+whole frame lasts 146.314 ms. Frame 6444 then lasts 122.691 ms. The three-frame
+burst is 417.738 ms. Run 46's corresponding first three frames totaled
+631.550 ms, but their resource and GPU workloads differ, so that is not a
+controlled magnitude claim. The supported conclusion is narrower: the felt
+burst remained, and the work skipped on the trigger was paid on the next
+frame.
+
+The trigger is also incomplete. Later **play** frame 6511 has no region change
+but spends 67.014 ms in the directional build, of which 65.528 ms is 23
+synchronous loads, beside a 116.768 ms directional GPU interval. This repeats
+run 46's later non-region shadow burst. A longer fixed reuse interval would
+both prolong the now-observed stale-shadow discontinuity and still pay the
+build when the interval expires. Do not test that variation.
+
+The message pump remains unrelated to this class. The maximum `PeekMessageA`
+time on any collision-active **play** frame is 8.124 ms; on frames 6442-6444
+it is 0.748, 0.753, and 0.077 ms. Do not reopen the pump route.
+
+`shadow_transition_reuse` therefore stays default-off and is rejected as a
+fix. The binary-site verification and default-off implementation remain useful
+as the exact experiment record, but it must not be enabled in the playable
+configuration. A further shadow fix needs to make the caster resources ready
+before the visible transition or genuinely distribute the build without
+showing a stale map; merely postponing the same call is not such a fix.
+
 
 ## Cross-references worth acting on
 

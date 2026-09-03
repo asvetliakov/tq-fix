@@ -2,12 +2,25 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 46**, after
-the corrected-writer run 45, on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current as of **run 47 measured
+and rejected**, after its one-frame shadow reuse visibly flickered and deferred
+the remaining felt play burst by one frame, on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**Run 47 result -- read findings §50 and §49 first.** The one-frame whole-map
+reuse is rejected. Before the CSV was read, the reporter observed three
+whole-scene flickers. The switch fired seven times; the last active-play reuse
+is 4.822 s after the F12 marker and fits the reported last flicker. At the
+marked collision-active **play** transition, frame 6442 skipped the shadow CPU
+and GPU work exactly as intended but still lasted 148.733 ms. The forced normal
+call on frame 6443 then paid 117.641 ms of synchronous shadow resource loads
+and a 217.272 ms directional GPU interval, and frame 6444 lasted another
+122.691 ms. The felt burst remained. A later non-region shadow-load burst also
+remained. Do not extend the reuse interval: that would prolong the observed
+visual discontinuity and still defer the same build.
 
 **Run 46 result -- read findings §48 and §47 first.** The one F12 reaction is
 in **play** and follows the collision-active full-scene outdoor-transition
@@ -18,13 +31,10 @@ region pointer changes before the call. The remaining felt class is therefore
 localized: the game loads resources inside the directional-shadow build while
 that build submits a large caster pass. No play pump call reaches 50 ms.
 
-The supported next test is one-frame **whole-pair** reuse on that region
-change: retain the prior global depth map and explicitly copy back its matching
-64-byte matrix, then render normally on the following frame. Skipping only the
-draw is invalid, and simply assuming the output light record persisted is also
-invalid. This does not alter `shadow_split`, and it targets only the marked
-play transition onset; frame 6981 proves later shadow-load bursts can occur
-without another region change.
+Run 47 tested the supported one-frame whole-pair reuse and rejected it. A
+further shadow fix has to make caster resources ready before the visible
+transition or genuinely distribute the build without displaying a stale map.
+Postponing the complete call by a fixed number of frames is closed.
 
 **Run 45 result -- read findings §46 first.** With one retained CSV handle and
 250 ms batches, the old slow-Peek population disappeared: zero frames reached
@@ -132,8 +142,8 @@ between here and it is history and should be read as such.
 
 ## Read these first
 
-1. `research/streaming/findings.md` **§48, §47, §46, §45, §44, §43, §42,
-   §41** (the transition-shadow result and design,
+1. `research/streaming/findings.md` **§49, §48, §47, §46, §45, §44, §43,
+   §42, §41** (the one-frame reuse A/B, transition-shadow result and design,
    corrected-writer control, the full-trace writer defect, the migrating
    CrossOver server-call stall, the rejected sent-message cause, the
    now-contaminated felt-stutter runs, and the withdrawn polling-marker run),
@@ -615,7 +625,11 @@ every version.** Read the brief at the top before it.
    resource loads, beside a 273.815 ms directional GPU interval. The region
    changes before the call. This supports one-frame reuse of the previous
    whole map/matrix pair as the next A/B, with no change to `shadow_split`.
-8. **The mod's own GPU cost — the one lever this project owns, and it works.**
+8. ~~**Run 47 one-frame whole map/matrix reuse**~~ -- **rejected**, §50. It
+   visibly flickers, defers the full shadow build to the next frame, leaves the
+   felt three-frame **play** burst, and misses a later non-region shadow-load
+   burst. Do not lengthen the reuse window.
+9. **The mod's own GPU cost — the one lever this project owns, and it works.**
    Enhanced shadows are 8.09 ms and grass 4.47 ms of a 25.4 ms steady GPU
    frame at 5120x1440, and the outdoor transition is 421 + 182 ms of which the
    directional shadow pass is 351.6 ms. `shadow_map_scale=2` takes the
@@ -623,16 +637,16 @@ every version.** Read the brief at the top before it.
    shadow distance** (§38). `shadow_split=0.325` is worth far more (263 + 86)
    and is **refused**: it exists to fix shadow distance, which is the feature
    (§39, the reporter's call). Grass has never been priced on its own.
-9. **The game's synchronous resource load**, 147-336 ms on the transition
+10. **The game's synchronous resource load**, 147-336 ms on the transition
    frame, inside `Engine::Render` on the main thread. Real, the game's, and
    nothing short of the archive work already measured out touches it.
-10. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
+11. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
    item in the plan for the smallest remaining return. **Struck** unless the
    loading screen becomes the target.
-11. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
+12. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
    in-play stutter frame in nineteen runs.
-12. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
-13. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
+13. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
+14. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
    struck, runs 22 and 24.
 
 **Switches that are built, verified, inert and worth nothing on this route.**
@@ -672,23 +686,29 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   playable configuration:
   `cp cache/runs/live-config.ini "$GAME/tqflicker.ini"`.
 - **The CSVs live in the game directory** as
-  `tqflicker-frames.runN.csv`, runs 9-45, plus `tqflicker-debug.runN.log` for
+  `tqflicker-frames.runN.csv`, runs 9-47, plus `tqflicker-debug.runN.log` for
   runs 9-33. **Runs 34-39 have no debug log** because they ran with `trace=0`;
   if the message histogram or the slow-caller tables are wanted, a run needs
   `[debug] trace=1`.
-- **Runs 34-45 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
-  only run 39 has `pump_timer_full` / `pump_timer_split`, runs 40-45 have the
+- **Runs 34-47 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
+  only run 39 has `pump_timer_full` / `pump_timer_split`, runs 40-47 have the
   F12 marker, run 42 has the sent-window-procedure split, and only run 43 has
   the withdrawn thread-CPU/query columns, run 44 has the external
   `sample` reports under `cache/samples/`, and run 45 is the corrected-writer
-  control. Earlier CSVs are
+  control. Runs 46-47 add the directional-shadow attribution, and run 47 adds
+  `engine_shadow_reuse`. Earlier CSVs are
   missing those columns off the end rather than shifted -- `tools/frames.py`
   and `csv.DictReader` handle it.
 - **Run 46 is archived.** `tqflicker-frames.run46.csv` has SHA-256
   `bf1c5aff030bc11e2ac0a7f3055c138bccef378f021bdcb7b3ae71faa272641b`.
   Its INI differed from the normal config only by `performance_trace=full` and
   the passive F12 marker. See findings §48.
-- **The route is scripted and identical in all twenty-five full runs**: menu,
+- **Run 47 is archived.** `tqflicker-frames.run47.csv` has SHA-256
+  `f48562aaedc130722bc98648e3adc0a2e575a0b5f099cc7b7d969db51bdf0a12`.
+  `cache/runs/run47-shadow-transition-reuse.ini` differs from the normal live
+  config by one performance variable (`shadow_transition_reuse=1`) and the
+  same two instruments as run 46. See findings §50; the switch is rejected.
+- **The route is scripted and identical in all twenty-six full runs**: menu,
   load-game, a 9-16 s loading screen, an outdoor stretch, an indoor stretch, an
   outdoor stretch, exit. World entry is the first frame with
   `draw_indexed >= 500`; the in-play transition stutter lands at
@@ -699,14 +719,15 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   appends to nothing.
 - **The pinned `Engine.dll` is SHA-256 `0aedbb18...f694f6`**;
   `research/streaming/tools/verify-sites.py` checks every byte table in
-  `src/engine_probe.cpp` against it and the other two modules. **149 checks**,
+  `src/engine_probe.cpp` against it and the other two modules. **154 checks**,
   and every constant perturbation must fail it.
-- **Run 46 is installed.** The installed `winmm.dll` is byte-identical to
+- **The normal safe configuration is installed.** The installed `winmm.dll`
+  is byte-identical to
   `build/winmm.dll`, SHA-256
-  `a577bd7828d17755b84e8f39f07070eecf66ecf97beb1d794a88ef4b3f3d3417`;
-  the installed `tqflicker.ini` is byte-identical to the run 46 file, and the
-  stale live `tqflicker-frames.csv` has been removed. The game has not been
-  launched.
+  `91fa19140f2989f2de6998f306da64bf551f322ef2dec9e6aa8cfad90b411a06`;
+  the installed `tqflicker.ini` is byte-identical to `live-config.ini`, so
+  `shadow_transition_reuse` is default-off, and the archived live CSV has been
+  removed. The game has not been launched since that restoration.
 
 ## Stage 5.1, built and run. The design record, and where it was wrong
 

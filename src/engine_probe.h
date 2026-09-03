@@ -98,6 +98,21 @@ void readOptions(const wchar_t* iniPath);
 //
 // 0, the default, installs nothing. The trade at 1 is pop-in at a doorway.
 
+// [performance] shadow_transition_reuse, also a fix and defaulting to 0.
+//
+// Run 46 localized the marked play outdoor-transition onset inside
+// GraphicsShadowMapDx11::RenderDirectional: 167.799 of its 170.532 CPU ms
+// were synchronous main-thread resource loads, beside 273.815 ms of GPU
+// directional-shadow work. The verified region pointer changed before that
+// call. At 1, that one change reuses the previous global depth map and copies
+// its matching 64-byte matrix into the new light record for exactly one frame;
+// the following call always renders normally. `shadow_split` is untouched.
+// Run 47 rejected it: reuse visibly flickers and only defers the full build.
+// Keep it at 0 outside reproduction of that experiment.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 16384 adds `engine_shadow_reuse` when measuring it.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
@@ -120,6 +135,11 @@ bool wantsForTest(unsigned group);
 // assert the default is off without inferring it from install() refusing a
 // module that was never Engine.dll anyway.
 bool asyncLevelLoadForTest();
+bool shadowTransitionReuseForTest();
+// Drives the whole-map/matrix cache without patching an off-game synthetic
+// module. The production wrapper uses these same two helpers.
+void primeShadowReuseForTest(void* region, void* surface, const void* matrix);
+bool reuseShadowForTest(void* region, void* surface, void* matrix);
 // The slow-LoadLevel caller table, which decides where Stage 5.1 should point.
 // Driven directly rather than through a real detour: what is worth testing is
 // the aggregation and the module bound, not __builtin_return_address.

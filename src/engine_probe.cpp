@@ -168,6 +168,27 @@ const BYTE kShadowRegionConstructorBytes[] = {
     0x50
 };
 
+// RenderDirectional saves its seventh argument (Mat4&) and later copies the
+// completed matrix to it with `mov ecx,16; rep movsd`. Together these two
+// windows prove both the output pointer and all 64 bytes the reuse path must
+// restore. Neither table is patched.
+const DWORD kShadowOutputArgumentRva = 0x18dbd5;
+const BYTE kShadowOutputArgumentBytes[] = {
+    0x8b, 0x45, 0x0c,
+    0x89, 0x44, 0x24, 0x24,
+    0x8b, 0x45, 0x1c,                          // mov eax,[ebp+0x1c] output
+    0x89, 0xb4, 0x24, 0xc8, 0x00, 0x00, 0x00,
+    0x89, 0x44, 0x24, 0x7c                     // save output at esp+0x7c
+};
+const DWORD kShadowOutputCopyRva = 0x18f0c0;
+const unsigned kShadowMatrixDwords = 16;
+const BYTE kShadowOutputCopyBytes[] = {
+    0x8b, 0xbc, 0x24, 0x80, 0x00, 0x00, 0x00,  // output after one push
+    0x8b, 0xf0,                                // source matrix
+    0xb9, 0x10, 0x00, 0x00, 0x00,              // 16 dwords
+    0xf3, 0xa5                                 // rep movsd
+};
+
 // --- Region::UnloadLevel.
 const DWORD kUnloadLevelRva = 0x20e040;
 const char kUnloadLevelName[] = "?UnloadLevel@Region@GAME@@QAEX_N_N@Z";
@@ -857,6 +878,11 @@ LONG g_pumpLastFullTick;    // GetTickCount of the last unfiltered peek
 // instrument, so like archive_cache_mb it defaults off, installs nothing at
 // 0, and reaches install() with the performance probe off.
 bool g_asyncLevelLoad;
+// [performance] shadow_transition_reuse. On a directional shadow region
+// change, preserve the previous global depth map and explicitly restore its
+// matching matrix for one frame. A fix rather than an instrument: defaults
+// off, reaches install() with the probe off, and does no timing in that mode.
+bool g_shadowTransitionReuse;
 // Whether this install() is installing the trace at all. archive_cache_mb can
 // reach install() with the performance probe off, and without this every
 // wants() below would read the trace mask -- which defaults to 1 -- and put
@@ -966,6 +992,12 @@ CallPatch g_sweepPatches[kSweepCount];
 CallPatch g_shadowDirectionalPatch;
 LONG g_insideDirectional;
 void* g_lastShadowRegion;
+void* g_cachedShadowSurface;
+DWORD g_cachedShadowMatrix[kShadowMatrixDwords];
+int g_cachedShadowResult;
+bool g_cachedShadowValid;
+bool g_reusedLastShadow;
+bool g_shadowTracing;
 
 // Which call site the expensive forced loads actually come from -- the one
 // fact runs 27 and 28 left missing, and the reason Stage 5.1 was aimed wrong.
@@ -1339,24 +1371,52 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     }
 }
 
+bool reusePreviousShadow(bool regionChanged, void* surface, void* matrix) {
+    if (!g_shadowTransitionReuse || !regionChanged || g_reusedLastShadow
+        || !g_cachedShadowValid || surface != g_cachedShadowSurface || !matrix)
+        return false;
+    memcpy(matrix, g_cachedShadowMatrix, sizeof(g_cachedShadowMatrix));
+    g_reusedLastShadow = true;
+    if (g_shadowTracing)
+        tq::probe::engineCount(tq::probe::CounterEngineShadowReuse);
+    return true;
+}
+
+void rememberShadow(void* surface, const void* matrix, int result) {
+    g_reusedLastShadow = false;
+    if (!result || !surface || !matrix) return;
+    memcpy(g_cachedShadowMatrix, matrix, sizeof(g_cachedShadowMatrix));
+    g_cachedShadowSurface = surface;
+    g_cachedShadowResult = result;
+    g_cachedShadowValid = true;
+}
+
 int __fastcall hookRenderDirectional(
     void* self, void* edx, void* canvas, const void* camera,
     const void* frustum, int algorithm, void* surface, void* matrix) {
     if (!g_renderDirectional) return 0;
 
     void* const region = *(void**)((BYTE*)self + kShadowRegionOffset);
-    if (region && g_lastShadowRegion && region != g_lastShadowRegion)
+    const bool regionChanged =
+        region && g_lastShadowRegion && region != g_lastShadowRegion;
+    if (g_shadowTracing && regionChanged)
         tq::probe::engineCount(tq::probe::CounterEngineShadowRegionChange);
     if (region) g_lastShadowRegion = region;
 
-    const int64_t started = tq::probe::now();
-    InterlockedIncrement(&g_insideDirectional);
+    if (reusePreviousShadow(regionChanged, surface, matrix))
+        return g_cachedShadowResult;
+
+    const int64_t started = g_shadowTracing ? tq::probe::now() : 0;
+    if (g_shadowTracing) InterlockedIncrement(&g_insideDirectional);
     const int result = g_renderDirectional(self, edx, canvas, camera, frustum,
                                             algorithm, surface, matrix);
-    InterlockedDecrement(&g_insideDirectional);
-    tq::probe::engineCount(tq::probe::CounterEngineShadowRender);
-    tq::probe::engineCount(tq::probe::CounterEngineShadowRenderUs,
-                           tq::probe::microsecondsSince(started));
+    if (g_shadowTracing) {
+        InterlockedDecrement(&g_insideDirectional);
+        tq::probe::engineCount(tq::probe::CounterEngineShadowRender);
+        tq::probe::engineCount(tq::probe::CounterEngineShadowRenderUs,
+                               tq::probe::microsecondsSince(started));
+    }
+    rememberShadow(surface, matrix, result);
     return result;
 }
 
@@ -2610,16 +2670,27 @@ bool installFrame(HMODULE engine) {
 // loads made synchronously inside it. The object field is verified separately
 // because patchCall's window proves the caller and callee, not the layout of
 // the temporary GraphicsShadowMapDx11 object passed in ECX.
-bool installShadow(HMODULE engine) {
+bool installShadow(HMODULE engine, bool trace) {
     void* target = resolve(engine, kRenderDirectionalName,
                            kRenderDirectionalRva);
     const bool regionVerified = tq::detour::matches(
         engine, (BYTE*)engine + kShadowRegionConstructorRva,
         signature(kShadowRegionConstructorBytes,
                   sizeof(kShadowRegionConstructorBytes)));
-    if (!target || !regionVerified) {
+    const bool outputArgumentVerified = tq::detour::matches(
+        engine, (BYTE*)engine + kShadowOutputArgumentRva,
+        signature(kShadowOutputArgumentBytes,
+                  sizeof(kShadowOutputArgumentBytes)));
+    const bool outputCopyVerified = tq::detour::matches(
+        engine, (BYTE*)engine + kShadowOutputCopyRva,
+        signature(kShadowOutputCopyBytes, sizeof(kShadowOutputCopyBytes)));
+    if (!target || !regionVerified || !outputArgumentVerified
+        || !outputCopyVerified) {
         if (!regionVerified)
             tq::hdr::log("Engine trace: GraphicsShadowMapDx11 region field"
+                         " does not match -- leaving the call alone\r\n");
+        if (!outputArgumentVerified || !outputCopyVerified)
+            tq::hdr::log("Engine trace: GraphicsShadowMapDx11 matrix output"
                          " does not match -- leaving the call alone\r\n");
         note("GraphicsShadowMapDx11::RenderDirectional", false);
         return false;
@@ -2631,7 +2702,11 @@ bool installShadow(HMODULE engine) {
         (BYTE*)engine + kShadowCallWindowRva,
         signature(kShadowCallWindowBytes, sizeof(kShadowCallWindowBytes)),
         kShadowCallOffset, target, (const void*)&hookRenderDirectional);
-    if (!ok) g_renderDirectional = nullptr;
+    if (ok) {
+        g_shadowTracing = trace;
+    } else {
+        g_renderDirectional = nullptr;
+    }
     note("GraphicsShadowMapDx11::RenderDirectional", ok);
     return ok;
 }
@@ -2768,6 +2843,13 @@ void readOptions(const wchar_t* iniPath) {
         : 0;
     g_pumpTimerMinMs = floorMs > 0 && floorMs <= 1000 ? (unsigned)floorMs : 0u;
     g_pumpLastFullTick = (LONG)GetTickCount();
+    // Reuses the last complete directional depth-map/matrix pair for exactly
+    // one call when the shadow context's region pointer changes. Unlike the
+    // trace group, this is a game-behaviour change and must work with the
+    // performance probe off.
+    g_shadowTransitionReuse = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance", L"shadow_transition_reuse", 0,
+                                 iniPath) != 0;
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -2780,18 +2862,22 @@ bool install(HMODULE engine) {
     // opens them:
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
-    // archive_cache_mb and async_level_load add are third and fourth ways in
+    // archive_cache_mb, async_level_load and shadow_transition_reuse add
+    // independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
     // wants() below refuses every trace group when g_tracing is false, so
-    // none of them brings the rest of the instrument along. The marker is the
-    // fifth way in and installs only the existing PeekMessage import wrapper.
+    // none of them brings the rest of the instrument along. The marker also
+    // installs only the existing PeekMessage import wrapper.
     const bool cache = tq::arccache::configured();
     const bool async = g_asyncLevelLoad;
     const bool pumpFilter = g_pumpTimerMinMs != 0;
+    const bool shadowReuse = g_shadowTransitionReuse;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
-    if (!g_tracing && !cache && !async && !pumpFilter && !marker) return false;
+    if (!g_tracing && !cache && !async && !pumpFilter && !shadowReuse
+        && !marker)
+        return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
     if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
@@ -2831,14 +2917,17 @@ bool install(HMODULE engine) {
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
-    if (wants(kGroupShadow)) installShadow(engine);
+    const bool traceShadow = wants(kGroupShadow);
+    if (traceShadow || shadowReuse) installShadow(engine, traceShadow);
     if (async) installAsyncLoad(engine);
 
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
-                 " pump timer floor %u ms, hooks=%u, main thread id at %p\r\n",
+                 " pump timer floor %u ms, shadow transition reuse %s,"
+                 " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
-                 g_pumpTimerMinMs, g_installedHooks,
+                 g_pumpTimerMinMs, shadowReuse ? "requested" : "off",
+                 g_installedHooks,
                  (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
     InterlockedExchange(&g_installed, 0);
@@ -2865,6 +2954,12 @@ void shutdown() {
     tq::detour::restoreCall(g_shadowDirectionalPatch);
     g_renderDirectional = nullptr;
     g_lastShadowRegion = nullptr;
+    g_cachedShadowSurface = nullptr;
+    memset(g_cachedShadowMatrix, 0, sizeof(g_cachedShadowMatrix));
+    g_cachedShadowResult = 0;
+    g_cachedShadowValid = false;
+    g_reusedLastShadow = false;
+    g_shadowTracing = false;
     InterlockedExchange(&g_insideDirectional, 0);
     tq::detour::restoreCall(g_enginesleepPatch);
     g_engineSleep = nullptr;
@@ -2954,6 +3049,17 @@ void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
 }
 void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
 bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
+bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
+void primeShadowReuseForTest(void* region, void* surface, const void* matrix) {
+    g_lastShadowRegion = region;
+    rememberShadow(surface, matrix, 1);
+}
+bool reuseShadowForTest(void* region, void* surface, void* matrix) {
+    const bool changed =
+        region && g_lastShadowRegion && region != g_lastShadowRegion;
+    if (region) g_lastShadowRegion = region;
+    return reusePreviousShadow(changed, surface, matrix);
+}
 void slowLoadResetForTest(const void* base) {
     g_engineBase = (const BYTE*)base;
     memset(&g_loadLevelCallers, 0, sizeof(g_loadLevelCallers));

@@ -402,6 +402,23 @@ def check_directional_shadow(engine):
     ok(engine.exports().get(name) == target_rva,
        "Engine!%s" % name[:58])
 
+    argument = table("kShadowOutputArgumentBytes")
+    copy = table("kShadowOutputCopyBytes")
+    dwords = const("kShadowMatrixDwords")
+    ok(argument[7:10] == [0x8b, 0x45, 0x1c]
+       and argument[17:21] == [0x89, 0x44, 0x24, 0x7c],
+       "RenderDirectional saves its seventh Mat4& argument at stack+0x7c")
+    ok(copy[0:7] == [0x8b, 0xbc, 0x24, 0x80, 0x00, 0x00, 0x00]
+       and copy[7:9] == [0x8b, 0xf0]
+       and copy[9] == 0xb9
+       and struct.unpack_from("<I", bytes(copy), 10)[0] == dwords
+       and copy[14:16] == [0xf3, 0xa5],
+       "matrix output copies %d dwords (%d bytes) with rep movsd"
+       % (dwords, dwords * 4))
+    ok(argument[20] + 4 == copy[3],
+       "the saved output pointer moves from stack+%#x to +%#x after one push"
+       % (argument[20], copy[3]))
+
 
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
@@ -437,6 +454,8 @@ def main():
             ("kShadowCallWindowBytes", "kShadowCallWindowRva", None),
             ("kShadowRegionConstructorBytes", "kShadowRegionConstructorRva",
              None),
+            ("kShadowOutputArgumentBytes", "kShadowOutputArgumentRva", None),
+            ("kShadowOutputCopyBytes", "kShadowOutputCopyRva", None),
             ("kGuaranteedGetLevelBytes", "kGuaranteedGetLevelRva", None),
             ("kBackgroundEntryBytes", "kBackgroundLoadLevelRva", None),
             ("kBackgroundFlagsBytes", "kBackgroundFlagsRva", None),

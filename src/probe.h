@@ -228,6 +228,7 @@ enum Counter {
     CounterEngineShadowRender,
     CounterEngineShadowRenderUs,
     CounterEngineShadowRegionChange,
+    CounterEngineShadowReuse,
     CounterEngineShadowResLoad,
     CounterEngineShadowResLoadUs,
     CounterEngineRegionUnload,

@@ -77,6 +77,7 @@ archive_cache_mb=0
 async_level_load=0
 timer_period_ms=0
 pump_timer_min_ms=0
+shadow_transition_reuse=0
 
 [debug]
 frame_overlay=0
@@ -189,6 +190,19 @@ the two renderer sites and `engine_portal_async_load` /
 `engine_portal_async_sync` the portal one, kept apart because the deferral
 counts are expected to stay at zero and the fall-through counts are the
 evidence that the sites were reached at all.
+
+`shadow_transition_reuse=1` targets the outdoor-transition shadow/loading
+burst without changing shadow distance. When the directional-shadow context's
+verified region pointer changes, it retains the previous global depth map and
+copies back that map's matching 64-byte receiver matrix for one frame, then
+renders normally on the following frame. It defaults to `0` and installs
+nothing at `0`; at `1` it works with the performance probe off and brings no
+trace group with it. With tracing enabled, `engine_shadow_reuse` confirms the
+one skipped build. This is deliberately separate from `shadow_split`, which
+remains the necessary shadow-distance feature. Run 47 rejected this experiment:
+the stale map visibly flickers and the complete build is merely paid on the
+following frame. Leave it at `0`; the switch remains only to preserve the exact
+measured experiment.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
