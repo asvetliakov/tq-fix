@@ -10,11 +10,11 @@ work on branch `stutter-mitigation`.
 1. `docs/plans/game-stutter-mitigation.md` — the plan, and its Status section,
    which corrects two of its five headline findings and records what Stage 3
    measured away.
-2. `research/streaming/findings.md` §4–§7 — the probe's blindness, why the
-   uploader must not take ownership, the archive `File` class, and the eight
-   verified patch sites.
+2. `research/streaming/findings.md` — §4–§7 for the probe's blindness, the
+   archive `File` class and the verified patch sites; **§8–§17 for everything
+   Stage 3 measured**, which is where the current picture lives.
 3. `research/streaming/arc-format.md` — the container format and what was
-   checked across all 135 archives.
+   checked across all 135 archives. R1 there is what Stage 4.1 is built on.
 
 ## The install this is built for
 
@@ -42,8 +42,18 @@ if it objects, recreate `Settings/` containing just those.
 | `ff2b1bd` | `Engine::Update` and `Engine::Render` bracketed; `GameEngine::Update` in `Game.dll`. |
 | `3d52496` | `detour::patchImport`; TQ.exe's main loop measured through its import table, patching no code. |
 | `7af497d`, `2c10504`, `b7352d7` | The rest of the loop, and the message pump split. Eleven imports of TQ.exe and two of `Engine.dll`. |
+| `53773b3`, `60950cf`, `e49d274` | Greece; the message histogram; the timer experiment and its `[performance] timer_period_ms` switch. |
+| `96527e6` | The pump closed: the timer is not the game's, and the re-arm path is refused. |
 
 Verification is `npm run doctor && npm run build && npm run selftest`.
+
+**And `research/streaming/tools/verify-sites.py`**, which reads every byte
+table out of `src/engine_probe.cpp` and compares it to the installed binaries,
+resolving relocated dwords the way `detour::matches` does at runtime. Run it
+after touching a table and after any game update. It caught two real bugs the
+first time it ran: a relocation offset one byte short, which would have
+silently skipped all three region-lock hooks, and a `moduleText` check that
+failed for every hook after the first.
 
 ## What the runs measured
 
@@ -97,9 +107,9 @@ the count with a byte budget.
 
 ## Stage 3 is finished, and the frame is fully accounted for
 
-Seven instrumented runs (10-16), each one costing nothing measurable: p50, p99
-and the mod's share never moved. `research/streaming/findings.md` §8-§14 has
-the detail. Where the frame goes:
+Eleven instrumented runs (10–20). None of them cost anything measurable: p50,
+p99 and the mod's share never moved, across a detour on a function entered
+12 million times a session. `findings.md` §8–§17 has the detail.
 
 | | session | frames over 50 ms |
 | --- | ---: | ---: |
@@ -109,36 +119,21 @@ the detail. Where the frame goes:
 | **`PeekMessageA`** | **8.2%** | **20.3%** |
 | unexplained | 2.3% | 12.2% |
 
-**The two classes of hitch both have names now.**
+**Both classes of hitch have names.**
 
 *The big one* is the game's own loading, inside `Engine::Render`: the worst
 frame is 1,453.8 ms of which 1,448.6 is render, with a forced main-thread
 `Region::LoadLevel` of 505.7 ms and 264 ms of archive inflate under it.
 
-*The second one* — unnamed since run 8, on frames that draw normally with the
-mod idle — is **`PeekMessageA` on an empty queue**, 730 µs on average and up
-to 212 ms, against 0.67 dispatched messages a frame. Under CrossOver that is a
-wineserver round trip. It is not the game's and **not reachable from this
-mod**; the lever is CrossOver's own synchronisation settings.
-
-**Closed by measurement, not deferred**: the region lock is never contended
-(0 hits), the seven sweeps cost 11.2 ms a session, the loader-fence wait 1.6
-ms, `WaitForLoadingToFinish` is never called, `GameEngine::Update` is 0.3%,
-the online platform poll 44 ms, sound 2 ms, address space never below 3,445
-MiB. Stage 6.1, 6.2 and 6.3 can be deleted.
-
-## The pump is closed, with no lever in it
-
-Runs 13-20 chased the second class of hitch to the bottom. It is
-`PeekMessageA` — 7.8-8.5% of wall clock, 12-20% of the hitch time, a single
-call of 126-212 ms on the worst frames. Greece reproduces it at the same
-share on entirely different content, so it is not route or asset dependent.
+*The second one* — unnamed until run 15 — is **`PeekMessageA`**. 7.8–8.5% of
+wall clock, 12–20% of the hitch time, a single call of 126–212 ms on the worst
+frames. Greece reproduces it at the same share on entirely different content.
 The messages most likely to be slow are the ones that cannot be answered
 without asking the host, and the `WM_TIMER` behind most of them has no window,
 an id of `0x7fff`, an `lParam` that is not a callback, and no `SetTimer` call
 anywhere in a session — so it is not the game's to change, and `SetTimer`
-could not re-periodise it by id even if it were. That path is refused in code
-rather than left loaded.
+could not re-periodise a thread timer by id even if it were. That path is
+refused in code rather than left loaded.
 
 **The mod owns the import slot, can measure it exactly, and has nothing to put
 in its place, because the work is the round trip.** What remains is a host
@@ -146,7 +141,36 @@ question — CrossOver's synchronisation settings — and a Windows comparison,
 where the same build should report `pump_peek_us` near zero.
 `[performance] timer_period_ms` stays in the tree at its default of 0, inert.
 
-## Next: Stage 4.1, the last item with both a number and a fix
+**Closed by measurement, not deferred.** The region lock is never contended (0
+hits in a session across three sites), the seven `UnloadUnreferencedResources`
+sweeps cost 11.2 ms, the loader-fence wait 1.6 ms over 7,349 waits,
+`WaitForLoadingToFinish` is never called, `GameEngine::Update` is 0.3% of the
+session, the online platform poll 44 ms, `SoundManager::Update` 2 ms, and free
+address space never falls below 3,445 MiB. **Stage 6 is deleted, not
+postponed.**
+
+## The runs on disk
+
+`cache/` is gitignored but present. Each run has `cache/runN-*.csv`, its log,
+and the ini it was booted with in `cache/runs/`. The ini headers carry the
+reasoning; they are worth reading before re-running anything.
+
+| run | what it settled |
+| --- | --- |
+| 8, 9 | pack on / pack off. The texture pack is not the cause. |
+| 10 | Stage 3's first boot. Region lock 0, sweeps 11 ms, fence 1.6 ms, `WaitForLoadingToFinish` 0. |
+| 11 | `Engine::Update` / `Engine::Render` bracketed. 38% of hitch time outside `Engine.dll`. |
+| 12 | `GameEngine::Update` is 0.3%. Present is called outside `Engine::Render`. |
+| 13 | TQ.exe's `Sleep` (1 call), `GetMessageA` (0), `WaitForSingleObject` (0), address space fine. |
+| 14 | `Engine::PresentSurface` is 24% of the session but 4.6% of hitch time. |
+| 15 | **`EWindow::ProcessMessages` is 20.3% of hitch time.** Platform poll 44 ms. |
+| 16 | `PeekMessageA` is 98.8% of the pump. |
+| 17 | **Greece.** Reproduces at the same share; archive amplification 2.3x there. |
+| 18 | The message histogram: `WM_TIMER` is 76% of slow retrievals. |
+| 19 | `SetTimer` is never called while installed. |
+| 20 | The timer has no window — the re-arm experiment cannot work. |
+
+## Next: Stage 4.1 — the only thing left with both a number and a fix
 
 The archive block cache, and it is now the only thing left worth building.
 Measured in two acts:
@@ -160,9 +184,23 @@ It attacks `Engine::Render`, which is the half that is ours, and the base game
 wastes proportionally more than the expansion — which is what a one-entry
 cache in front of a 2 GB file does when the reads are smaller.
 
+The design is §4.1 of the plan and R1 of `arc-format.md`: an inline detour on
+the block routine `FUN_1011d0e0` — already hooked and verified for
+`engine_arc_blocks` / `engine_arc_inflate_us`, so the site needs no new
+reverse engineering — keyed on `{archive, file handle, block offset,
+compressed size, uncompressed size}`, a fixed slab in 256 KiB slots with a
+clock victim, and a lock held only across lookup and insert, never across the
+`ReadFile` or the inflate.
+
+Two things the plan asks for that should not be dropped: `archive_cache_mb`
+defaults to `0`, which allocates nothing and is byte-identical to today; and
+`8verify` inflates anyway and `memcmp`s for one measurement boot, so the first
+run *proves* the cache never returns a wrong block rather than asserting it.
+
 Stage 5 stays parked: its premise is confirmed — `Region::LoadLevel` is 100%
-main-thread — but exactly **one frame in 7,347** has a load costing over a
-millisecond, so it fixes the worst frame of a session and nothing else.
+main-thread and cost 505.7 ms in the worst frame — but exactly **one frame in
+7,347** has a load costing over a millisecond, so it fixes the worst frame of
+a session and nothing else. Stage 4.2 and 4.3 stay gated on what 4.1 leaves.
 
 ## Conventions
 
@@ -176,3 +214,19 @@ millisecond, so it fixes the worst frame of a session and nothing else.
 - Every game-behaviour change gets its own `tqflicker.ini` switch, defaulting
   off. `loose_texture_max` is the one exception the reporter runs on
   deliberately, at `4096`.
+- Re-verify bytes against the pinned binaries before writing them, even when
+  a document already records them. `55 8b ec 83 e4 f8` is shared by four of
+  the targets, so a six-byte prologue match proves nothing: verify 16–24
+  bytes, steal 6–7.
+- Engine duration columns end in `_us`, never `_ms`, or `tools/frames.py`
+  charges the game's time to the mod.
+- Prefer `detour::patchImport` to patching code. Twelve of the fourteen
+  instruments added after `b161e08` are import-table entries: scoped to one
+  module, four bytes, exactly restorable, and they cannot be wrong about an
+  instruction boundary.
+- **The game exits without unloading.** `fix.cpp` takes the `reserved` branch
+  at `DLL_PROCESS_DETACH` and calls only `probe::flushOnExit()`, so
+  `visual::shutdown()` and `engineprobe::shutdown()` never run in practice.
+  Anything that must be reported has to be written during the session — the
+  message histogram writes from the `Engine::Render` bracket every 1,800
+  frames for exactly this reason.
