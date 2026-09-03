@@ -1226,6 +1226,68 @@ queue is otherwise empty, so every gap is inflated by coalescing and only the
 minimum approaches the period actually asked for.  Run 18's 14.2 arrivals a
 second is a lower bound on the timer's rate, not a measurement of it.
 
+## 17. Run 20: the timer is not the game's, and the pump has no lever
+
+```
+Engine trace: game timer hwnd=00000000 id=32767 proc=FFFF0016
+              shortest gap 2927 us over 1461 samples
+```
+
+Three things in one line, and together they end this.
+
+**`hwnd = NULL` makes it a thread timer, not a window timer.**  That matters
+mechanically rather than as a detail: `SetTimer` only re-periodises an
+existing timer when it is given a *window* and a matching id.  For a thread
+timer the id argument is ignored and a **new** timer is always created.  So
+the re-arm designed in §16 would not have changed this timer's period at all;
+it would have added a second timer beside it, and handed it the observed
+`lParam` -- `0xFFFF0016`, which is not a code address in a 32-bit user
+process -- as a `TIMERPROC` to call.  That is not an experiment, it is a
+crash.  The path is now refused, and logs why, rather than being left as a
+loaded footgun in the tree.
+
+**And it is very unlikely to be the game's timer.**  `TQ.exe` imports
+`SetTimer` and never calls it in a session -- run 19 hooked it and logged
+nothing across a full route.  A timer with no window, an id of `0x7fff`, and
+an `lParam` that is not a callback is not the shape of something a game
+arms for itself.  It looks like something the host synthesizes, which if true
+is the third independent line of evidence pointing at the same conclusion.
+
+**The period is not what the arrival rate suggested, and neither number
+supports the causal reading.**  The shortest gap between arrivals is 2.93 ms
+and the mean is 70 ms.  If the timer really ran at ~3 ms it would be pending
+at almost every pump call -- frames are 13 ms -- and `WM_TIMER` would arrive
+about once a frame.  It arrives 0.19 times a frame.  So the 2.93 ms minimum is
+an outlier, most likely two fires landing either side of a stall, and the
+timer is not running fast enough for its rate to be the thing driving 8% of
+wall clock.
+
+### So the pump is closed
+
+Four runs, four independent roads, one answer:
+
+- §14: the cost is in `PeekMessageA`, 98.8% of the pump, one call per stall.
+- §15: Greece reproduces it at the same share of hitch time on entirely
+  different content, and a *single* retrieval of a *single* message takes
+  126-165 ms.
+- §16: the messages most likely to be slow are exactly the ones that cannot be
+  answered without asking the host.
+- §17: the timer behind those is not the game's to change, and could not be
+  changed by id even if it were.
+
+`PeekMessageA` costs 7.8-8.5% of wall clock and 12-20% of the hitch time on
+this install, and **there is no lever in it from inside the process**.  The
+mod owns the import slot, can measure it exactly, and has nothing useful to
+put in its place, because the work is the round trip itself.  What remains is
+a host question -- how CrossOver is configured to synchronise -- and a
+comparison against a Windows machine, where the same build should report
+`pump_peek_us` near zero.
+
+That is the honest end of this line, and it is worth having reached rather
+than assumed: three of the five stages this plan opened with were aimed at
+mechanisms that turned out to cost single-digit milliseconds a session, and
+this one was aimed at a mechanism that is real, large, and not ours.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

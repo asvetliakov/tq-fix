@@ -649,7 +649,18 @@ void reportMessages() {
     // timer into a posted one and change what the game does, not just when.
     // It has to run on the thread that owns the window, and this does: the
     // pump is the main thread.
-    if (g_timerPeriodMs && g_timerKnown && g_setTimer
+    // ...but only for a WINDOW timer. Run 20 found this one has hwnd = NULL,
+    // which makes it a *thread* timer, and SetTimer ignores the id for those:
+    // it would create a second timer rather than re-periodise this one, and
+    // hand it the lParam we observed (0xFFFF0016) as a TIMERPROC to call.
+    // That is not an experiment, it is a crash. Refuse rather than run it.
+    if (g_timerPeriodMs && g_timerKnown && !g_timerWindow
+        && InterlockedCompareExchange(&g_timerRearmed, 1, 0) == 0) {
+        tq::hdr::log("Engine trace: timer_period_ms=%u ignored -- the game's"
+                     " timer has no window, so SetTimer would create a second"
+                     " one rather than change this one\r\n", g_timerPeriodMs);
+    }
+    if (g_timerPeriodMs && g_timerKnown && g_timerWindow && g_setTimer
         && InterlockedCompareExchange(&g_timerRearmed, 1, 0) == 0) {
         const UINT_PTR again = g_setTimer(g_timerWindow, g_timerId,
                                           g_timerPeriodMs,

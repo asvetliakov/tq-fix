@@ -127,12 +127,38 @@ ms, `WaitForLoadingToFinish` is never called, `GameEngine::Update` is 0.3%,
 the online platform poll 44 ms, sound 2 ms, address space never below 3,445
 MiB. Stage 6.1, 6.2 and 6.3 can be deleted.
 
+## The pump is closed, with no lever in it
+
+Runs 13-20 chased the second class of hitch to the bottom. It is
+`PeekMessageA` — 7.8-8.5% of wall clock, 12-20% of the hitch time, a single
+call of 126-212 ms on the worst frames. Greece reproduces it at the same
+share on entirely different content, so it is not route or asset dependent.
+The messages most likely to be slow are the ones that cannot be answered
+without asking the host, and the `WM_TIMER` behind most of them has no window,
+an id of `0x7fff`, an `lParam` that is not a callback, and no `SetTimer` call
+anywhere in a session — so it is not the game's to change, and `SetTimer`
+could not re-periodise it by id even if it were. That path is refused in code
+rather than left loaded.
+
+**The mod owns the import slot, can measure it exactly, and has nothing to put
+in its place, because the work is the round trip.** What remains is a host
+question — CrossOver's synchronisation settings — and a Windows comparison,
+where the same build should report `pump_peek_us` near zero.
+`[performance] timer_period_ms` stays in the tree at its default of 0, inert.
+
 ## Next: Stage 4.1, the last item with both a number and a fix
 
-The archive block cache. 4.38 s a session across 7,527 inflates at 582 µs
-each, inflating 1.88 GiB to serve 1.03 GiB — a 1.8x amplification that is the
-single-slot block cache of R1 re-inflating what it already has. It attacks
-`Engine::Render`, which is the half that is ours.
+The archive block cache, and it is now the only thing left worth building.
+Measured in two acts:
+
+| | blocks | inflated | requested | amplification | inflate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Eternal Embers | 7,491 | 1,917,696 KiB | 1,070,055 KiB | 1.8x | 4,418 ms |
+| Greece | 4,560 | 1,167,360 KiB | 505,729 KiB | **2.3x** | 2,131 ms |
+
+It attacks `Engine::Render`, which is the half that is ours, and the base game
+wastes proportionally more than the expansion — which is what a one-entry
+cache in front of a 2 GB file does when the reads are smaller.
 
 Stage 5 stays parked: its premise is confirmed — `Region::LoadLevel` is 100%
 main-thread — but exactly **one frame in 7,347** has a load costing over a
