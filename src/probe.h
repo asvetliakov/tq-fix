@@ -219,6 +219,17 @@ enum Counter {
     CounterEngineResLoadUs,
     CounterEngineResLoadMain,
     CounterEngineResLoadMainUs,
+    // The one global directional-shadow build, timed at its direct call site.
+    // The resource pair is the main-thread ResourceLoader work nested inside
+    // that call, not a second population to add to engine_res_load_main_us.
+    // A region change compares GraphicsShadowMapDx11+0x6c between successive
+    // calls and gives a prospective scheduler a trigger rather than asking it
+    // to infer one from an already-slow frame.
+    CounterEngineShadowRender,
+    CounterEngineShadowRenderUs,
+    CounterEngineShadowRegionChange,
+    CounterEngineShadowResLoad,
+    CounterEngineShadowResLoadUs,
     CounterEngineRegionUnload,
     CounterEngineRegionUnloadUs,
     // Archive::ReadFromFile calls and the bytes they asked for. Counted, not

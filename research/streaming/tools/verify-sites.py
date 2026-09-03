@@ -23,7 +23,8 @@ from pe import PE
 GAME = os.environ.get("TQ_GAME_DIR") or os.path.expanduser(
     "~/Library/Application Support/CrossOver/Bottles/Titan Quest/drive_c/"
     "GOG Games/Titan Quest - Anniversary Edition")
-SRC = os.path.join(HERE, "..", "..", "..", "src", "engine_probe.cpp")
+SRC = os.environ.get("TQ_VERIFY_SRC") or os.path.join(
+    HERE, "..", "..", "..", "src", "engine_probe.cpp")
 CACHE_H = os.path.join(HERE, "..", "..", "..", "src", "arc_cache.h")
 
 src = open(SRC).read()
@@ -368,6 +369,40 @@ def check_async_level_load(engine, lock_sites):
        "and Region::GetPortal's result is null-checked at 0x10117acd")
 
 
+def check_directional_shadow(engine):
+    """Re-derive the call target and the object field the wrapper reads."""
+    print("\nDirectional-shadow attribution")
+    call = table("kShadowCallWindowBytes")
+    call_rva = const("kShadowCallWindowRva")
+    call_off = const("kShadowCallOffset")
+    target_rva = const("kRenderDirectionalRva")
+
+    ok(16 <= len(call) <= 24,
+       "directional call verifies %d bytes (required 16-24)" % len(call))
+    ok(call_off + 5 <= len(call) and call[call_off] == 0xe8,
+       "directional call offset %d lands on E8" % call_off)
+    dest = call_rva + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    ok(dest == target_rva,
+       "directional call resolves to GraphicsShadowMapDx11::RenderDirectional"
+       " (%#x)" % dest)
+    ok(call[0:5] == [0x50, 0x8d, 0x43, 0x28, 0x50]
+       and call[5:9] == [0xff, 0x74, 0x24, 0x3c]
+       and call[9:16] == [0x8d, 0x8c, 0x24, 0xbc, 0x00, 0x00, 0x00],
+       "call window carries frustum, camera, canvas and shadow-map self setup")
+
+    field = table("kShadowRegionConstructorBytes")
+    field_off = const("kShadowRegionOffset")
+    ok(16 <= len(field) <= 24,
+       "shadow region field verifies %d bytes (required 16-24)" % len(field))
+    ok(field[11:13] == [0x89, 0x4e] and field[13] == field_off,
+       "constructor writes its region argument to shadow map+%#x" % field_off)
+
+    name = cstr("kRenderDirectionalName")
+    ok(engine.exports().get(name) == target_rva,
+       "Engine!%s" % name[:58])
+
+
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
     game = PE(os.path.join(GAME, "Game.dll"))
@@ -399,6 +434,9 @@ def main():
             ("kSweepWindowBBytes", "kSweepWindowBRva", None),
             ("kEngineUpdateBytes", "kEngineUpdateRva", "kEngineUpdateRelocs"),
             ("kEngineRenderBytes", "kEngineRenderRva", "kEngineRenderRelocs"),
+            ("kShadowCallWindowBytes", "kShadowCallWindowRva", None),
+            ("kShadowRegionConstructorBytes", "kShadowRegionConstructorRva",
+             None),
             ("kGuaranteedGetLevelBytes", "kGuaranteedGetLevelRva", None),
             ("kBackgroundEntryBytes", "kBackgroundLoadLevelRva", None),
             ("kBackgroundFlagsBytes", "kBackgroundFlagsRva", None),
@@ -434,6 +472,8 @@ def main():
             (engine, "Engine", "kEngineUpdateName", "kEngineUpdateRva"),
             (engine, "Engine", "kEngineRenderName", "kEngineRenderRva"),
             (engine, "Engine", "kSweepTargetName", "kSweepTargetRva"),
+            (engine, "Engine", "kRenderDirectionalName",
+             "kRenderDirectionalRva"),
             (game, "Game", "kGameUpdateName", "kGameUpdateRva")]:
         name = cstr(name_const)
         ok(pe.exports().get(name) == const(rva_const),
@@ -460,6 +500,7 @@ def main():
 
     check_archive_cache(engine)
     check_async_level_load(engine, sites)
+    check_directional_shadow(engine)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}

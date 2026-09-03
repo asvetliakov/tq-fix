@@ -4303,6 +4303,120 @@ class: synchronous game resource work plus a simultaneous enhanced-shadow GPU
 burst. Do not run another message-pump A/B unless that class reappears with the
 corrected writer.
 
+## 47. Run 46 design: measure the transition shadow call before scheduling it
+
+The remaining felt class after run 45 is the **play outdoor-transition
+burst**, not the menu, load-game frame, loading screen, first world frame, or
+the removed observer-induced pump population. Its two F12 reactions follow
+frames that contain both 71.7-164.4 ms of main-thread resource loading and
+125.4-237.0 ms of directional-shadow GPU time. Those intervals overlap; the
+existing columns do not establish that one causes the other or even that the
+resource calls occur inside the shadow build.
+
+A fresh read of the pinned Engine.dll rules out a naive cascade scheduler.
+Titan Quest DX11 builds **one global directional shadow map**, fitting one
+projection and rendering its caster scene every frame. There are no cascades
+to rotate. Skipping only the inner draw would update the receiver matrix while
+leaving the previous map behind, which is an invalid map/matrix pair. Skipping
+the whole build could preserve the pair, but doing that on an inferred slow
+frame would repeat the project's pattern of implementing an unpriced
+mechanism.
+
+Run 46 therefore adds attribution only. At RVA `0x1644bc`, the deferred
+renderer directly calls the exported
+`GraphicsShadowMapDx11::RenderDirectional` at RVA `0x18db80`. A
+`detour::patchCall` wrapper changes only that E8's four-byte displacement after
+verifying a 23-byte argument/call window. A separate 24-byte constructor
+window at RVA `0x18d427` proves that the call object's region argument is
+stored at `this+0x6c` before the wrapper reads it.
+
+Five game-time columns are added:
+
+- `engine_shadow_render` / `_us`: the whole directional build at this call;
+- `engine_shadow_region_change`: a non-null region pointer differing from the
+  previous call;
+- `engine_shadow_res_load` / `_us`: main-thread `ResourceLoader::LoadResource`
+  calls nested inside that directional build. This pair is a subset of
+  `engine_res_load_main` / `_us`, not an amount to add to it.
+
+The new engine group is `16384`; the default `engine_trace=1` selects it along
+with the existing resource-load hook needed for the nested pair. It installs
+only while the performance probe is active and changes no game behaviour.
+`shadow_split`, the map size, the projection, and the render cadence are all
+untouched. `verify-sites.py` now performs 149 checks, including re-deriving
+the call destination, export identity, call offset, verification lengths, and
+constructor field operand. Perturbing each new RVA, offset, byte table, or
+export name makes the verifier fail.
+
+The run is intentionally not an A/B. If the play transition's synchronous
+resource time is nested in this shadow call and a region change precedes it,
+that change is a grounded candidate for a one-frame whole-map reuse test. If
+either condition is false, this route does not justify a shadow scheduler.
+
+## 48. Run 46: the felt play burst loads resources inside the shadow build
+
+Run 46 is archived as `tqflicker-frames.run46.csv`, SHA-256
+`bf1c5aff030bc11e2ac0a7f3055c138bccef378f021bdcb7b3ae71faa272641b`, with
+all 7,662 frames present. The five parts are menu frames 0-2169 (19.770 s),
+load-game frame 2170 (1.410 s), loading screen frames 2171-3265 (9.508 s),
+first world frame 3266 (0.843 s), and play frames 3267-7661 (66.866 s).
+
+The one F12 press is in **play**, at frame 6970. Its reaction window contains
+the same outdoor-transition sequence as run 45: frames 6939 (458.033 ms),
+6940 (150.554 ms), and 6942 (40.190 ms). Frame 6939 is collision-active and
+full-scene (`draw_indexed=1559`), so this is not the later exit transition.
+
+The new bracket answers the question directly:
+
+| frame 6939, play outdoor transition | time |
+| --- | ---: |
+| whole frame | 458.033 ms |
+| `Engine::Render` | 441.658 ms |
+| `GraphicsShadowMapDx11::RenderDirectional` CPU | **170.532 ms** |
+| main-thread resource loads nested inside it | **167.799 ms** |
+| all main-thread resource loads | 209.717 ms |
+| directional-shadow GPU interval | **273.815 ms** |
+| whole GPU interval | 564.960 ms |
+
+Thus 98.4% of the shadow call's CPU duration is its 57 synchronous
+`ResourceLoader::LoadResource` calls, and they are 80.0% of all main-thread
+resource-load time on the frame. The CPU and GPU intervals overlap and must
+not be added. This is nevertheless a causal localization: the game is loading
+resources *inside the directional-shadow build* while that same build submits
+the large caster pass. It is not a message-pump stall and not an unexplained
+host pause.
+
+The region pointer changes on frame 6939, before the wrapper invokes
+`RenderDirectional`. That is early enough to choose reuse before the 167.8 ms
+of loading or the 273.8 ms GPU pass begins. The trigger is not merely another
+name for a slow frame: five other region changes in play cost 10.5-33.4 ms.
+It identifies a transition, not its magnitude.
+
+The burst is wider than one frame. Frame 6940 spends 121.473 ms in
+`Engine::Render` but only 2.834 ms in the shadow call and no main-thread
+resource load; this is compatible with the prior frame's GPU backlog, although
+run 46 had draw timing disabled and does not re-prove that attribution.
+Frame 6981, after the F12 press, is another 86.185 ms full-scene play frame:
+66.990 of its 68.524 shadow CPU milliseconds are nested loads and its
+directional GPU interval is 92.827 ms, but there is no region change. A
+one-frame transition reuse can target the marked onset; it cannot be claimed
+in advance to eliminate every later shadow-resource burst.
+
+Across all play, 479.340 of 653.361 ms of main-thread resource loading occurs
+inside the directional build. No play frame reaches 50 ms in the pump; its
+maximum is 3.059 ms (Peek maximum 3.025 ms). The only 50 ms pump event is at
+frame 0 in the **menu**, not in the felt play class. This is a second clean run
+after the writer fix and another reason not to reopen the pump route.
+
+The next A/B may now be specific: on a non-null region change with a valid
+previous directional result, reuse the previous **whole depth map and its
+matching 4x4 matrix for one frame**, then render normally. Do not skip only the
+draw, do not alter `shadow_split`, and do not promise more than moving the
+marked transition onset. The caller stores the output matrix in the same
+directional light record whose `+0x14` target is the one global map; the fix
+must explicitly cache and restore all 64 matrix bytes rather than assume that
+record survived a frame.
+
 
 ## Cross-references worth acting on
 

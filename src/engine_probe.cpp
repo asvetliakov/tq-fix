@@ -129,6 +129,45 @@ const BYTE kLoadResourceBytes[] = {
 };
 const Relocation kLoadResourceRelocs[] = {{3, 0x2a2db8}};
 
+// --- The deferred renderer's one call to the DX11 directional-shadow build.
+// This is a call-site patch, not another entry detour: only this orchestration
+// path is timed, and the four-byte E8 displacement is the only code changed.
+// The 23-byte window includes the final three arguments, the local shadow-map
+// object's address, the call and its branch-around-success continuation.
+const DWORD kShadowCallWindowRva = 0x1644ac;
+const unsigned kShadowCallOffset = 16;
+const DWORD kRenderDirectionalRva = 0x18db80;
+const char kRenderDirectionalName[] =
+    "?RenderDirectional@GraphicsShadowMapDx11@GAME@@QAE_N"
+    "AAVGraphicsCanvas@2@ABVCamera@2@ABVFrustum@2@W4Algorithm@12@"
+    "PAVRenderSurface@2@AAVMat4@2@@Z";
+const BYTE kShadowCallWindowBytes[] = {
+    0x50,                                      // push frustum
+    0x8d, 0x43, 0x28,                          // lea eax,[ebx+0x28] camera
+    0x50,                                      // push eax
+    0xff, 0x74, 0x24, 0x3c,                    // push canvas
+    0x8d, 0x8c, 0x24, 0xbc, 0x00, 0x00, 0x00,  // lea ecx,[esp+0xbc] shadow map
+    0xe8, 0xbf, 0x96, 0x02, 0x00,              // call RenderDirectional
+    0xeb, 0x3d                                 // skip the other algorithm
+};
+
+// The shadow-map constructor copies its region argument to self+0x6c. This
+// separate 24-byte window makes the field an instruction-derived fact before
+// the hook reads it; no object-layout document is trusted at runtime.
+const DWORD kShadowRegionConstructorRva = 0x18d427;
+const unsigned kShadowRegionOffset = 0x6c;
+const BYTE kShadowRegionConstructorBytes[] = {
+    0x8b, 0x74, 0x24, 0x0c,
+    0x8b, 0x4d, 0x0c,
+    0x83, 0x7e, 0x0c, 0x00,
+    0x89, 0x4e, 0x6c,                          // mov [esi+0x6c],ecx
+    0x74, 0x6c,
+    0x85, 0xc9,
+    0x74, 0x68,
+    0x8d, 0x46, 0x10,
+    0x50
+};
+
 // --- Region::UnloadLevel.
 const DWORD kUnloadLevelRva = 0x20e040;
 const char kUnloadLevelName[] = "?UnloadLevel@Region@GAME@@QAEX_N_N@Z";
@@ -785,6 +824,7 @@ const unsigned kGroupPump = 0x400;
 const unsigned kGroupHeap = 0x800;
 const unsigned kGroupArcIo = 0x1000;
 const unsigned kGroupBlocking = 0x2000;
+const unsigned kGroupShadow = 0x4000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
@@ -846,6 +886,9 @@ typedef void (__fastcall* BackgroundLoadLevelFn)(void* self, void* edx,
 typedef void* (__fastcall* GuaranteedGetLevelFn)(void* self, void* edx,
                                                 int flag);
 typedef void (__fastcall* LoadResourceFn)(void* self, void* edx, void* resource);
+typedef int (__fastcall* RenderDirectionalFn)(
+    void* self, void* edx, void* canvas, const void* camera,
+    const void* frustum, int algorithm, void* surface, void* matrix);
 typedef void (__fastcall* UnloadLevelFn)(void* self, void* edx, int a, int b);
 typedef void (__fastcall* EnqueueFn)(void* self, void* edx, const void* resource,
                                      int priority, int a, int b);
@@ -879,6 +922,7 @@ LoadLevelFn g_regionLoadLevel;
 BackgroundLoadLevelFn g_backgroundLoadLevel;
 GuaranteedGetLevelFn g_guaranteedGetLevel;
 LoadResourceFn g_loadResource;
+RenderDirectionalFn g_renderDirectional;
 UnloadLevelFn g_unloadLevel;
 EnqueueFn g_enqueue;
 ReadFromFileFn g_readFromFile;
@@ -919,6 +963,9 @@ CallPatch g_lockPatches[kLockSiteCount];
 CallPatch g_forceLoadPatches[kForceLoadSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
+CallPatch g_shadowDirectionalPatch;
+LONG g_insideDirectional;
+void* g_lastShadowRegion;
 
 // Which call site the expensive forced loads actually come from -- the one
 // fact runs 27 and 28 left missing, and the reason Stage 5.1 was aimed wrong.
@@ -1284,7 +1331,33 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     if (onMainThread()) {
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMain);
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMainUs, elapsed);
+        if (InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0) {
+            tq::probe::engineCount(tq::probe::CounterEngineShadowResLoad);
+            tq::probe::engineCount(tq::probe::CounterEngineShadowResLoadUs,
+                                   elapsed);
+        }
     }
+}
+
+int __fastcall hookRenderDirectional(
+    void* self, void* edx, void* canvas, const void* camera,
+    const void* frustum, int algorithm, void* surface, void* matrix) {
+    if (!g_renderDirectional) return 0;
+
+    void* const region = *(void**)((BYTE*)self + kShadowRegionOffset);
+    if (region && g_lastShadowRegion && region != g_lastShadowRegion)
+        tq::probe::engineCount(tq::probe::CounterEngineShadowRegionChange);
+    if (region) g_lastShadowRegion = region;
+
+    const int64_t started = tq::probe::now();
+    InterlockedIncrement(&g_insideDirectional);
+    const int result = g_renderDirectional(self, edx, canvas, camera, frustum,
+                                            algorithm, surface, matrix);
+    InterlockedDecrement(&g_insideDirectional);
+    tq::probe::engineCount(tq::probe::CounterEngineShadowRender);
+    tq::probe::engineCount(tq::probe::CounterEngineShadowRenderUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
 }
 
 void __fastcall hookUnloadLevel(void* self, void* edx, int a, int b) {
@@ -2533,6 +2606,36 @@ bool installFrame(HMODULE engine) {
     return true;
 }
 
+// Brackets the renderer's single directional-shadow build and tags resource
+// loads made synchronously inside it. The object field is verified separately
+// because patchCall's window proves the caller and callee, not the layout of
+// the temporary GraphicsShadowMapDx11 object passed in ECX.
+bool installShadow(HMODULE engine) {
+    void* target = resolve(engine, kRenderDirectionalName,
+                           kRenderDirectionalRva);
+    const bool regionVerified = tq::detour::matches(
+        engine, (BYTE*)engine + kShadowRegionConstructorRva,
+        signature(kShadowRegionConstructorBytes,
+                  sizeof(kShadowRegionConstructorBytes)));
+    if (!target || !regionVerified) {
+        if (!regionVerified)
+            tq::hdr::log("Engine trace: GraphicsShadowMapDx11 region field"
+                         " does not match -- leaving the call alone\r\n");
+        note("GraphicsShadowMapDx11::RenderDirectional", false);
+        return false;
+    }
+
+    g_renderDirectional = (RenderDirectionalFn)target;
+    const bool ok = tq::detour::patchCall(
+        g_shadowDirectionalPatch, engine,
+        (BYTE*)engine + kShadowCallWindowRva,
+        signature(kShadowCallWindowBytes, sizeof(kShadowCallWindowBytes)),
+        kShadowCallOffset, target, (const void*)&hookRenderDirectional);
+    if (!ok) g_renderDirectional = nullptr;
+    note("GraphicsShadowMapDx11::RenderDirectional", ok);
+    return ok;
+}
+
 // [performance] async_level_load. The three windows the thunk's correctness
 // rests on, over and above the two call-site windows patchCall checks itself.
 //
@@ -2728,6 +2831,7 @@ bool install(HMODULE engine) {
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
+    if (wants(kGroupShadow)) installShadow(engine);
     if (async) installAsyncLoad(engine);
 
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
@@ -2758,6 +2862,10 @@ void shutdown() {
         tq::detour::restoreCall(g_forceLoadPatches[i]);
     g_backgroundLoadLevel = nullptr;
     g_regionLoadLevel = nullptr;
+    tq::detour::restoreCall(g_shadowDirectionalPatch);
+    g_renderDirectional = nullptr;
+    g_lastShadowRegion = nullptr;
+    InterlockedExchange(&g_insideDirectional, 0);
     tq::detour::restoreCall(g_enginesleepPatch);
     g_engineSleep = nullptr;
     tq::detour::restoreCall(g_objWaitMultiplePatch);

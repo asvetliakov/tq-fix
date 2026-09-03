@@ -370,7 +370,8 @@ While the performance trace is on, the `engine_*` columns report Titan Quest's
 own resource work rather than the mod's: forced level loads and how much of
 their cost landed on the game's main thread, resource loads and the queue
 behind them, region unloads, archive reads, the 256 KiB block inflates under
-them, the loader-fence wait in `Engine::Update`, the seven resource-manager
+them, the directional-shadow build and any main-thread resource loads nested
+inside it, the loader-fence wait in `Engine::Update`, the seven resource-manager
 sweeps beside it, any time the render path blocked on a region lock, and
 `Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
 against the half of the frame they happened in, and `GameEngine::Update` from

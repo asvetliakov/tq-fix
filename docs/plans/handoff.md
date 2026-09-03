@@ -2,13 +2,29 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 45**, with
-the invalid thread-CPU instrument removed and the corrected full-trace writer
-validated by its control run, on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current as of **run 46**, after
+the corrected-writer run 45, on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**Run 46 result -- read findings §48 and §47 first.** The one F12 reaction is
+in **play** and follows the collision-active full-scene outdoor-transition
+burst. On frame 6939, 167.799 of the 170.532 CPU milliseconds inside
+`GraphicsShadowMapDx11::RenderDirectional` are 57 synchronous main-thread
+resource loads; the same call has a 273.815 ms directional GPU interval. Its
+region pointer changes before the call. The remaining felt class is therefore
+localized: the game loads resources inside the directional-shadow build while
+that build submits a large caster pass. No play pump call reaches 50 ms.
+
+The supported next test is one-frame **whole-pair** reuse on that region
+change: retain the prior global depth map and explicitly copy back its matching
+64-byte matrix, then render normally on the following frame. Skipping only the
+draw is invalid, and simply assuming the output light record persisted is also
+invalid. This does not alter `shadow_split`, and it targets only the marked
+play transition onset; frame 6981 proves later shadow-load bursts can occur
+without another region change.
 
 **Run 45 result -- read findings §46 first.** With one retained CSV handle and
 250 ms batches, the old slow-Peek population disappeared: zero frames reached
@@ -116,7 +132,8 @@ between here and it is history and should be read as such.
 
 ## Read these first
 
-1. `research/streaming/findings.md` **§46, §45, §44, §43, §42, §41** (the
+1. `research/streaming/findings.md` **§48, §47, §46, §45, §44, §43, §42,
+   §41** (the transition-shadow result and design,
    corrected-writer control, the full-trace writer defect, the migrating
    CrossOver server-call stall, the rejected sent-message cause, the
    now-contaminated felt-stutter runs, and the withdrawn polling-marker run),
@@ -168,6 +185,7 @@ if it objects, recreate `Settings/` containing just those.
 | `96527e6` | The pump closed: the timer is not the game's, and the re-arm path is refused. |
 | `6d760c2` | `verify-sites.py`, which reads every byte table out of the source and compares it to the installed binaries. |
 | `d6a4e79` | **Stage 4.1** — `src/arc_cache.{h,cpp}`, `[performance] archive_cache_mb`, seven `arc_cache_*` columns, five more verified windows in the block routine. Then six measurement runs (21–26) and four more instrument groups: the array allocator (`2048`), the archive syscalls (`4096`), everything that blocks (`8192`), and the `_main` split on all three. Findings §18–§25. |
+| `a5fd576` | Passive F12 marker corrections, removal of the invalid per-Peek CPU query, sent-message attribution, and the retained-handle/250 ms batched CSV writer that run 45 validated. Findings §41–§46. |
 
 Verification is `npm run doctor && npm run build && npm run selftest`.
 
@@ -592,7 +610,12 @@ every version.** Read the brief at the top before it.
    while their resolved GPU intervals contain 237.0 and 125.4 ms of
    directional shadows. These overlap; do not add them. This is the same
    two-axis class separated in §§37-39, not a pump event.
-7. **The mod's own GPU cost — the one lever this project owns, and it works.**
+7. **Run 46 measures the exact overlap before changing it.** On the marked
+   play transition, 167.799 of 170.532 shadow CPU milliseconds are synchronous
+   resource loads, beside a 273.815 ms directional GPU interval. The region
+   changes before the call. This supports one-frame reuse of the previous
+   whole map/matrix pair as the next A/B, with no change to `shadow_split`.
+8. **The mod's own GPU cost — the one lever this project owns, and it works.**
    Enhanced shadows are 8.09 ms and grass 4.47 ms of a 25.4 ms steady GPU
    frame at 5120x1440, and the outdoor transition is 421 + 182 ms of which the
    directional shadow pass is 351.6 ms. `shadow_map_scale=2` takes the
@@ -600,16 +623,16 @@ every version.** Read the brief at the top before it.
    shadow distance** (§38). `shadow_split=0.325` is worth far more (263 + 86)
    and is **refused**: it exists to fix shadow distance, which is the feature
    (§39, the reporter's call). Grass has never been priced on its own.
-8. **The game's synchronous resource load**, 147-336 ms on the transition
+9. **The game's synchronous resource load**, 147-336 ms on the transition
    frame, inside `Engine::Render` on the main thread. Real, the game's, and
    nothing short of the archive work already measured out touches it.
-9. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
+10. ~~4.3, libdeflate~~ — worth 35-50 ms on a 340 ms frame (§35). The riskiest
    item in the plan for the smallest remaining return. **Struck** unless the
    loading screen becomes the target.
-10. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
+11. ~~`timeBeginPeriod`~~ — **struck**. Main-thread `Sleep` is 0.0 ms on every
    in-play stutter frame in nineteen runs.
-11. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
-12. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
+12. ~~Stage 5 / `async_level_load`~~ — finished and measured out, §33.
+13. ~~4.2 bounded prefetch, buffer pooling, the block cache past 8 MiB~~ —
    struck, runs 22 and 24.
 
 **Switches that are built, verified, inert and worth nothing on this route.**
@@ -661,6 +684,10 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   control. Earlier CSVs are
   missing those columns off the end rather than shifted -- `tools/frames.py`
   and `csv.DictReader` handle it.
+- **Run 46 is archived.** `tqflicker-frames.run46.csv` has SHA-256
+  `bf1c5aff030bc11e2ac0a7f3055c138bccef378f021bdcb7b3ae71faa272641b`.
+  Its INI differed from the normal config only by `performance_trace=full` and
+  the passive F12 marker. See findings §48.
 - **The route is scripted and identical in all twenty-five full runs**: menu,
   load-game, a 9-16 s loading screen, an outdoor stretch, an indoor stretch, an
   outdoor stretch, exit. World entry is the first frame with
@@ -672,11 +699,14 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   appends to nothing.
 - **The pinned `Engine.dll` is SHA-256 `0aedbb18...f694f6`**;
   `research/streaming/tools/verify-sites.py` checks every byte table in
-  `src/engine_probe.cpp` against it and the other two modules. **139 checks**,
+  `src/engine_probe.cpp` against it and the other two modules. **149 checks**,
   and every constant perturbation must fail it.
-- **The installed `winmm.dll` is byte-identical to `build/winmm.dll`** and the
-  live `tqflicker.ini` is the reporter's normal one, so the mod is inert as
-  left.
+- **Run 46 is installed.** The installed `winmm.dll` is byte-identical to
+  `build/winmm.dll`, SHA-256
+  `a577bd7828d17755b84e8f39f07070eecf66ecf97beb1d794a88ef4b3f3d3417`;
+  the installed `tqflicker.ini` is byte-identical to the run 46 file, and the
+  stale live `tqflicker-frames.csv` has been removed. The game has not been
+  launched.
 
 ## Stage 5.1, built and run. The design record, and where it was wrong
 

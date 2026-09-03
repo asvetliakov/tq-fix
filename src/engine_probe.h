@@ -53,9 +53,12 @@ namespace engineprobe {
 //      (contended acquisitions only), both waits, and Sleep. Run 24 killed
 //      the heap candidate and left 996 ms of a 1,534.8 ms frame unnamed; the
 //      main thread waiting on the loader thread has never been measured
-//      outside three lock sites and one fence. Installs last, because the
-//      region-lock and fence groups check these same slots still hold
-//      kernel32's exports.
+//      outside three lock sites and one fence. Installs after those groups,
+//      because they check these same slots still hold kernel32's exports.
+//16384 the deferred renderer's one GraphicsShadowMapDx11::RenderDirectional
+//      call: whole-call CPU time, region changes, and main-thread resource
+//      loads nested inside it. Select group 2 as well when using a mask so
+//      ResourceLoader::LoadResource is present to populate the nested pair.
 void readOptions(const wchar_t* iniPath);
 
 // [performance] timer_period_ms, an experiment rather than a fix.

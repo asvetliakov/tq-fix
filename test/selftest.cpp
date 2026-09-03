@@ -794,7 +794,8 @@ void testEngineProbe() {
     // 1, so every group would say yes if the mask were consulted on its own;
     // what makes them say no is the probe being off.
     check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(4)
-          && !tq::engineprobe::wantsForTest(1024),
+          && !tq::engineprobe::wantsForTest(1024)
+          && !tq::engineprobe::wantsForTest(16384),
           "a cache-only boot installs no trace group, whatever engine_trace says");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -836,7 +837,8 @@ void testEngineProbe() {
     // defaults to 1, so every group would say yes if the mask were consulted
     // on its own; what makes them say no is the probe being off.
     check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(16)
-          && !tq::engineprobe::wantsForTest(8192),
+          && !tq::engineprobe::wantsForTest(8192)
+          && !tq::engineprobe::wantsForTest(16384),
           "an async-only boot installs no trace group either");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -1944,6 +1946,10 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     check(header, "the probe writes its mode and a header naming every column");
     check(csvText && strstr(csvText, "engine_tex_create_off_us") != nullptr,
           "the header carries the engine channel's columns");
+    check(csvText && strstr(csvText, "engine_shadow_render_us") != nullptr
+          && strstr(csvText, "engine_shadow_region_change") != nullptr
+          && strstr(csvText, "engine_shadow_res_load_us") != nullptr,
+          "the header carries the directional-shadow attribution columns");
     // The permanent regression test for the header buffer. snprintf truncation
     // is silent -- `n += snprintf(...)` returns the length it wanted, so an
     // overrun writes a short, unterminated header and nothing reports it. A
