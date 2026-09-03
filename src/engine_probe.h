@@ -33,9 +33,11 @@ namespace engineprobe {
 //  32  the resource-manager sweeps   64  Region::WaitForLoadingToFinish
 // 128  Engine::Update and Engine::Render, bracketed whole
 // 256  GameEngine::Update -- the one hook that is in Game.dll
-// 512  TQ.exe's main loop, through its import table, patching nothing:
-//      its sleep, its message pump, its waits, Engine::PresentSurface
-//      and the collision fixup
+// 512  TQ.exe's main loop, through its import table, patching nothing: its
+//      sleep and waits, the platform pump, graphics options, music, sound,
+//      Engine::PresentSurface, the collision fixup, quest triggers, and
+//      EWindow::ProcessMessages -- eleven imports covering every call in the
+//      loop that does work rather than return a pointer
 void readOptions(const wchar_t* iniPath);
 
 // Installs whatever the mask selects and the build supports. Returns true if

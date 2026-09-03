@@ -886,6 +886,68 @@ frame's measured window and inside none of the brackets, in every run so far.
 `Engine::PresentSurface` and the collision fixup are both imported by TQ.exe,
 so both are now bracketed through the import table: no patched code at all.
 
+## 12. Run 14, and the loop read properly this time
+
+`Engine::PresentSurface` is **24.4% of the session** but only **4.6% of the
+time in frames over 50 ms**, and it turns out to have no head of its own worth
+speaking of: its 25,784 ms is the game's D3D `Present` (17,869 ms) plus the
+mod's own Present-time work (8,777 ms).  The geometric argument in §11 was
+sound about where the instrument was standing and wrong about what was
+standing there.  The collision fixup is 196 ms.  The residual is unchanged:
+11.8% of the session, **35.5% of the time in frames over 50 ms**.
+
+The mistake was narrower than the hypothesis.  §11 read the loop through a
+700-byte window around the `Engine::Render` call.  The loop's closing branch
+is at `TQ.exe+0x44f286` and its head at `+0x44e970`: **2,326 bytes**, and the
+part that was never read contains the candidates that matter.
+
+Every call in the whole loop, with the ones that only fetch a pointer removed:
+
+```
+  THQNO_Process                              thqno_api.dll
+  Jukebox::Update                            Engine.dll
+  GraphicsEngine::UpdateFromOptions          Engine.dll
+  SoundManager::Update                       Engine.dll
+  VideoPlayer::Update / Render               (guarded by GetIsPlaying)
+  Engine::PresentSurface                     x3 sites  <- 24.4%, not the stalls
+  Engine::Update                             <- 10.6%
+  GameEngine::Update                         <- 0.4%
+  InterpenetrationManager::FixupCharacterCollisions  <- 0.2%
+  Engine::Render                             <- 52.4%
+  PlayStats::Display / UpdatePerfTracker / Profile::EndFrame
+  GameEngine::NeedsSleep -> call ebp         (ebp = the Sleep import slot)
+  QuestRepository::FireTriggers              Game.dll
+  EWindow::ProcessMessages                   Engine.dll  <- ends the loop
+  plus nine TQ.exe-internal direct calls
+```
+
+Two things fall out of that immediately.
+
+**The message pump is Engine.dll's, not the executable's.**
+`EWindow::ProcessMessages` is the last call before the backward branch and its
+return value is the loop condition.  That is why run 13 measured **zero** calls
+to TQ.exe's own `GetMessageA`: the import exists and is never used, and the
+real pump was never in the measured set.
+
+**And the game has an online platform layer that it polls every frame.**
+`THQNO_Process` is the *first* call in the loop, from `thqno_api.dll`, with
+`libcurl.dll` in the same import list.  Bursty network or IPC work is the
+precise shape of what §10 measured -- twenty discrete events of 50-398 ms
+arriving in clusters, unrelated to route or content.
+
+Six brackets were added for run 15, in loop order: `THQNO_Process`,
+`GraphicsEngine::UpdateFromOptions`, `Jukebox::Update`, `SoundManager::Update`,
+`QuestRepository::FireTriggers`, `EWindow::ProcessMessages`.  All six are
+imported by TQ.exe, so like run 13 and run 14 this adds **no patched code at
+all** -- eleven entries of the executable's own import table now carry the
+whole main-loop instrument.
+
+Also worth recording from the disassembly: `mov ebp, ds:0x5efa6c` at
+`+0x44f278` loads the `Sleep` import slot into `ebp` on every iteration, and
+`call ebp` at `+0x44efee` is the sleep.  So run 13's redirect of that slot was
+genuinely on the path, and its one call in a session is a real measurement of
+`NeedsSleep` rather than a missed hook.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

@@ -593,6 +593,83 @@ void __fastcall hookPresentSurface(void* self, void* edx) {
                            tq::probe::microsecondsSince(started));
 }
 
+// The remaining six, all __thiscall except the platform pump, which is a C
+// entry point taking no arguments -- at zero arguments __stdcall and __cdecl
+// emit the same epilogue, so the declaration cannot get the cleanup wrong.
+// The call site confirms it: no pushes before, no stack adjustment after.
+typedef void (__stdcall* PlatformProcessFn)(void);
+typedef void (__fastcall* ThisVoidFn)(void* self, void* edx);
+typedef void (__fastcall* SoundUpdateFn)(void* self, void* edx,
+                                         const void* frustum);
+typedef int (__fastcall* PumpFn)(void* self, void* edx);
+PlatformProcessFn g_platform;
+ThisVoidFn g_gfxOptions;
+ThisVoidFn g_jukebox;
+SoundUpdateFn g_sound;
+ThisVoidFn g_quests;
+PumpFn g_pump;
+CallPatch g_platformPatch, g_gfxOptionsPatch, g_jukeboxPatch;
+CallPatch g_soundPatch, g_questsPatch, g_pumpPatch;
+
+void __stdcall hookPlatform(void) {
+    if (!g_platform) return;
+    const int64_t started = tq::probe::now();
+    g_platform();
+    tq::probe::engineCount(tq::probe::CounterLoopPlatform);
+    tq::probe::engineCount(tq::probe::CounterLoopPlatformUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookGfxOptions(void* self, void* edx) {
+    if (!g_gfxOptions) return;
+    const int64_t started = tq::probe::now();
+    g_gfxOptions(self, edx);
+    tq::probe::engineCount(tq::probe::CounterLoopGfxOptions);
+    tq::probe::engineCount(tq::probe::CounterLoopGfxOptionsUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookJukebox(void* self, void* edx) {
+    if (!g_jukebox) return;
+    const int64_t started = tq::probe::now();
+    g_jukebox(self, edx);
+    tq::probe::engineCount(tq::probe::CounterLoopJukebox);
+    tq::probe::engineCount(tq::probe::CounterLoopJukeboxUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookSound(void* self, void* edx, const void* frustum) {
+    if (!g_sound) return;
+    const int64_t started = tq::probe::now();
+    g_sound(self, edx, frustum);
+    tq::probe::engineCount(tq::probe::CounterLoopSound);
+    tq::probe::engineCount(tq::probe::CounterLoopSoundUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookQuests(void* self, void* edx) {
+    if (!g_quests) return;
+    const int64_t started = tq::probe::now();
+    g_quests(self, edx);
+    tq::probe::engineCount(tq::probe::CounterLoopQuests);
+    tq::probe::engineCount(tq::probe::CounterLoopQuestsUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+// The loop's own condition: it runs while this returns true, so returning
+// anything else on a missing trampoline would end the game. There is no
+// trampoline-missing case while installed, and the guard returns 1 rather
+// than 0 for that reason.
+int __fastcall hookPump(void* self, void* edx) {
+    if (!g_pump) return 1;
+    const int64_t started = tq::probe::now();
+    const int result = g_pump(self, edx);
+    tq::probe::engineCount(tq::probe::CounterLoopPump);
+    tq::probe::engineCount(tq::probe::CounterLoopPumpUs,
+                           tq::probe::microsecondsSince(started));
+    return result;
+}
+
 void __fastcall hookCollisions(void* self, void* edx, const void* camera) {
     if (!g_collisions) return;
     const int64_t started = tq::probe::now();
@@ -890,7 +967,30 @@ bool installLoop() {
         "?FixupCharacterCollisions@InterpenetrationManager@GAME@@QAEXABV"
         "GameCamera@2@@Z",
         (void**)&g_collisions, (const void*)&hookCollisions) ? 1u : 0u;
-    tq::hdr::log("Engine trace: TQ.exe main loop %u/5 imports redirected\r\n",
+    installed += redirectImport(g_platformPatch, executable, "thqno_api.dll",
+                                "THQNO_Process", (void**)&g_platform,
+                                (const void*)&hookPlatform) ? 1u : 0u;
+    installed += redirectImport(
+        g_gfxOptionsPatch, executable, "Engine.dll",
+        "?UpdateFromOptions@GraphicsEngine@GAME@@QAEXXZ",
+        (void**)&g_gfxOptions, (const void*)&hookGfxOptions) ? 1u : 0u;
+    installed += redirectImport(g_jukeboxPatch, executable, "Engine.dll",
+                                "?Update@Jukebox@GAME@@QAEXXZ",
+                                (void**)&g_jukebox,
+                                (const void*)&hookJukebox) ? 1u : 0u;
+    installed += redirectImport(
+        g_soundPatch, executable, "Engine.dll",
+        "?Update@SoundManager@GAME@@QAEXPBVWorldFrustum@2@@Z",
+        (void**)&g_sound, (const void*)&hookSound) ? 1u : 0u;
+    installed += redirectImport(g_questsPatch, executable, "Game.dll",
+                                "?FireTriggers@QuestRepository@GAME@@QAEXXZ",
+                                (void**)&g_quests,
+                                (const void*)&hookQuests) ? 1u : 0u;
+    installed += redirectImport(g_pumpPatch, executable, "Engine.dll",
+                                "?ProcessMessages@EWindow@GAME@@QAE_NXZ",
+                                (void**)&g_pump,
+                                (const void*)&hookPump) ? 1u : 0u;
+    tq::hdr::log("Engine trace: TQ.exe main loop %u/11 imports redirected\r\n",
                  installed);
     if (installed) ++g_installedHooks;
     return installed != 0;
@@ -974,6 +1074,18 @@ bool install(HMODULE engine) {
 void shutdown() {
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::restoreCall(g_pumpPatch);
+    g_pump = nullptr;
+    tq::detour::restoreCall(g_questsPatch);
+    g_quests = nullptr;
+    tq::detour::restoreCall(g_soundPatch);
+    g_sound = nullptr;
+    tq::detour::restoreCall(g_jukeboxPatch);
+    g_jukebox = nullptr;
+    tq::detour::restoreCall(g_gfxOptionsPatch);
+    g_gfxOptions = nullptr;
+    tq::detour::restoreCall(g_platformPatch);
+    g_platform = nullptr;
     tq::detour::restoreCall(g_collisionsPatch);
     g_collisions = nullptr;
     tq::detour::restoreCall(g_presentSurfacePatch);

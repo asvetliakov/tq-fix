@@ -269,6 +269,35 @@ enum Counter {
     CounterEnginePresentSurfaceUs,
     CounterGameCollisions,
     CounterGameCollisionsUs,
+    // The rest of TQ.exe's main loop, which run 14 proved is where the
+    // residual lives -- PresentSurface took only 4.6% of the hitch time and
+    // the loop is 2,326 bytes, not the 700 first read. These are the six
+    // calls in it that do work rather than return a pointer, in the order the
+    // loop makes them:
+    //
+    //   THQNO_Process              the online/platform layer. libcurl sits
+    //                              behind it, and bursty network or IPC work
+    //                              is the exact shape of the measured stalls.
+    //   GraphicsEngine::UpdateFromOptions
+    //   Jukebox::Update            music, streamed
+    //   SoundManager::Update       audio, streamed
+    //   QuestRepository::FireTriggers
+    //   EWindow::ProcessMessages   the real message pump, and the reason
+    //                              TQ.exe's own GetMessageA read zero calls:
+    //                              the pump is Engine.dll's, not the exe's.
+    //                              Its return value is what ends the loop.
+    CounterLoopPlatform,
+    CounterLoopPlatformUs,
+    CounterLoopGfxOptions,
+    CounterLoopGfxOptionsUs,
+    CounterLoopJukebox,
+    CounterLoopJukeboxUs,
+    CounterLoopSound,
+    CounterLoopSoundUs,
+    CounterLoopQuests,
+    CounterLoopQuestsUs,
+    CounterLoopPump,
+    CounterLoopPumpUs,
     CounterCount
 };
 
