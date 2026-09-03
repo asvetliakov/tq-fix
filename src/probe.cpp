@@ -108,7 +108,9 @@ const char* const kCounterNames[CounterCount] = {
     "engine_sleep", "engine_sleep_us",
     "engine_cs_wait_main", "engine_cs_wait_main_us",
     "engine_obj_wait_main", "engine_obj_wait_main_us",
-    "engine_sleep_main", "engine_sleep_main_us", "engine_sleep_main_req_us"
+    "engine_sleep_main", "engine_sleep_main_us", "engine_sleep_main_req_us",
+    "engine_async_load", "engine_async_sync",
+    "engine_portal_async_load", "engine_portal_async_sync"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");

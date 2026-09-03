@@ -53,6 +53,66 @@ const BYTE kLoadLevelBytes[] = {
     0x80, 0x7d, 0x08                           // cmp byte [ebp+8],...
 };
 
+// --- Region::GuaranteedGetLevel, which run 29 named as the caller of the
+// forced load: two calls, both on the main thread, 515.5 ms between them and
+// 402.4 ms in the worse one, all inside Engine::Render on the
+// zone-transition frame. It is hooked to ask the same question one level up
+// -- which of its seventeen callers those two came from -- because the answer
+// decides which single call site Stage 5.1 should be pointed at. See §28.
+//
+// The window runs past the call to the whole null return, because that path
+// is the one a deferring thunk would have to reproduce, and it is cheaper to
+// verify it now than to re-read it later:
+//
+//   1020e7b0  56              push esi
+//   1020e7b1  8b f1           mov esi,ecx           Region*
+//   1020e7b3  57              push edi
+//   1020e7b4  85 f6           test esi,esi
+//   1020e7b6  74 42           jz  0x1020e7fa        null region -> null
+//   1020e7b8  ff 74 24 0c     push [esp+0xc]        the bool argument
+//   1020e7bc  e8 <rel32>      call Region::LoadLevel      <- offset 12
+//   1020e7c1  80 7e 74 00     cmp byte [esi+0x74],0       the loading flag
+//   1020e7c5  c7 46 6c 00..   mov dword [esi+0x6c],0      unload countdown
+//   1020e7cc  74 09           jz  0x1020e7d7        loaded -> take the lock
+//   1020e7ce  33 ff           xor edi,edi           still loading -> NULL
+//   1020e7d0  8b c7           mov eax,edi
+//   1020e7d2  5f 5e           pop edi; pop esi
+//   1020e7d4  c2 04 00        ret 4
+//
+// Two things that follow, and both matter later. **Despite the name it
+// already returns NULL while the region is loading** -- so deferring here
+// uses a state the function has rather than inventing one. And the loaded
+// path at 0x1020e7d7 returns `[esi+0x50]` under the region lock, which is an
+// independent statement that `[0x50]` is the Level* -- the same field the
+// async thunk tests, read out of the instruction that returns it.
+//
+// The six stolen bytes are `push esi; mov esi,ecx; push edi; test esi,esi`
+// and contain no relative branch, so the `74 42` at offset 6 keeps meaning
+// what it means and an ordinary trampoline works.
+const DWORD kGuaranteedGetLevelRva = 0x20e7b0;
+const char kGuaranteedGetLevelName[] =
+    "?GuaranteedGetLevel@Region@GAME@@QBEPAVLevel@2@_N@Z";
+const BYTE kGuaranteedGetLevelBytes[] = {
+    0x56,
+    0x8b, 0xf1,
+    0x57,
+    0x85, 0xf6,
+    0x74, 0x42,
+    0xff, 0x74, 0x24, 0x0c,
+    0xe8, 0xff, 0xd6, 0xff, 0xff,              // call 0x1020bec0
+    0x80, 0x7e, 0x74, 0x00,
+    0xc7, 0x46, 0x6c, 0x00, 0x00, 0x00, 0x00,
+    0x74, 0x09,
+    0x33, 0xff,
+    0x8b, 0xc7,
+    0x5f, 0x5e,
+    0xc2, 0x04, 0x00
+};
+// Its call to Region::LoadLevel sits at the same offset as the two
+// AddElementsInBox sites, which is what makes it a kForceLoadSites entry
+// rather than a new mechanism.
+const unsigned kGuaranteedCallOffset = 12;
+
 // --- ResourceLoader::LoadResource. The duration includes its wait on the
 // resource's own critical section, which is the stall worth naming.
 const DWORD kLoadResourceRva = 0x213ed0;
@@ -336,6 +396,248 @@ const LockSite kLockSites[] = {
 };
 const unsigned kLockSiteCount = sizeof(kLockSites) / sizeof(kLockSites[0]);
 
+// The three deferral thunks, declared here because the site table below names
+// them and they are defined with the other hooks.
+int __fastcall hookAddElementsLoadLevel(void* self, void* edx, int background);
+int __fastcall hookPortalLoadLevel(void* self, void* edx, int background);
+
+// --- [performance] async_level_load: the call sites that force a level load
+// synchronously, and the engine's own asynchronous entry point to send them
+// to instead.
+//
+// Two are in the renderers and, as runs 27-32 measured, never defer anything:
+// they find the region already resident every time, because the game's own
+// RegionLoader keeps ahead of the player. The third is portal traversal and is
+// the only synchronous level load that happens during play.
+//
+// The sites are the thirty-four bytes immediately *before* the two
+// AddElementsInBox region-lock windows above -- 0x167847 + 34 == 0x167869 and
+// 0x17d8b7 + 34 == 0x17d8d9, which are the two windowRvas in kLockSites. The
+// two groups are adjacent and disjoint, and that arithmetic is a cross-check
+// on both: each table ends exactly where the other begins.
+//
+//   85 ff                  test edi,edi          Region*, never null past here
+//   0f 84 dd 00 00 00      jz  the epilogue
+//   6a 00                  push 0                the flag both sites pass
+//   8b cf                  mov ecx,edi
+//   e8 <rel32>             call Region::LoadLevel          <- offset 12
+//   80 7f 74 00            cmp byte [edi+0x74],0           the loading flag
+//   c7 47 6c 00 00 00 00   mov dword [edi+0x6c],0          unload countdown
+//   0f 85 c3 00 00 00      jnz the epilogue      skip the region this frame
+//
+// Three things that sentence-by-sentence justify the change:
+//
+// - The renderer's own skip test is `cmp byte [edi+0x74],0` / `jnz`, and
+//   `[0x74]` is exactly the byte BackgroundLoadLevel sets. Deferring is
+//   therefore not something bolted on: the call site is already written to
+//   handle a region that did not load, and the flag it reads is the flag the
+//   asynchronous path raises. verify-sites.py asserts the two offsets agree.
+// - `MOV` does not touch flags, so `mov dword [edi+0x6c],0` runs on the skip
+//   path as well: a deferred region still has its unload countdown reset and
+//   cannot be evicted while its load is in flight.
+// - EAX is dead across the call. The next instruction is the `CMP` above,
+//   which overwrites the flags, and nothing between it and the `JNZ` reads
+//   the register -- so what the thunk returns cannot be observed.
+//
+// The two tables differ only in the call displacement, which is relative and
+// therefore not a Relocation; each site carries its own copy and patchCall
+// re-derives the destination from it anyway.
+const BYTE kForceLoadDeferredBytes[] = {
+    0x85, 0xff,
+    0x0f, 0x84, 0xdd, 0x00, 0x00, 0x00,
+    0x6a, 0x00,
+    0x8b, 0xcf,
+    0xe8, 0x68, 0x46, 0x0a, 0x00,              // call 0x1020bec0
+    0x80, 0x7f, 0x74, 0x00,
+    0xc7, 0x47, 0x6c, 0x00, 0x00, 0x00, 0x00,
+    0x0f, 0x85, 0xc3, 0x00, 0x00, 0x00
+};
+const BYTE kForceLoadForwardBytes[] = {
+    0x85, 0xff,
+    0x0f, 0x84, 0xdd, 0x00, 0x00, 0x00,
+    0x6a, 0x00,
+    0x8b, 0xcf,
+    0xe8, 0xf8, 0xe5, 0x08, 0x00,              // call 0x1020bec0
+    0x80, 0x7f, 0x74, 0x00,
+    0xc7, 0x47, 0x6c, 0x00, 0x00, 0x00, 0x00,
+    0x0f, 0x85, 0xc3, 0x00, 0x00, 0x00
+};
+static_assert(sizeof(kForceLoadDeferredBytes) == sizeof(kForceLoadForwardBytes),
+              "both forced-load windows are the same thirty-four byte shape");
+const unsigned kForceLoadCallOffset = 12;
+
+// --- The third site, and the only synchronous level load that happens during
+// play. Run 30 caught it once in 11,055 frames: 105.7 ms on an Engine::Update
+// frame, where the two above only ever fire on a level change. Its containing
+// function is not exported, so identity rests on the bytes -- which is why the
+// window runs past the branch to the EnterCriticalSection import, whose
+// relocated dword is compared against the slot rather than literally.
+//
+//   10117a8c  85 f6              test esi,esi     the far-side Region*
+//   10117a8e  74 7b              jz  past
+//   10117a90  6a 00              push 0
+//   10117a92  8b ce              mov ecx,esi
+//   10117a94  e8 <rel32>         call Region::LoadLevel        <- offset 8
+//   10117a99  80 7e 74 00        cmp byte [esi+0x74],0
+//   10117a9d  c7 46 6c 00..      mov dword [esi+0x6c],0
+//   10117aa4  75 19              jnz 0x10117abf   still loading -> skip
+//   10117aa6  ff 76 08           push [esi+8]
+//   10117aa9  ff 15 <EnterCS>
+//
+// The call is at offset **8**, not 12: the guard here is the two-byte `jz`
+// rather than the six-byte form the renderers use, which is why the site
+// table carries the offset per entry.
+//
+// Its containing function -- `World::GetRegionsInFrustum`,
+// `WorldFrustum::GetRelativeFrustum`, `Portal::GetConnectedRegion`, then this
+// call, then `Region::GetPortal` and `Portal::GetChokePoint` -- is portal
+// traversal: the region on the far side of a doorway, forced resident.
+//
+// It is the best-founded of the three, and by one thing the others cannot
+// claim: the only call it makes on that region afterwards,
+// `Region::GetPortal` at 0x10117ac8, has its result null-checked two
+// instructions later (`test eax,eax / jz`). So the code past the branch
+// already copes with a region whose level is not there.
+const DWORD kPortalLoadWindowRva = 0x117a8c;
+const BYTE kPortalLoadBytes[] = {
+    0x85, 0xf6,
+    0x74, 0x7b,
+    0x6a, 0x00,
+    0x8b, 0xce,
+    0xe8, 0x27, 0x44, 0x0f, 0x00,              // call 0x1020bec0
+    0x80, 0x7e, 0x74, 0x00,
+    0xc7, 0x46, 0x6c, 0x00, 0x00, 0x00, 0x00,
+    0x75, 0x19,
+    0xff, 0x76, 0x08,
+    0xff, 0x15, 0, 0, 0, 0                     // call EnterCriticalSection
+};
+const Relocation kPortalLoadRelocs[] = {{31, kEnterCriticalSectionSlotRva}};
+const unsigned kPortalLoadCallOffset = 8;
+
+struct ForceLoadSite {
+    // The decorated name of the containing export, or null when the function
+    // is not exported and the bytes are the whole identity.
+    const char* owner;
+    DWORD ownerRva;             // asserted against what the name resolves to
+    DWORD windowRva;
+    const BYTE* bytes;
+    SIZE_T size;
+    const Relocation* relocations;
+    unsigned relocationCount;
+    unsigned callOffset;        // 12 in the renderers, 8 here
+    const void* replacement;    // its own thunk, so each site gets its own columns
+};
+// A full .text scan for `E8` displacements resolving to Region::LoadLevel
+// finds thirty-eight call sites. These are the only two inside a renderer;
+// GraphicsSceneRenderer::AddElementsInBox, the third of the three
+// AddElementsInBox overrides, does not call it at all.
+const ForceLoadSite kForceLoadSites[] = {
+    {"?AddElementsInBox@GraphicsDeferredRendererX@GAME@@UAEXPAVRegion@2@"
+     "ABVOBBox@2@ABVCoords@2@@Z",
+     0x1677e0, 0x167847, kForceLoadDeferredBytes,
+     sizeof(kForceLoadDeferredBytes), nullptr, 0, 12,
+     (const void*)&hookAddElementsLoadLevel},
+    {"?AddElementsInBox@GraphicsForwardRenderer@GAME@@UAEXPAVRegion@2@"
+     "ABVOBBox@2@ABVCoords@2@@Z",
+     0x17d850, 0x17d8b7, kForceLoadForwardBytes,
+     sizeof(kForceLoadForwardBytes), nullptr, 0, 12,
+     (const void*)&hookAddElementsLoadLevel},
+    // Not exported, so no owner to resolve: the thirty-five bytes and the
+    // relocated EnterCriticalSection slot are the identity.
+    {nullptr, 0, kPortalLoadWindowRva, kPortalLoadBytes,
+     sizeof(kPortalLoadBytes), kPortalLoadRelocs, 1, kPortalLoadCallOffset,
+     (const void*)&hookPortalLoadLevel},
+};
+const unsigned kForceLoadSiteCount =
+    sizeof(kForceLoadSites) / sizeof(kForceLoadSites[0]);
+
+// --- Region::BackgroundLoadLevel, `__thiscall void(bool, bool)`, 85 bytes.
+// Not detoured and not patched: it is resolved and called, so what has to be
+// verified is not its identity but its *behaviour*, because the thunk works
+// around one specific thing it does.
+//
+// Three windows, and the first is the one that carries the trap.
+//
+//   1020be60  8b 41 50        mov eax,[ecx+0x50]      the loaded Level*
+//   1020be63  8a 54 24 04     mov dl,[esp+4]          only the FIRST bool
+//   1020be67  83 ec 0c        sub esp,0xc
+//   1020be6a  85 c0           test eax,eax
+//   1020be6c  74 0d           jz  0x1020be7b          not resident -> proceed
+//   1020be6e  84 d2           test dl,dl
+//   1020be70  74 3d           jz  0x1020beaf          <-- DOES NOTHING
+//
+// With `region[0x50]` non-null and a false flag -- which is exactly what both
+// call sites pass -- this function returns having done nothing. It does not
+// set `[0x74]`, so the caller's `JNZ` would not fire and the renderer would
+// draw an unloaded region. Those calls have to go to the original
+// Region::LoadLevel, which is what the thunk's `region[0x50]` test is for,
+// and it is the reason that test exists rather than a defensive habit.
+//
+// It costs nothing: `region[0x50]` non-null is the resident case, which
+// Region::LoadLevel answers out of its own first three instructions.
+const DWORD kBackgroundLoadLevelRva = 0x20be60;
+const char kBackgroundLoadLevelName[] =
+    "?BackgroundLoadLevel@Region@GAME@@QAEX_N0@Z";
+const BYTE kBackgroundEntryBytes[] = {
+    0x8b, 0x41, 0x50,                          // mov eax,[ecx+0x50]
+    0x8a, 0x54, 0x24, 0x04,                    // mov dl,[esp+4]
+    0x83, 0xec, 0x0c,
+    0x85, 0xc0,                                // test eax,eax
+    0x74, 0x0d,                                // jz  +0xd -> the flag window
+    0x84, 0xd2,                                // test dl,dl
+    0x74, 0x3d                                 // jz  the epilogue
+};
+
+// The second window is the re-entry guard and the flag the renderer reads,
+// and it says the thunk needs no in-flight test of its own:
+//
+//   1020be7b  80 79 74 00     cmp byte [ecx+0x74],0
+//   1020be7f  75 2e           jnz the epilogue      already loading -> bail
+//   1020be81  80 79 75 00     cmp byte [ecx+0x75],0
+//   1020be85  75 28           jnz the epilogue
+//   1020be87  83 79 50 00     cmp dword [ecx+0x50],0
+//   1020be8b  74 06           jz  0x1020be93
+//   1020be8d  c6 41 75 01     mov byte [ecx+0x75],1
+//   1020be91  eb 04           jmp past
+//   1020be93  c6 41 74 01     mov byte [ecx+0x74],1   <- the renderer's flag
+//
+// The thunk only ever routes the `[0x50] == 0` case here, so the branch at
+// 0x1020be8b is always taken and `[0x74]` -- not `[0x75]` -- is what gets
+// set. That is the byte the call site's `cmp byte [edi+0x74],0` reads, so the
+// region is skipped for this frame and picked up by RegionLoader::Update.
+// Region::Update sets the same two flags in the same shape at +0x372, +0x3d9
+// and +0x777, so this is the engine's own idiom and not a new state.
+const DWORD kBackgroundFlagsRva = 0x20be7b;
+const BYTE kBackgroundFlagsBytes[] = {
+    0x80, 0x79, 0x74, 0x00,
+    0x75, 0x2e,
+    0x80, 0x79, 0x75, 0x00,
+    0x75, 0x28,
+    0x83, 0x79, 0x50, 0x00,                    // cmp dword [ecx+0x50],0
+    0x74, 0x06,
+    0xc6, 0x41, 0x75, 0x01,                    // mov byte [ecx+0x75],1
+    0xeb, 0x04,
+    0xc6, 0x41, 0x74, 0x01                     // mov byte [ecx+0x74],1
+};
+
+// The third is the epilogue, which is the ABI the thunk calls with: two stack
+// arguments, callee popped. Every early exit above jumps here, so this is also
+// what says the do-nothing path is a clean return and not a fall-through.
+const DWORD kBackgroundTailRva = 0x20beaf;
+const BYTE kBackgroundTailBytes[] = {
+    0x83, 0xc4, 0x0c,                          // add esp,0xc
+    0xc2, 0x08, 0x00                           // ret 8      two bools
+};
+
+// The one field of Region this file dereferences, taken from the operand of
+// the instruction that uses it -- `mov eax,[ecx+0x50]`, the first instruction
+// of both Region::LoadLevel and Region::BackgroundLoadLevel -- rather than
+// from a layout table. Non-null means the level is resident.
+const unsigned kRegionLevelOffset = 0x50;
+// The loading flag the renderer tests and the asynchronous path raises. Named
+// once so verify-sites.py can assert the two instructions agree about it.
+const unsigned kRegionLoadingOffset = 0x74;
+
 // --- Engine::Update. Two of the call-site groups live inside it, so its own
 // RVA is asserted once and their windows are offsets into the same function.
 const DWORD kEngineUpdateRva = 0x1443a0;
@@ -486,6 +788,10 @@ const unsigned kGroupBlocking = 0x2000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
+// [performance] async_level_load. A game-behaviour change rather than an
+// instrument, so like archive_cache_mb it defaults off, installs nothing at
+// 0, and reaches install() with the performance probe off.
+bool g_asyncLevelLoad;
 // Whether this install() is installing the trace at all. archive_cache_mb can
 // reach install() with the performance probe off, and without this every
 // wants() below would read the trace mask -- which defaults to 1 -- and put
@@ -509,6 +815,10 @@ bool onMainThread() {
 // unchanged.
 
 typedef int (__fastcall* LoadLevelFn)(void* self, void* edx, int background);
+typedef void (__fastcall* BackgroundLoadLevelFn)(void* self, void* edx,
+                                                 int background, int second);
+typedef void* (__fastcall* GuaranteedGetLevelFn)(void* self, void* edx,
+                                                int flag);
 typedef void (__fastcall* LoadResourceFn)(void* self, void* edx, void* resource);
 typedef void (__fastcall* UnloadLevelFn)(void* self, void* edx, int a, int b);
 typedef void (__fastcall* EnqueueFn)(void* self, void* edx, const void* resource,
@@ -533,6 +843,15 @@ typedef void (WINAPI* SleepFn)(DWORD);
 typedef DWORD (WINAPI* WaitFn)(HANDLE, DWORD);
 
 LoadLevelFn g_loadLevel;
+// Region::LoadLevel and Region::BackgroundLoadLevel as the module exports
+// them, which is not the same thing as g_loadLevel above. g_loadLevel is the
+// trace's trampoline and exists only when the loads group is installed;
+// these two are resolved addresses and work with the probe off. Calling the
+// export means that when the trace *is* installed the call still lands in
+// hookLoadLevel and is counted, which is what we want.
+LoadLevelFn g_regionLoadLevel;
+BackgroundLoadLevelFn g_backgroundLoadLevel;
+GuaranteedGetLevelFn g_guaranteedGetLevel;
 LoadResourceFn g_loadResource;
 UnloadLevelFn g_unloadLevel;
 EnqueueFn g_enqueue;
@@ -552,6 +871,7 @@ SleepFn g_engineSleep;
 unsigned g_renderTicks;
 
 Detour g_loadLevelDetour;
+Detour g_guaranteedDetour;
 Detour g_loadResourceDetour;
 Detour g_unloadLevelDetour;
 Detour g_enqueueDetour;
@@ -570,21 +890,362 @@ CallPatch g_objWaitPatch;
 CallPatch g_objWaitMultiplePatch;
 CallPatch g_enginesleepPatch;
 CallPatch g_lockPatches[kLockSiteCount];
+CallPatch g_forceLoadPatches[kForceLoadSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
 
+// Which call site the expensive forced loads actually come from -- the one
+// fact runs 27 and 28 left missing, and the reason Stage 5.1 was aimed wrong.
+//
+// Five `Region::LoadLevel` calls are 99.7% of a session's main-thread level
+// loading, and neither `AddElementsInBox` site is one of them: on the
+// zone-transition frame the two patched sites are not reached at all. There
+// are thirty-eight `E8` sites in Engine.dll that reach this function and
+// guessing between them is what produced §27, so this measures it.
+//
+// `hookLoadLevel` is a trampoline detour, so the return address here is the
+// game's. The game's `CALL` pushed it; the six-byte `push imm32; ret` written
+// over the entry consumes only its own. Nothing between that and this frame
+// pushes another.
+//
+// A call has to cost a millisecond to be recorded, which is three orders of
+// magnitude above the ~3 us the resident path takes, so this is a handful of
+// events a session against ~206,000 calls. The cost on every other call is
+// one comparison against a value already in a register.
+const uint32_t kSlowLoadUs = 1000;
+const unsigned kLoadCallerSlots = 16;
+
+const BYTE* g_engineBase;
+
+// One table per instrumented callee. Run 29 answered "which call site" for
+// Region::LoadLevel and the answer was another function, so the same question
+// has to be asked one level up; sharing the aggregator means the second
+// answer costs a table and a hook rather than a second implementation.
+//
+// RVA 0 is the DOS header and can never be a call site, so it doubles as the
+// empty marker.
+struct CallerTable {
+    DWORD rva[kLoadCallerSlots];
+    LONG calls[kLoadCallerSlots];
+    LONG main[kLoadCallerSlots];
+    LONG us[kLoadCallerSlots];
+    LONG worstUs[kLoadCallerSlots];
+    LONG lost;
+};
+CallerTable g_loadLevelCallers;
+CallerTable g_guaranteedCallers;
+
+void recordSlowCall(CallerTable& table, const void* caller, uint32_t elapsed,
+                    bool main) {
+    if (!g_engineBase) return;
+    const uintptr_t address = (uintptr_t)caller;
+    const uintptr_t base = (uintptr_t)g_engineBase;
+    // A caller outside Engine.dll is a different question from the one being
+    // asked, and its RVA would be meaningless, so it is counted and dropped
+    // rather than recorded against a wrong module.
+    if (address < base || address - base >= kEngineImageSize) {
+        InterlockedIncrement(&table.lost);
+        return;
+    }
+    const DWORD rva = (DWORD)(address - base);
+    for (unsigned i = 0; i < kLoadCallerSlots; ++i) {
+        if (table.rva[i] != rva) {
+            if (table.rva[i]) continue;
+            // Two threads can reach an empty slot together; the loser either
+            // finds its own RVA already there and shares the slot, or moves on.
+            if (InterlockedCompareExchange((LONG*)&table.rva[i], (LONG)rva, 0)
+                    != 0
+                && table.rva[i] != rva)
+                continue;
+        }
+        InterlockedIncrement(&table.calls[i]);
+        if (main) InterlockedIncrement(&table.main[i]);
+        InterlockedExchangeAdd(&table.us[i], (LONG)elapsed);
+        // Deliberately not interlocked. A lost update to a running maximum
+        // costs at most one sample, and a maximum is the one statistic that
+        // survives that; paying a lock here would be pricing the instrument
+        // rather than the load.
+        if ((LONG)elapsed > table.worstUs[i])
+            table.worstUs[i] = (LONG)elapsed;
+        return;
+    }
+    InterlockedIncrement(&table.lost);
+}
+
+// Written from the Engine::Render bracket rather than from shutdown(), for
+// the same reason the message histogram is: the game exits without unloading.
+// --- The call chain, because hooking one function per boot resolves one link
+// per boot and the chain is at least four deep. Runs 29 and 30 walked it from
+// Region::LoadLevel up to WorldVec3::TranslateToFloor and it is still not at
+// the top; §29 has the reasoning for changing technique here.
+//
+// The game keeps no frame pointers -- Region::GuaranteedGetLevel opens
+// `push esi; mov esi,ecx; push edi` -- so a proper frame walk is not
+// available. What replaces it is a raw upward scan of the stack keeping only
+// values that look like an address a CALL pushed. Stale slots survive that,
+// so the output is a superset; the real chain is a subsequence of it in
+// increasing stack order, which three events a session makes readable by eye.
+const unsigned kChainSlots = 8;
+const unsigned kChainDepth = 32;
+// 8 KiB. Engine::Render's own frame is 0x870 bytes, so a chain that reaches
+// it needs room for several hundred words of one frame alone.
+const unsigned kStackWords = 2048;
+
+// Three modules, not one. Run 31 scanned Engine.dll only and came back with
+// both ends of the chain and nothing in between: TQ.exe and Game.dll both
+// import WorldVec3::TranslateToFloor, so the frames between Display::Update
+// and it were dropped by construction rather than absent. §30.
+//
+// Each is admitted only if it is the audited build, so a chain frame's RVA
+// means the same thing as every other RVA in this file.
+const unsigned kChainModules = 3;
+struct ChainModule {
+    char tag;                  // 'E' Engine.dll, 'G' Game.dll, 'T' TQ.exe
+    const BYTE* base;
+    const BYTE* text;
+    SIZE_T textSize;
+};
+ChainModule g_chainModules[kChainModules];
+unsigned g_chainModuleCount;
+
+struct ChainFrame {
+    DWORD rva;
+    char tag;
+};
+struct StackChain {
+    LONG ready;
+    uint32_t us;
+    unsigned depth;
+    ChainFrame frame[kChainDepth];
+};
+StackChain g_chains[kChainSlots];
+LONG g_chainsUsed;
+
+const ChainModule* moduleOf(const BYTE* address) {
+    for (unsigned i = 0; i < g_chainModuleCount; ++i) {
+        const ChainModule& m = g_chainModules[i];
+        if (address >= m.text && address < m.text + m.textSize) return &m;
+    }
+    return nullptr;
+}
+
+// Whether `ret` looks like the address a CALL pushed, checked against the
+// .text of the module it landed in. All five encodings the engine actually
+// uses, because the render path is full of virtual calls and dropping those
+// would lose exactly the frames worth having.
+//
+// Every read is inside that module's .text, which is mapped, so the bound
+// check before each read is the whole guard -- no VirtualQuery, which matters
+// when this runs a couple of thousand times per event.
+bool precededByCall(const BYTE* ret, const ChainModule& m) {
+    const BYTE* const begin = m.text;
+    const BYTE* const end = m.text + m.textSize;
+    if (ret - 6 >= begin) {
+        // E8 rel32, with the destination required to land in the same .text.
+        // That second half is what makes this the strongest of the five: a
+        // stale dword would have to be preceded by a byte that happens to be
+        // E8 *and* carry a displacement that happens to point at code.
+        if (ret[-5] == 0xe8) {
+            int32_t rel = 0;
+            memcpy(&rel, ret - 4, sizeof(rel));
+            const BYTE* target = ret + rel;
+            if (target >= begin && target < end) return true;
+        }
+        // FF 15 disp32, an import slot; FF 90 disp32, call [reg+disp32].
+        if (ret[-6] == 0xff && (ret[-5] == 0x15 || (ret[-5] & 0xf8) == 0x90))
+            return true;
+    }
+    // call [reg+disp8]
+    if (ret - 3 >= begin && ret[-3] == 0xff && (ret[-2] & 0xf8) == 0x50)
+        return true;
+    // call reg, and call [reg] -- excluding the two rm encodings that mean a
+    // SIB byte or a disp32 follows, since those are longer forms handled above.
+    if (ret - 2 >= begin && ret[-2] == 0xff
+        && (((ret[-1] & 0xf8) == 0xd0)
+            || ((ret[-1] & 0xf8) == 0x10 && (ret[-1] & 7) != 4
+                && (ret[-1] & 7) != 5)))
+        return true;
+    return false;
+}
+
+void captureChain(const void* from, uint32_t us) {
+    if (!g_chainModuleCount) return;
+    const LONG slot = InterlockedIncrement(&g_chainsUsed) - 1;
+    if (slot < 0 || slot >= (LONG)kChainSlots) return;
+
+    // One probe for the whole walk. The stack's committed pages above this
+    // frame are a single region -- the guard page is below it, not above --
+    // so what this returns is a safe upper bound and the scan needs no
+    // further VirtualQuery. Which is the point: readable() is a syscall, and
+    // paying one per word would price the instrument above the load.
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!VirtualQuery(from, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return;
+    const uintptr_t* const stack = (const uintptr_t*)from;
+    const uintptr_t* const limit =
+        (const uintptr_t*)((const BYTE*)info.BaseAddress + info.RegionSize);
+
+    StackChain& chain = g_chains[slot];
+    chain.us = us;
+    unsigned depth = 0;
+    for (unsigned i = 0;
+         i < kStackWords && stack + i < limit && depth < kChainDepth; ++i) {
+        const BYTE* const value = (const BYTE*)stack[i];
+        const ChainModule* const m = moduleOf(value);
+        if (!m || !precededByCall(value, *m)) continue;
+        const DWORD rva = (DWORD)(value - m->base);
+        // Consecutive repeats are one site spilled twice, not two frames.
+        if (depth && chain.frame[depth - 1].rva == rva
+            && chain.frame[depth - 1].tag == m->tag)
+            continue;
+        chain.frame[depth].rva = rva;
+        chain.frame[depth].tag = m->tag;
+        ++depth;
+    }
+    chain.depth = depth;
+    // Published last, so the render thread never reads a half-filled chain.
+    InterlockedExchange(&chain.ready, 1);
+}
+
+char* appendFrame(char* at, char* const end, const ChainFrame& frame) {
+    if (end - at < 14) return at;
+    *at++ = ' ';
+    *at++ = frame.tag;
+    *at++ = '+'; *at++ = '0'; *at++ = 'x';
+    bool started = false;
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        const unsigned digit = (frame.rva >> shift) & 0xf;
+        if (!digit && !started && shift) continue;
+        started = true;
+        *at++ = (char)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+    }
+    return at;
+}
+
+void reportChains() {
+    for (unsigned s = 0; s < kChainSlots; ++s) {
+        if (!g_chains[s].ready) continue;
+        char line[kChainDepth * 14 + 1];
+        char* at = line;
+        for (unsigned i = 0; i < g_chains[s].depth; ++i)
+            at = appendFrame(at, line + sizeof(line) - 1, g_chains[s].frame[i]);
+        *at = 0;
+        tq::hdr::log("Engine trace: chain %u, %u us, %u frames:%s\r\n",
+                     s, g_chains[s].us, g_chains[s].depth, line);
+    }
+}
+
+void reportCallers(const CallerTable& table, const char* what) {
+    for (unsigned i = 0; i < kLoadCallerSlots; ++i) {
+        if (!table.rva[i]) continue;
+        tq::hdr::log("Engine trace: slow %s from Engine+%#lx  x%ld"
+                     " (%ld main) total %ld us worst %ld us\r\n", what,
+                     (unsigned long)table.rva[i], table.calls[i],
+                     table.main[i], table.us[i], table.worstUs[i]);
+    }
+    if (table.lost)
+        tq::hdr::log("Engine trace: %ld slow %s calls had no slot left"
+                     " or no caller inside Engine.dll\r\n", table.lost, what);
+}
+
+void reportSlowLoads() {
+    reportCallers(g_loadLevelCallers, "LoadLevel");
+    reportCallers(g_guaranteedCallers, "GuaranteedGetLevel");
+    reportChains();
+}
+
 int __fastcall hookLoadLevel(void* self, void* edx, int background) {
+    const void* caller = __builtin_return_address(0);
     if (!g_loadLevel) return 0;
     const int64_t started = tq::probe::now();
     const int result = g_loadLevel(self, edx, background);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
     tq::probe::engineCount(tq::probe::CounterEngineLevelLoad);
     tq::probe::engineCount(tq::probe::CounterEngineLevelLoadUs, elapsed);
-    if (onMainThread()) {
+    const bool main = onMainThread();
+    if (main) {
         tq::probe::engineCount(tq::probe::CounterEngineLevelLoadMain);
         tq::probe::engineCount(tq::probe::CounterEngineLevelLoadMainUs, elapsed);
     }
+    if (elapsed >= kSlowLoadUs) {
+        recordSlowCall(g_loadLevelCallers, caller, elapsed, main);
+        // From a local in this frame, so the walk starts below the return
+        // address the game pushed and the first hit should be `caller` --
+        // which is the scan's own cross-check against the table above.
+        captureChain(&result, elapsed);
+    }
     return result;
+}
+
+// [performance] async_level_load. Reached only from the two AddElementsInBox
+// call sites, which patchCall retargeted: Region::LoadLevel itself is
+// untouched, so its other thirty-six callers are exactly as they were and
+// there is no recursion to worry about.
+//
+// Same ABI as Region::LoadLevel -- __thiscall(bool) is GCC __fastcall with a
+// dead edx, one stack argument, callee-pop -- which is the LoadLevelFn typedef
+// the trace already uses.
+//
+// `self` needs no null check: the call site's own `test edi,edi / jz` two
+// instructions earlier is what guarantees it, and reading `self + 0x50` is
+// what the engine does unconditionally in the first instruction of both
+// functions. The return value needs no thought either -- the caller branches
+// on `[self+0x74]`, not on EAX. See kForceLoadDeferredBytes.
+int deferLoad(void* self, void* edx, int background,
+              tq::probe::Counter deferred, tq::probe::Counter fellThrough) {
+    if (!g_regionLoadLevel) return 0;
+    // Resident already, or nothing to defer to: BackgroundLoadLevel answers
+    // the resident case by returning without setting [0x74], which would
+    // leave the renderer drawing an unloaded region. The original answers it
+    // out of its own first three instructions, so this costs nothing.
+    if (!g_backgroundLoadLevel
+        || *(void* const*)((BYTE*)self + kRegionLevelOffset) != nullptr) {
+        tq::probe::engineCount(fellThrough);
+        return g_regionLoadLevel(self, edx, background);
+    }
+    // The flag is forwarded rather than hardcoded. Both sites push 0 today --
+    // it is in the byte tables -- so the two are the same call; forwarding is
+    // what keeps that a fact about the sites rather than an assumption baked
+    // in here. The second bool is never read: the function stores only the
+    // first into the work item it queues.
+    //
+    // No in-flight check is needed. BackgroundLoadLevel guards its own
+    // re-entry on [0x74] and [0x75] before it queues anything.
+    g_backgroundLoadLevel(self, edx, background, 0);
+    tq::probe::engineCount(deferred);
+    return 1;
+}
+
+// One thunk per site, so each gets its own pair of columns. They are three
+// instructions each; what they exist for is to name which site deferred.
+int __fastcall hookAddElementsLoadLevel(void* self, void* edx, int background) {
+    return deferLoad(self, edx, background, tq::probe::CounterEngineAsyncLoad,
+                     tq::probe::CounterEngineAsyncSync);
+}
+
+int __fastcall hookPortalLoadLevel(void* self, void* edx, int background) {
+    return deferLoad(self, edx, background,
+                     tq::probe::CounterEnginePortalAsyncLoad,
+                     tq::probe::CounterEnginePortalAsyncSync);
+}
+
+// The same question as hookLoadLevel, one level up. Seventeen call sites in
+// Engine.dll reach this function and only some of them are rendering -- the
+// rest place entities and build paths -- so which one produced the 402 ms
+// decides whether Stage 5.1 can be pointed here at all.
+//
+// This times but does not count: every call it makes reaches Region::LoadLevel
+// unconditionally, so engine_level_load already counts the population and a
+// CSV column would only restate it.
+void* __fastcall hookGuaranteedGetLevel(void* self, void* edx, int flag) {
+    const void* caller = __builtin_return_address(0);
+    if (!g_guaranteedGetLevel) return nullptr;
+    const int64_t started = tq::probe::now();
+    void* const level = g_guaranteedGetLevel(self, edx, flag);
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    if (elapsed >= kSlowLoadUs)
+        recordSlowCall(g_guaranteedCallers, caller, elapsed, onMainThread());
+    return level;
 }
 
 void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
@@ -931,7 +1592,10 @@ void __fastcall hookEngineRender(void* self, void* edx) {
     // set at DLL_PROCESS_DETACH, so only probe::flushOnExit runs and nothing
     // in this file's teardown is ever reached. Roughly every thirty seconds,
     // so the last snapshot covers almost the whole session.
-    if (++g_renderTicks % 1800 == 0) reportMessages();
+    if (++g_renderTicks % 1800 == 0) {
+        reportMessages();
+        reportSlowLoads();
+    }
     const int64_t started = tq::probe::now();
     g_engineRender(self, edx);
     tq::probe::engineCount(tq::probe::CounterEngineRender);
@@ -1334,6 +1998,15 @@ bool installLoads(HMODULE engine) {
                            (void**)&g_loadLevel);
     note("Region::LoadLevel", g_loadLevel != nullptr);
 
+    target = resolve(engine, kGuaranteedGetLevelName, kGuaranteedGetLevelRva);
+    if (target)
+        tq::detour::attach(
+            g_guaranteedDetour, engine, target,
+            signature(kGuaranteedGetLevelBytes, sizeof(kGuaranteedGetLevelBytes)),
+            6, (const void*)&hookGuaranteedGetLevel,
+            (void**)&g_guaranteedGetLevel);
+    note("Region::GuaranteedGetLevel", g_guaranteedGetLevel != nullptr);
+
     target = resolve(engine, kLoadResourceName, kLoadResourceRva);
     if (target)
         tq::detour::attach(
@@ -1545,6 +2218,27 @@ bool auditedImage(HMODULE module, DWORD expectedSize, const char* what) {
     tq::hdr::log("Engine trace: %s is not the audited build, nothing"
                  " installed from it\r\n", what);
     return false;
+}
+
+// A module the stack scan will name frames in. Admitted only if it is the
+// audited build -- an RVA into an unrecognised binary would be a number
+// without a meaning, and this file's whole discipline is that RVAs mean
+// something. A module that is absent or unaudited is skipped, and the scan
+// keeps working with the ones that are there.
+void addChainModule(HMODULE module, DWORD expectedSize, char tag,
+                    const char* what) {
+    if (g_chainModuleCount >= kChainModules || !module) return;
+    if (!auditedImage(module, expectedSize, what)) return;
+    BYTE* text = nullptr;
+    SIZE_T size = 0;
+    if (!tq::detour::moduleText(module, &text, &size)) return;
+    ChainModule& entry = g_chainModules[g_chainModuleCount++];
+    entry.tag = tag;
+    entry.base = (const BYTE*)module;
+    entry.text = text;
+    entry.textSize = size;
+    tq::hdr::log("Engine trace: chain scan covers %c = %s, .text %p+%#lx\r\n",
+                 tag, what, (void*)text, (unsigned long)size);
 }
 
 bool installGame() {
@@ -1770,6 +2464,90 @@ bool installFrame(HMODULE engine) {
     return true;
 }
 
+// [performance] async_level_load. The three windows the thunk's correctness
+// rests on, over and above the two call-site windows patchCall checks itself.
+//
+// Nothing here establishes identity -- BackgroundLoadLevel is exported and
+// resolve() has already asserted its name and its RVA. What these check is
+// behaviour, because the thunk is built around three specific things this
+// function does: it returns without doing anything when the level is resident
+// and the flag is false, it guards its own re-entry, and it raises the byte
+// the renderer tests. A build where any of those changed needs a different
+// thunk, not this one.
+bool backgroundLoadVerified(HMODULE engine) {
+    struct Window {
+        const char* what;
+        DWORD rva;
+        const BYTE* bytes;
+        SIZE_T size;
+    };
+    const Window windows[] = {
+        {"entry", kBackgroundLoadLevelRva, kBackgroundEntryBytes,
+         sizeof(kBackgroundEntryBytes)},
+        {"loading flags", kBackgroundFlagsRva, kBackgroundFlagsBytes,
+         sizeof(kBackgroundFlagsBytes)},
+        {"epilogue", kBackgroundTailRva, kBackgroundTailBytes,
+         sizeof(kBackgroundTailBytes)},
+    };
+    for (unsigned i = 0; i < sizeof(windows) / sizeof(*windows); ++i) {
+        const Window& w = windows[i];
+        if (tq::detour::matches(engine, (BYTE*)engine + w.rva,
+                                signature(w.bytes, w.size)))
+            continue;
+        tq::hdr::log("Async level load: Region::BackgroundLoadLevel's %s window"
+                     " at %p does not match -- leaving the load synchronous\r\n",
+                     w.what, (void*)((BYTE*)engine + w.rva));
+        return false;
+    }
+    return true;
+}
+
+// Retargets the two forced loads at the thunk. Nothing is written until both
+// the asynchronous entry point and the original resolve and every window
+// matches, and a refusal anywhere leaves the game byte-identical to
+// async_level_load=0, which is the default.
+//
+// Ordering: this reads no import slot and patches no function entry, so it is
+// independent of every group above it. It does depend on Region::LoadLevel
+// still being the call sites' destination -- which is true whether or not the
+// loads group detoured it, because a detour rewrites the function's entry and
+// not the displacements that reach it.
+bool installAsyncLoad(HMODULE engine) {
+    void* background =
+        resolve(engine, kBackgroundLoadLevelName, kBackgroundLoadLevelRva);
+    void* original = resolve(engine, kLoadLevelName, kLoadLevelRva);
+    if (!background || !original || !backgroundLoadVerified(engine)) {
+        note("async level load", false);
+        return false;
+    }
+    g_backgroundLoadLevel = (BackgroundLoadLevelFn)background;
+    g_regionLoadLevel = (LoadLevelFn)original;
+
+    unsigned installed = 0;
+    for (unsigned i = 0; i < kForceLoadSiteCount; ++i) {
+        const ForceLoadSite& site = kForceLoadSites[i];
+        if (site.owner && !resolve(engine, site.owner, site.ownerRva)) continue;
+        if (tq::detour::patchCall(
+                g_forceLoadPatches[i], engine, (BYTE*)engine + site.windowRva,
+                signature(site.bytes, site.size, site.relocations,
+                          site.relocationCount),
+                site.callOffset, original, site.replacement))
+            ++installed;
+    }
+    tq::hdr::log("Async level load: %u/%u forced loads retargeted at"
+                 " Region::BackgroundLoadLevel\r\n", installed,
+                 kForceLoadSiteCount);
+    if (installed) {
+        ++g_installedHooks;
+        return true;
+    }
+    // Half a patch is not a state this can be left in, and neither is a pair
+    // of live function pointers nothing calls.
+    g_backgroundLoadLevel = nullptr;
+    g_regionLoadLevel = nullptr;
+    return false;
+}
+
 bool installWait(HMODULE engine) {
     void* target = resolve(engine, kWaitForLoadingName, kWaitForLoadingRva);
     const bool ok = target
@@ -1798,6 +2576,14 @@ void readOptions(const wchar_t* iniPath) {
         ? GetPrivateProfileIntW(L"performance", L"timer_period_ms", 0, iniPath)
         : 0;
     g_timerPeriodMs = period > 0 && period <= 1000 ? (unsigned)period : 0u;
+    // Makes the two renderer-forced level loads asynchronous. The same kind
+    // of key as timer_period_ms and archive_cache_mb -- a game-behaviour
+    // change under [performance], defaulting to leaving the game alone -- but
+    // like archive_cache_mb and unlike timer_period_ms it is a fix rather
+    // than an experiment, so install() lets it in without the trace.
+    g_asyncLevelLoad = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance", L"async_level_load", 0,
+                                 iniPath) != 0;
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -1806,20 +2592,35 @@ void readOptions(const wchar_t* iniPath) {
 
 bool install(HMODULE engine) {
     if (!engine) return false;
-    // Two gates, and the cache opens neither of them: the trace still needs
-    // the probe on and a non-zero mask, and stays byte-identical to a build
-    // without this file otherwise. What archive_cache_mb adds is a third way
-    // in that installs exactly one hook and no instrumentation -- because it
-    // is a game-behaviour change and has to work on a boot with the probe off.
+    // Two gates, and neither the cache nor the asynchronous load opens them:
+    // the trace still needs the probe on and a non-zero mask, and stays
+    // byte-identical to a build without this file otherwise. What
+    // archive_cache_mb and async_level_load add are third and fourth ways in
+    // that install their own hooks and no instrumentation -- because they are
+    // game-behaviour changes and have to work on a boot with the probe off.
+    // wants() below refuses every trace group when g_tracing is false, so
+    // neither of them brings the instrument along.
     const bool cache = tq::arccache::configured();
+    const bool async = g_asyncLevelLoad;
     decideTracing();
-    if (!g_tracing && !cache) return false;
+    if (!g_tracing && !cache && !async) return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
     if (!auditedImage(engine, kEngineImageSize, "Engine.dll")) {
         InterlockedExchange(&g_installed, 0);
         return false;
     }
+
+    // The base every recorded caller is reported as an RVA against, and the
+    // .text bounds the stack scan filters on. Cached here so neither costs a
+    // VirtualQuery per event.
+    g_engineBase = (const BYTE*)engine;
+    g_chainModuleCount = 0;
+    addChainModule(engine, kEngineImageSize, 'E', "Engine.dll");
+    addChainModule(GetModuleHandleW(L"Game.dll"), kGameImageSize, 'G',
+                   "Game.dll");
+    addChainModule(GetModuleHandleW(nullptr), kExecutableImageSize, 'T',
+                   "TQ.exe");
 
     const volatile DWORD* mainThread =
         (const volatile DWORD*)((BYTE*)engine + kMainThreadIdRva);
@@ -1841,11 +2642,13 @@ bool install(HMODULE engine) {
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
+    if (async) installAsyncLoad(engine);
 
-    tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, hooks=%u, main thread"
-                 " id at %p\r\n", g_tracing ? "on" : "off", g_traceMask,
-                 cache ? "requested" : "off", g_installedHooks,
-                 (const void*)g_mainThreadId);
+    tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
+                 " hooks=%u, main thread id at %p\r\n",
+                 g_tracing ? "on" : "off", g_traceMask,
+                 cache ? "requested" : "off", async ? "requested" : "off",
+                 g_installedHooks, (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
     InterlockedExchange(&g_installed, 0);
     return false;
@@ -1853,6 +2656,7 @@ bool install(HMODULE engine) {
 
 void shutdown() {
     reportMessages();
+    reportSlowLoads();
     // Safe to run before the block hook is unpatched: stop() clears the slab
     // pointer under its own lock and only releases the pages afterwards, and
     // both lookup and store re-check it inside that lock, so a call already in
@@ -1860,7 +2664,13 @@ void shutdown() {
     // reaches this at all, which is why the cache reports during the session.)
     tq::arccache::stop();
     // Reverse of the install order, and each restore checks the site still
-    // holds what we wrote before it puts the original back.
+    // holds what we wrote before it puts the original back. The forced loads
+    // go back first because they went in last, and the two function pointers
+    // are cleared only after the sites that reach them are restored.
+    for (int i = (int)kForceLoadSiteCount - 1; i >= 0; --i)
+        tq::detour::restoreCall(g_forceLoadPatches[i]);
+    g_backgroundLoadLevel = nullptr;
+    g_regionLoadLevel = nullptr;
     tq::detour::restoreCall(g_enginesleepPatch);
     g_engineSleep = nullptr;
     tq::detour::restoreCall(g_objWaitMultiplePatch);
@@ -1927,9 +2737,13 @@ void shutdown() {
     g_unloadLevel = nullptr;
     tq::detour::detach(g_loadResourceDetour);
     g_loadResource = nullptr;
+    tq::detour::detach(g_guaranteedDetour);
+    g_guaranteedGetLevel = nullptr;
     tq::detour::detach(g_loadLevelDetour);
     g_loadLevel = nullptr;
     g_mainThreadId = nullptr;
+    g_engineBase = nullptr;
+    g_chainModuleCount = 0;
     g_installedHooks = 0;
     g_tracing = false;
     InterlockedExchange(&g_installed, 0);
@@ -1941,6 +2755,51 @@ void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
     hookEnterCriticalSection(section);
 }
 void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
+bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
+void slowLoadResetForTest(const void* base) {
+    g_engineBase = (const BYTE*)base;
+    memset(&g_loadLevelCallers, 0, sizeof(g_loadLevelCallers));
+    memset(&g_guaranteedCallers, 0, sizeof(g_guaranteedCallers));
+    memset(g_chains, 0, sizeof(g_chains));
+    g_chainsUsed = 0;
+}
+void chainTextForTest(BYTE* begin, SIZE_T size, char tag) {
+    if (!begin) { g_chainModuleCount = 0; return; }
+    if (g_chainModuleCount >= kChainModules) return;
+    ChainModule& entry = g_chainModules[g_chainModuleCount++];
+    entry.tag = tag;
+    entry.base = begin;
+    entry.text = begin;
+    entry.textSize = size;
+}
+bool precededByCallForTest(const BYTE* ret) {
+    const ChainModule* m = moduleOf(ret);
+    return m && precededByCall(ret, *m);
+}
+unsigned captureChainForTest(const void* from, unsigned* depth, char* tags) {
+    const LONG before = g_chainsUsed;
+    captureChain(from, 1234);
+    if (before < 0 || before >= (LONG)kChainSlots || !g_chains[before].ready)
+        return 0;
+    *depth = g_chains[before].depth;
+    for (unsigned i = 0; i < g_chains[before].depth; ++i)
+        tags[i] = g_chains[before].frame[i].tag;
+    return (unsigned)g_chains[before].frame[0].rva;
+}
+void slowLoadRecordForTest(const void* caller, unsigned us, bool main) {
+    recordSlowCall(g_loadLevelCallers, caller, us, main);
+}
+bool slowLoadSlotForTest(unsigned slot, unsigned long* rva, long* calls,
+                         long* main, long* us, long* worst) {
+    if (slot >= kLoadCallerSlots || !g_loadLevelCallers.rva[slot]) return false;
+    *rva = g_loadLevelCallers.rva[slot];
+    *calls = g_loadLevelCallers.calls[slot];
+    *main = g_loadLevelCallers.main[slot];
+    *us = g_loadLevelCallers.us[slot];
+    *worst = g_loadLevelCallers.worstUs[slot];
+    return true;
+}
+long slowLoadLostForTest() { return g_loadLevelCallers.lost; }
 bool wantsForTest(unsigned group) {
     decideTracing();
     return wants(group);

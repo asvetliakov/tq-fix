@@ -182,6 +182,192 @@ def check_archive_cache(engine):
            "Engine.dll+%#x is KERNEL32!%s" % (rva, want))
 
 
+def check_async_level_load(engine, lock_sites):
+    """The two retargeted call sites, against the function they are sent to.
+
+    `async_level_load` rests on one claim that no byte table states on its
+    own: the flag the renderer tests after the call is the flag
+    BackgroundLoadLevel raises. If those two offsets ever disagreed the
+    renderer would draw a region whose level had not loaded, silently. So this
+    reads both out of the operands -- the `cmp byte [edi+0x74],0` in the call
+    site and the `mov byte [ecx+0x74],1` in BackgroundLoadLevel -- and makes
+    them agree with each other and with the constant the source names.
+
+    It also re-derives each site's call destination from the displacement in
+    the table, which is the same statement as "this call goes to
+    Region::LoadLevel" and is what makes retargeting it meaningful.
+    """
+    print("\nasync_level_load: the forced loads and where they are sent")
+    sites = [(int(a, 16), int(b, 16), c) for a, b, c in re.findall(
+        r"0x([0-9a-f]{6}), 0x([0-9a-f]{6}), (kForceLoad\w+Bytes)", src)]
+    ok(len(sites) == 2, "two exported forced-load sites in kForceLoadSites")
+
+    call_off = 12
+    loadlevel = const("kLoadLevelRva")
+    lock_by_bytes = {}
+    for owner_rva, win_rva, _ in lock_sites:
+        lock_by_bytes[owner_rva] = win_rva
+
+    for owner_rva, win_rva, bytes_name in sites:
+        want = table(bytes_name)
+        window(engine, "%s@%#x" % (bytes_name, win_rva), bytes_name, win_rva,
+               None)
+
+        # the owner is a real export, and it is the renderer it claims to be
+        got = [n for n, v in engine.exports().items() if v == owner_rva]
+        ok(any(('"%s"' % n) in flat for n in got)
+           and any("AddElementsInBox" in n for n in got),
+           "forced-load owner at %#x is an AddElementsInBox named in the source"
+           % owner_rva)
+
+        # E8 at the recorded offset, and its displacement reaches LoadLevel
+        ok(want[call_off] == 0xe8,
+           "%s, offset %d, E8" % (bytes_name, call_off))
+        disp = struct.unpack_from("<i", bytes(want), call_off + 1)[0]
+        dest = win_rva + call_off + 5 + disp
+        ok(dest == loadlevel,
+           "%s call at +%d resolves to Region::LoadLevel (%#x)"
+           % (bytes_name, call_off, dest))
+
+        # test edi,edi / jz before the call: why the thunk needs no null check
+        ok(want[0:2] == [0x85, 0xff] and want[2:4] == [0x0f, 0x84],
+           "%s guards the Region* before the call (test edi,edi / jz)"
+           % bytes_name)
+
+        # cmp byte [edi+0x74],0 / ... / jnz -- the skip the deferral relies on
+        ok(want[call_off + 5:call_off + 7] == [0x80, 0x7f]
+           and want[call_off + 7] == const("kRegionLoadingOffset")
+           and want[call_off + 8] == 0x00,
+           "%s tests region+%#x after the call (cmp byte [edi+%#x],0)"
+           % (bytes_name, const("kRegionLoadingOffset"), want[call_off + 7]))
+        ok(want[-6:-4] == [0x0f, 0x85],
+           "%s skips the region when that flag is set (jnz)" % bytes_name)
+
+        # the unload countdown is cleared by a MOV, which does not touch flags,
+        # so a deferred region cannot be evicted while its load is in flight
+        ok(want[call_off + 9:call_off + 12] == [0xc7, 0x47, 0x6c],
+           "%s clears the unload countdown on the skip path too" % bytes_name)
+
+        # the window ends exactly where this renderer's region-lock window
+        # begins, which is an address cross-check on both tables at once
+        ok(lock_by_bytes.get(owner_rva) == win_rva + len(want),
+           "%s ends at %#x, where the region-lock window for the same owner"
+           " begins" % (bytes_name, win_rva + len(want)))
+
+    print("\nasync_level_load: Region::BackgroundLoadLevel's behaviour")
+    entry = table("kBackgroundEntryBytes")
+    flags = table("kBackgroundFlagsBytes")
+    tail = table("kBackgroundTailBytes")
+
+    ok(engine.exports().get(cstr("kBackgroundLoadLevelName"))
+       == const("kBackgroundLoadLevelRva"),
+       "Engine!%s" % cstr("kBackgroundLoadLevelName"))
+
+    # mov eax,[ecx+0x50] -- the field the thunk reads to decide, taken from
+    # the operand of the instruction the engine itself decides on
+    ok(entry[0:2] == [0x8b, 0x41]
+       and entry[2] == const("kRegionLevelOffset"),
+       "the level pointer is region+%#x  (mov eax,[ecx+%#x])"
+       % (const("kRegionLevelOffset"), entry[2]))
+    ok(flags[12:15] == [0x83, 0x79, const("kRegionLevelOffset")],
+       "and BackgroundLoadLevel branches on that same field  (cmp dword"
+       " [ecx+%#x],0)" % const("kRegionLevelOffset"))
+
+    # mov dl,[esp+4] / test dl,dl / jz -- the trap: resident plus a false flag
+    # returns having done nothing, which is why those calls go to the original
+    ok(entry[3:7] == [0x8a, 0x54, 0x24, 0x04],
+       "only the first bool is read  (mov dl,[esp+4])")
+    ok(entry[10:12] == [0x85, 0xc0] and entry[12] == 0x74,
+       "a non-resident region skips the flag test  (test eax,eax / jz)")
+    tail_rva = const("kBackgroundTailRva")
+    trap = const("kBackgroundLoadLevelRva") + 18 + entry[17]
+    ok(entry[14:16] == [0x84, 0xd2] and entry[16] == 0x74
+       and trap == tail_rva,
+       "a resident region with a false flag jumps straight to the epilogue at"
+       " %#x and does nothing" % trap)
+
+    # cmp byte [ecx+0x74],0 / jnz and the same for 0x75: the re-entry guard
+    # that is why the thunk needs no in-flight check of its own
+    ok(flags[0:4] == [0x80, 0x79, const("kRegionLoadingOffset"), 0x00]
+       and flags[4] == 0x75 and flags[6:10] == [0x80, 0x79, 0x75, 0x00]
+       and flags[10] == 0x75,
+       "it guards its own re-entry on region+%#x and +0x75"
+       % const("kRegionLoadingOffset"))
+
+    # mov byte [ecx+0x74],1 -- THE claim. This is the flag the call sites test.
+    ok(flags[24:28] == [0xc6, 0x41, const("kRegionLoadingOffset"), 0x01],
+       "and on the non-resident path it sets region+%#x, which is the byte"
+       " both call sites skip on" % const("kRegionLoadingOffset"))
+
+    # ret 8 -- two stack arguments, callee popped, which is the ABI the thunk
+    # calls it with
+    ok(tail[3:6] == [0xc2, 0x08, 0x00],
+       "BackgroundLoadLevel pops two stack arguments")
+
+    # --- Region::GuaranteedGetLevel, which run 29 named as the caller of the
+    # forced load. It is hooked to find *its* caller, and the checks here are
+    # about the two properties that would let Stage 5.1 be pointed at it: the
+    # call sits at the same offset as the sites already patched, and the
+    # function already answers "still loading" with NULL.
+    print("\nRegion::GuaranteedGetLevel, the site run 29 named")
+    g = table("kGuaranteedGetLevelBytes")
+    call_off = const("kGuaranteedCallOffset")
+    ok(g[0:6] == [0x56, 0x8b, 0xf1, 0x57, 0x85, 0xf6],
+       "the six stolen bytes hold no relative branch (push/mov/push/test)")
+    ok(g[6] == 0x74, "the jz at offset 6 stays in place, outside the steal")
+    ok(g[call_off] == 0xe8, "GuaranteedGetLevel, offset %d, E8" % call_off)
+    disp = struct.unpack_from("<i", bytes(g), call_off + 1)[0]
+    dest = const("kGuaranteedGetLevelRva") + call_off + 5 + disp
+    ok(dest == const("kLoadLevelRva"),
+       "its call at +%d resolves to Region::LoadLevel (%#x)" % (call_off, dest))
+    ok(call_off == 12,
+       "and it is the same call offset as the two renderer windows")
+    ok(g[call_off + 5:call_off + 9]
+       == [0x80, 0x7e, const("kRegionLoadingOffset"), 0x00],
+       "it tests region+%#x after the call, like the sites already patched"
+       % const("kRegionLoadingOffset"))
+    ok(g[call_off + 9:call_off + 12] == [0xc7, 0x46, 0x6c],
+       "and clears the unload countdown with a MOV, which does not touch flags")
+    # +5 cmp (4 bytes), +9 mov (7 bytes), so the branch is at +16
+    ok(g[call_off + 16] == 0x74
+       and g[call_off + 18:call_off + 20] == [0x33, 0xff],
+       "still loading falls through to xor edi,edi -- it already returns NULL")
+    ok(g[-3:] == [0xc2, 0x04, 0x00],
+       "GuaranteedGetLevel pops one stack argument")
+
+    # --- The portal-traversal site. Not exported, so the bytes and the
+    # relocated EnterCriticalSection slot are its whole identity -- and its
+    # call sits at offset 8, not 12, because the guard above it is the
+    # two-byte jz rather than the six-byte form the renderers use. Getting
+    # that offset wrong would rewrite four bytes in the middle of a
+    # displacement that is still live.
+    print("\nThe portal-traversal forced load (run 30's in-play event)")
+    window(engine, "kPortalLoadBytes", "kPortalLoadBytes",
+           const("kPortalLoadWindowRva"), "kPortalLoadRelocs")
+    pl = table("kPortalLoadBytes")
+    poff = const("kPortalLoadCallOffset")
+    ok(poff == 8 and pl[poff] == 0xe8, "kPortalLoadBytes, offset %d, E8" % poff)
+    pdest = const("kPortalLoadWindowRva") + poff + 5 + struct.unpack_from(
+        "<i", bytes(pl), poff + 1)[0]
+    ok(pdest == const("kLoadLevelRva"),
+       "its call at +%d resolves to Region::LoadLevel (%#x)" % (poff, pdest))
+    ok(pl[0:2] == [0x85, 0xf6] and pl[2] == 0x74,
+       "it guards the Region* with the two-byte jz that shortens the offset")
+    ok(pl[poff + 5:poff + 9]
+       == [0x80, 0x7e, const("kRegionLoadingOffset"), 0x00],
+       "it tests region+%#x after the call, like the other sites"
+       % const("kRegionLoadingOffset"))
+    ok(pl[poff + 9:poff + 12] == [0xc7, 0x46, 0x6c],
+       "and clears the unload countdown with a MOV")
+    ok(pl[poff + 16] == 0x75, "and branches away when that flag is set")
+    # Region::GetPortal's result is null-checked two instructions past the
+    # branch target. That is what makes this site safer to defer than either
+    # of the two already patched, so it is asserted rather than remembered.
+    guard = list(engine.read(engine.base + 0x117ac8, 9))
+    ok(guard[0] == 0xe8 and guard[5:7] == [0x85, 0xc0] and guard[7] == 0x74,
+       "and Region::GetPortal's result is null-checked at 0x10117acd")
+
+
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
     game = PE(os.path.join(GAME, "Game.dll"))
@@ -212,7 +398,11 @@ def main():
             ("kSweepWindowABytes", "kSweepWindowARva", None),
             ("kSweepWindowBBytes", "kSweepWindowBRva", None),
             ("kEngineUpdateBytes", "kEngineUpdateRva", "kEngineUpdateRelocs"),
-            ("kEngineRenderBytes", "kEngineRenderRva", "kEngineRenderRelocs")]:
+            ("kEngineRenderBytes", "kEngineRenderRva", "kEngineRenderRelocs"),
+            ("kGuaranteedGetLevelBytes", "kGuaranteedGetLevelRva", None),
+            ("kBackgroundEntryBytes", "kBackgroundLoadLevelRva", None),
+            ("kBackgroundFlagsBytes", "kBackgroundFlagsRva", None),
+            ("kBackgroundTailBytes", "kBackgroundTailRva", None)]:
         window(engine, label, label, const(rva), rel)
 
     # the three region-lock windows share two byte tables, so their addresses
@@ -237,6 +427,10 @@ def main():
             (engine, "Engine", "kEnqueueName", "kEnqueueRva"),
             (engine, "Engine", "kReadFromFileName", "kReadFromFileRva"),
             (engine, "Engine", "kWaitForLoadingName", "kWaitForLoadingRva"),
+            (engine, "Engine", "kBackgroundLoadLevelName",
+             "kBackgroundLoadLevelRva"),
+            (engine, "Engine", "kGuaranteedGetLevelName",
+             "kGuaranteedGetLevelRva"),
             (engine, "Engine", "kEngineUpdateName", "kEngineUpdateRva"),
             (engine, "Engine", "kEngineRenderName", "kEngineRenderRva"),
             (engine, "Engine", "kSweepTargetName", "kSweepTargetRva"),
@@ -265,6 +459,7 @@ def main():
     ok(inflate[20] == 0xe8, "archive inflate window, offset 20, E8")
 
     check_archive_cache(engine)
+    check_async_level_load(engine, sites)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}

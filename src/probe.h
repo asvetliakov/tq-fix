@@ -441,6 +441,29 @@ enum Counter {
     CounterEngineSleepMain,
     CounterEngineSleepMainUs,
     CounterEngineSleepMainReqUs,
+
+    // [performance] async_level_load, which is a fix rather than an
+    // instrument: the two AddElementsInBox call sites that force a
+    // synchronous Region::LoadLevel are retargeted at
+    // Region::BackgroundLoadLevel instead. Neither column is timed, because
+    // there is nothing left to time -- the point of the change is that the
+    // call returns without doing the work.
+    //
+    // `engine_async_load` is a region handed to the loader thread and skipped
+    // for this frame; `engine_async_sync` is one that fell through to the
+    // original because the level was already resident, which
+    // BackgroundLoadLevel answers by doing nothing at all. The two together
+    // are the whole population of the retargeted sites, so a run with the
+    // switch on and both columns zero means the patch is not in.
+    CounterEngineAsyncLoad,
+    CounterEngineAsyncSync,
+    // The portal-traversal site keeps its own pair, because it is the one that
+    // matters: runs 27-32 established that the two renderer sites never defer
+    // anything (2,849 calls, 2,849 already resident), while this one is the
+    // only synchronous level load that happens during play rather than on a
+    // level change. Sharing a column with them would hide exactly that.
+    CounterEnginePortalAsyncLoad,
+    CounterEnginePortalAsyncSync,
     CounterCount
 };
 

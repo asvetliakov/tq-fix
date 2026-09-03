@@ -2328,6 +2328,820 @@ It does nothing for frames 3168 or 6914.
 | no-load render hitch (3168) | ~790 ms | needs its own instrument; 193 ms of texture creation and 50 ms of main-thread lock contention are the only footholds |
 | pump (6914) | -- | closed, §17. Host question. |
 
+## 26. Stage 5.1 built: what re-verification added to the record
+
+Everything §25 and the handoff recorded about the two call sites and
+`Region::BackgroundLoadLevel` was re-read against the pinned `Engine.dll`
+(SHA-256 `0aedbb18...f694f6`) before a byte was written, and all of it held.
+Three things turned up that were *not* in the record, and two of them are
+load-bearing.
+
+### The renderer's skip test and the asynchronous path use the same byte
+
+This is the claim the whole change rests on, and neither document stated it as
+one thing. The call site ends:
+
+```
+  80 7f 74 00            cmp byte [edi+0x74],0
+  c7 47 6c 00 00 00 00   mov dword [edi+0x6c],0
+  0f 85 <rel32>          jnz the epilogue
+```
+
+and `BackgroundLoadLevel`, on the `[0x50] == 0` path -- the only path the
+thunk routes to it -- ends:
+
+```
+1020be87  83 79 50 00    cmp dword [ecx+0x50],0
+1020be8b  74 06          jz  0x1020be93
+1020be93  c6 41 74 01    mov byte [ecx+0x74],1
+```
+
+`0x74` in both. **Deferring is not something bolted onto these call sites;
+they were already written to skip a region that is still loading, and the flag
+they read is the flag the asynchronous path raises.** If those two offsets
+ever disagreed the renderer would draw a region whose level had not loaded,
+silently, so `verify-sites.py` now reads both out of the operands and asserts
+they agree.
+
+Note also that the branch at `1020be8b` is *always taken* on the thunk's path,
+so it is `[0x74]` and not `[0x75]` that gets set. Had the thunk routed the
+resident case here it would have set `[0x75]`, which the call sites do not
+test -- another way of saying the `region[0x50]` test is required rather than
+defensive.
+
+### The two windows are adjacent to the region-lock windows, exactly
+
+The forced-load window is thirty-four bytes, not the thirty the handoff
+recorded -- the handoff's count stopped before the trailing `JNZ`'s
+displacement. And:
+
+```
+  0x167847 + 34 == 0x167869      the kLockSites window for the same owner
+  0x17d8b7 + 34 == 0x17d8d9      likewise
+```
+
+Each table ends exactly where the other begins. That is an address cross-check
+on both groups at once, it is free, and `verify-sites.py` now makes it.
+
+### BackgroundLoadLevel is live code, and the game itself pairs it with LoadLevel
+
+A full `.text` scan finds **zero** callers of `?BackgroundLoadLevel@Region@
+GAME@@QAEX_N0@Z` inside `Engine.dll`, which on its own would be worrying. It
+is called from `Game.dll`, once, and the site is the best evidence in the
+project that the two functions are interchangeable:
+
+```
+101732a9  80 7c 24 40 00    cmp byte [esp+0x40],0
+101732ae  8b 0e             mov ecx,[esi]
+101732b0  8b 09             mov ecx,[ecx]
+101732b2  74 0c             jz  0x101732c0
+101732b4  6a 00             push 0
+101732b6  6a 01             push 1
+101732b8  ff 15 ..          call [BackgroundLoadLevel]
+101732be  eb 08             jmp past
+101732c0  6a 01             push 1
+101732c2  ff 15 ..          call [LoadLevel]
+```
+
+`EndlessModeManager::ChangeArena` chooses between them at runtime, ten bytes
+apart, on a flag. So the asynchronous path is shipped code the game runs, not
+a vestige -- and the engine's own `Region::Update` sets the same `[0x74]` and
+`[0x75]` pair in the same shape at `+0x372`, `+0x3d9` and `+0x777`. Nothing
+about the deferred state is new to the engine.
+
+The one thing this site does *not* settle is the flag: the game passes `true`
+there, both call sites pass `false`. On the thunk's path the flag never
+reaches a branch inside `BackgroundLoadLevel` -- the `jz` at `1020be6c` skips
+the test -- but it *is* stored into the queued work item at `[esp+8]`, so it
+is forwarded rather than hardcoded. Both sites push `0` today; forwarding is
+what keeps that a fact about the sites rather than an assumption in the thunk.
+
+### And one that only narrows the claim
+
+`GraphicsSceneRenderer::AddElementsInBox`, the third of the three
+`AddElementsInBox` overrides, does not call `Region::LoadLevel` at all. Of the
+thirty-eight `E8` sites in `Engine.dll` that reach it, exactly the two the
+handoff named are inside a renderer. There is no third site to miss.
+
+### What is now machine-checked
+
+`verify-sites.py` grew a section: both call-site windows byte for byte at
+their RVAs, each site's owner resolving to an `AddElementsInBox` export named
+in the source, `E8` at offset 12 with its displacement re-derived and required
+to land on `Region::LoadLevel`, the adjacency above, and six assertions about
+`BackgroundLoadLevel`'s behaviour rather than its identity -- the trap, the
+re-entry guard, the flag store, and the `RET 8` that is the ABI the thunk
+calls with. 120 checks pass; perturbing `kRegionLoadingOffset`,
+`kRegionLevelOffset`, `kForceLoadCallOffset`, `kBackgroundLoadLevelRva`, a
+call displacement, an owner RVA, or the count of sites each fails it.
+
+**Still unmeasured, and only a run can settle it:** whether the deferred load
+actually completes promptly, and how visible the pop-in is. `RegionLoader`
+exports `Update`, `GetIsDone` and `GetAreLevelsLoaded`, so there is a service
+loop; that it drains fast enough on this host is what runs 27 and 28 are for.
+
+## 27. Runs 27 and 28: Stage 5.1 works, and it is aimed at the wrong call sites
+
+The pair was run as designed: run 27 with `async_level_load=0`, run 28 with
+`=1`, same DLL, same route, only the switch between them.
+
+### Run 27 did its job
+
+The build changed nothing. Frame 1943 is a near-exact replay of run 26's 1911:
+
+| | run 26 f1911 | run 27 f1943 |
+| --- | ---: | ---: |
+| frame | 1,376.9 ms | 1,381.0 ms |
+| `Region::LoadLevel` main | 512.6 ms | 514.9 ms |
+| main-thread `Sleep` | 434.9 ms / 350 | 434.5 ms / 350 |
+| `arc_open` | 1,299 | 1,299 |
+
+p50 identical at 9.1 ms, both async columns zero session-wide. A good baseline,
+and worth the boot for what it lets run 28 be compared against.
+
+### Run 28 installed, ran, and deferred nothing at all
+
+```
+Async level load: 2/2 forced loads retargeted at Region::BackgroundLoadLevel
+Engine trace: on, mask=0x1, cache off, async load requested, hooks=19
+```
+
+| | run 28 |
+| --- | ---: |
+| `engine_async_sync` (fell through, level resident) | **2,849** |
+| `engine_async_load` (deferred) | **0** |
+| frames the thunk was reached on | 1,284 |
+
+**Not one region was ever deferred.** Every one of 2,849 calls through the two
+`AddElementsInBox` sites found `region[0x50]` non-null -- the level already
+resident -- and went to the original, which answers that case out of its own
+first four instructions. The reporter noticed no pop-in, and that is not
+evidence the trade is cheap: there was no trade, because nothing was deferred.
+
+### And on the freeze frame the thunk was not called at all
+
+This is the finding.
+
+```
+frame 1818, 1,534.3 ms          the zone-transition class
+  engine_render                 1,528.6 ms
+    |- Region::LoadLevel main     513.9 ms   in FIVE calls
+    |- main-thread Sleep          434.7 ms   350 calls
+    |- archive inflate            271.2 ms
+    |- arc_open                     1,299
+    |- engine_async_load                0
+    +- engine_async_sync                0    <-- the thunk never ran
+```
+
+Five `Region::LoadLevel` calls cost 513.9 ms on that frame, and **none of them
+came through either patched call site**. Across the whole session those five
+calls are **99.7% of all main-thread level-load time** (515 ms of 515 ms; only
+one frame in 6,881 has more than a millisecond of it).
+
+So the premise Stage 5.1 was built on is wrong. "The renderer forces a
+synchronous level load" is true; "it does so from `AddElementsInBox`" was never
+measured. It was inferred from two facts that are both true and do not combine:
+the load happens inside `Engine::Render`, and `AddElementsInBox` contains a
+`Region::LoadLevel` call. `Engine::Render` reaches `Region::LoadLevel` by some
+other route, and the `AddElementsInBox` sites are a cheap already-resident
+check 2,849 times out of 2,849.
+
+`Region::LoadLevel` and `Region::BackgroundLoadLevel` are structurally the same
+function in this respect -- both bail immediately on `[0x50] != 0` with a false
+flag -- which is why the thunk's fall-through was correct and why it cost
+nothing. It was correct and it was pointed at nothing.
+
+### What that leaves
+
+**The mechanism is proven and the aim is not.** The thunk, the byte
+verification, the switch, the counters and the two-run protocol all worked, and
+the change is provably inert at both settings. What is missing is one fact
+nobody has ever measured: **which of the thirty-eight `Region::LoadLevel` call
+sites produces those five calls.**
+
+That is cheap to get. `hookLoadLevel` is a trampoline detour, so its own return
+address is the caller's; recording it when a call exceeds a millisecond costs
+one comparison per call and produces about five log lines a session. Candidates
+worth naming in advance, from the same `.text` scan:
+
+- `?GuaranteedGetLevel@Region@GAME@@QBEPAVLevel@2@_N@Z+0xc` (`0x1020e7bc`) --
+  the name is "get the level, loading it if it is not there"
+- `?AddToScene@Region@GAME@@QAEXAAVGraphicsSceneRenderer@2@...+0x17`
+  (`0x1020e707`) -- also a renderer path
+- `?Update@Region@GAME@@QAEXPAV12@...+0x39c` (`0x1020aebc`)
+
+Guessing between them is what produced this section. The next boot should
+measure it.
+
+**`async_level_load` stays in, defaulting off.** It is verified, inert, and it
+becomes the fix the moment the right call site is known -- the thunk does not
+change, only `kForceLoadSites`.
+
+## 28. Run 29: the forced load comes from Region::GuaranteedGetLevel
+
+One line answers it:
+
+```
+Engine trace: slow LoadLevel from Engine+0x20e7c1  x2 (2 main) total 515481 us worst 402394 us
+```
+
+`0x20e7c1` is a return address, so the call is at **`0x1020e7bc`** --
+`?GuaranteedGetLevel@Region@GAME@@QBEPAVLevel@2@_N@Z` (`0x20e7b0`) **+0xc**.
+Two calls, both on the main thread, 515.5 ms between them, the worse of the
+two **402.4 ms** on its own. Nothing else in the session crossed a
+millisecond, and the total matches run 28's session figure to within 2 ms.
+
+Both landed on one frame, and the brackets say what kind of frame it was:
+
+```
+frame 1703, 1,540.7 ms          the ZONE-TRANSITION class
+  engine_render                 1,535.2 ms
+    |- Region::LoadLevel main     515.5 ms   two calls
+    |- main-thread Sleep          434.9 ms   350 calls
+    |- archive inflate            266.0 ms
+    |- arc_open                     1,299
+  engine_update                     0.0 ms
+  game_update                       0.0 ms   <- no simulation on this frame
+```
+
+So the chain is `Engine::Render` -> ... -> `Region::GuaranteedGetLevel` ->
+`Region::LoadLevel`, and the 350 `Sleep(1)` calls are inside that.
+
+### The call site is the same shape as the two already patched
+
+```
+1020e7b0  56              push esi
+1020e7b1  8b f1           mov esi,ecx
+1020e7b3  57              push edi
+1020e7b4  85 f6           test esi,esi
+1020e7b6  74 42           jz  the null return
+1020e7b8  ff 74 24 0c     push [esp+0xc]          the bool argument
+1020e7bc  e8 ff d6 ff ff  call Region::LoadLevel        <- offset 12
+1020e7c1  80 7e 74 00     cmp byte [esi+0x74],0         the loading flag
+1020e7c5  c7 46 6c 00..   mov dword [esi+0x6c],0        unload countdown
+1020e7cc  74 09           jz  0x1020e7d7                loaded -> go on
+1020e7ce  33 ff           xor edi,edi                   still loading -> NULL
+1020e7d0  8b c7           mov eax,edi
+1020e7d4  c2 04 00        ret 4
+```
+
+`test reg,reg / jz`, `push <flag>`, `call` at **offset 12**, `cmp byte
+[reg+0x74],0`, `mov dword [reg+0x6c],0`, branch on the flag. That is the
+`kForceLoadSites` shape exactly, down to the call offset -- so the thunk, the
+verification and the switch all work here unchanged, and pointing Stage 5.1 at
+it is an entry in that table and nothing else.
+
+**And despite the name, it already returns NULL when the region is loading.**
+`[0x74]` set means "still loading", and the function answers that with
+`xor edi,edi`. The deferral does not invent a state; it uses one the function
+already has -- the same argument that made the `AddElementsInBox` sites safe.
+
+### But the callers are not all rendering, and that is the new risk
+
+Seventeen call sites in `Engine.dll`, none in `Game.dll` or `TQ.exe`:
+
+| caller | what deferring would mean |
+| --- | --- |
+| `Portal::GetBackToFrontCoords+0x2b`, `GetFrontToBackCoords+0x2b`, `GetConnectedPortal+0x18` | rendering. A pop-in trade. |
+| `World::GuaranteedGetRegionLevel+0x1e` | depends on *its* callers |
+| `World::SetCoords` (x2), `WorldVec3::PutOnFloor`, `TranslateToFloor`, `TranslateUsingBoxToFloor`, `Region::AddEntity` | **entity placement.** A NULL level here is a gameplay question, not a visual one. |
+| seven inside the path-mesh code | pathfinding |
+
+On the `AddElementsInBox` sites the deferral could only ever cost a frame of
+drawing. Here it reaches code that positions entities and builds paths, and
+`GuaranteedGetLevel` is called from all seventeen through one body -- there is
+no way to defer for the renderer and not for the rest by patching that call.
+
+**So the next fact needed is which of the seventeen produced those two calls.**
+`Engine::Update` and `GameEngine::Update` both read zero on frame 1703, which
+points hard at the three `Portal` sites and away from placement and
+pathfinding -- but "points hard at" is the reasoning that produced §27, and it
+is measurable by exactly the trick that produced this section.
+
+`Region::GuaranteedGetLevel` is exported, and its first six bytes
+(`56 8b f1 57 85 f6`) contain no relative branch, so it takes an ordinary
+trampoline detour and its return address is its caller's. One more boot names
+the caller; if it is the portal renderer, Stage 5.1 becomes a one-entry change
+and the trade is pop-in again.
+
+## 29. Run 30: the caller is TranslateToFloor, and the chain keeps going
+
+```
+Engine trace: slow GuaranteedGetLevel from Engine+0x27faf4  x1 (1 main) total 403549 us worst 403549 us
+Engine trace: slow GuaranteedGetLevel from Engine+0x275323  x1 (1 main) total 120138 us worst 120138 us
+```
+
+Minus five for the call instruction, and both land well inside their exports
+with the next export starting after them:
+
+| call | function | cost |
+| --- | --- | ---: |
+| `0x1027faef` | `?TranslateToFloor@WorldVec3@GAME@@QAE_NABVVec3@2@@Z` **+0x5f** | **403.5 ms** |
+| `0x1027531e` | `?GuaranteedGetRegionLevel@World@GAME@@QBEPAVLevel@2@H@Z` **+0x1e** | 120.1 ms |
+
+Both on frame 5312 -- 1,666.3 ms, `engine_render` 1,659.9 ms, `engine_update`
+and `game_update` both **zero**. So the whole chain runs inside
+`Engine::Render` on a frame with no simulation at all, and it is:
+
+```
+Engine::Render -> ? -> WorldVec3::TranslateToFloor
+                        -> Region::GuaranteedGetLevel -> Region::LoadLevel
+```
+
+This session was longer than 27-29 (11,055 frames, 134 s) and caught a third
+event the others missed: `slow LoadLevel from Engine+0x117a99`, 105.7 ms, on
+frame 7085 -- which is an `Engine::Update` frame (108.1 ms update, 3.0 ms
+render), not the zone-transition class. A fourth freeze class, an order of
+magnitude smaller, worth naming only so it is not confused with 1911/1943/1703/5312.
+
+### Why this does not finish the job
+
+`TranslateToFloor` has seven direct callers in `Engine.dll`, and is imported by
+`Game.dll` and `TQ.exe` besides:
+
+| caller | kind |
+| --- | --- |
+| `RenderGroupManager::InitialUpdate+0x3e` | **rendering** |
+| `World::PlaceDecalOnGround+0x38` | **rendering-adjacent** |
+| `PathPE::SetCurrentSegment+0x680` | pathfinding |
+| four sites in the path-mesh code | pathfinding |
+| `Game.dll`, `TQ.exe` via import | unknown |
+
+And `World::GuaranteedGetRegionLevel` has **zero** direct `E8` callers in
+`Engine.dll` -- it is reached through `TQ.exe`'s import table.
+
+So patching the `TranslateToFloor -> GuaranteedGetLevel` call at `0x1027faef`
+would defer for pathfinding too, which is the same objection §28 raised one
+level down. **Every level up multiplies the call sites rather than narrowing
+them**, and two of the seven being rendering is a lead, not an answer.
+
+The lead is a good one: a zone transition inside `Engine::Render` with no
+simulation running fits `RenderGroupManager::InitialUpdate` -- a render group
+being set up for a region for the first time -- and fits pathfinding badly.
+But that is the third time this project has had a good-looking inference about
+this call chain, and §27 is what the first two were worth.
+
+### The technique has to change, not the target
+
+Hooking one function per boot resolves one link per boot, and the chain is at
+least four deep. What answers it in one is a **bounded stack scan at the slow
+call**: from the hook's frame, walk a few hundred dwords upward, keep every
+value that lands inside `Engine.dll`'s `.text` *and* is preceded by a call
+instruction -- `E8 rel32` five bytes back, or `FF 15` six back -- and log the
+first several in order.
+
+The game's code does not keep frame pointers (`GuaranteedGetLevel` opens
+`push esi; mov esi,ecx; push edi`), so a proper frame walk is not available;
+the call-preceded filter is what makes the scan trustworthy instead. Stale
+slots can survive on the stack, so the output is a superset -- but the true
+chain appears in it as a subsequence in increasing stack-address order, and
+three events a session makes it readable by eye.
+
+Read-only, bounded, and it runs only on calls already costing a millisecond.
+
+## 30. Run 31: the stack scan works, and the chain leaves Engine.dll
+
+Two chains, both on frame 1542 (1,507.4 ms, `engine_render` 1,501.5 ms,
+`engine_update` and `game_update` zero), 20 and 21 frames each and sharing a
+tail. Reading the raw RVAs against the export table is nearly useless in a
+stripped binary; **decoding the call instruction in front of each return
+address and naming its target** is what made them readable, and that is the
+technique note worth keeping:
+
+```
+  +0x27faf4   E8 -> Region::GuaranteedGetLevel        TranslateToFloor+0x64
+  +0x20e7c1   E8 -> Region::LoadLevel                 GuaranteedGetLevel+0x11
+  +0x275323   E8 -> Region::GuaranteedGetLevel        GuaranteedGetRegionLevel+0x23
+  ...
+  +0x144027   E8 -> Display::Update                   Engine::Render+0x47
+```
+
+### What is established
+
+- `Engine::Render+0x47` calls `Display::Update`. A verified edge, and the top
+  of the chain.
+- `TranslateToFloor+0x64` and `GuaranteedGetRegionLevel+0x23` both call
+  `GuaranteedGetLevel`, which calls `LoadLevel`. The bottom, confirming runs
+  29 and 30 from a second direction.
+
+### What is stale, and how the scan says so itself
+
+The group `+0x11f3a7 +0x1447ad +0x1447cd` -- `LeaveCriticalSection`, then two
+call sites inside `Engine::Update` -- **appears twice in each chain**, and
+`engine_update_us` reads **zero** on that frame. Those are leftovers from an
+earlier frame's `Engine::Update` at the same stack depth. A repeated group is
+the tell, and the per-frame columns are the arbiter. The superset warning in
+§29 was not theoretical.
+
+### Why it does not close, and this is the useful part
+
+**Nothing in either chain calls `TranslateToFloor`.** No entry's decoded edge
+targets `0x27fa90`. The scan bridged `Engine::Render` to `Display::Update` and
+`TranslateToFloor` to `LoadLevel`, and found nothing between them -- because
+the chain leaves the module:
+
+| | imports `TranslateToFloor` | imports `GuaranteedGetRegionLevel` |
+| --- | --- | --- |
+| `Game.dll` | yes (also `PutOnFloor`, `PlaceDecalOnGround`) | -- |
+| `TQ.exe` | yes (also `PutOnFloor`) | **yes** |
+
+Both slow call sites are functions that `TQ.exe` and `Game.dll` import
+directly, so their immediate callers are in those modules -- and the filter
+keeps only addresses inside `Engine.dll`'s `.text`. Every frame between
+`Display::Update` and `TranslateToFloor` was dropped by construction.
+
+`TQ.exe` also imports `?Update@DisplayWidget@GAME@@UAEXXZ`, which fits the
+`FF10 call [reg]` at `Display::Update+0x22`: a widget list dispatched
+virtually, with the widget implemented in `TQ.exe`.
+
+### The fix is one adjustment, not a new technique
+
+Accept `Game.dll` and `TQ.exe` `.text` alongside `Engine.dll`'s, and label
+each entry with the module it came from. The `E8` filter already re-derives
+its destination, so it stays as strong; the indirect forms stay as they are.
+`auditedImage` already knows both other modules' `SizeOfImage`, so nothing new
+has to be trusted.
+
+That is the same boot again with a wider filter, and on the evidence above it
+should close the gap in one.
+
+## 31. Run 32 closes the chain, and the zone-transition freeze is a level load
+
+All three modules admitted, both chains 32 frames, and the gap filled:
+
+```
+ 0  E+0x27faf4  TranslateToFloor+0x64            E8   -> Region::GuaranteedGetLevel
+ 1  E+0x20e7c1  GuaranteedGetLevel+0x11          E8   -> Region::LoadLevel
+ 4  T+0x46411   TQ.exe sub_45437+0xfda           FF15 -> Engine!TranslateToFloor
+...
+28  E+0x144027  Engine::Render+0x47              E8   -> Display::Update
+29  T+0x4eeac   TQ.exe                           FF15 -> Engine!Engine::Render
+```
+
+and chain 0's differing frame is `T+0x463bf`, `FF15 -> Engine!World::
+GuaranteedGetRegionLevel`, in **the same TQ.exe function** -- `sub_45437`,
+`+0xf88` and `+0xfda`, eighty-two bytes apart.
+
+### What that function is
+
+It is not a renderer and it is not pathfinding. Its imports name it outright:
+
+```
++0x12c   Engine::InitializeMod          +0x601   World::Load
++0x15b   GameEngine::Reload             +0x646   SoundManager::EnableDistanceCheck
++0x2d8   Engine::RemoveWidget           +0x8fa   GameEngine::SetPlayer
++0x3b1   IOAtomicRead ctor              +0x425   IOStreamRead::StreamPropertyEx
+```
+
+and the twenty instructions around the two slow calls settle it completely:
+
+```
++0xf03   Character::GetSpawnPoint
++0xf14   World::SetPlayerSpawnPoint
++0xf27   IOStreamRead::Shutdown              the save file is finished with
++0xf6f   PlayerManagerClient::SetMainPlayer
++0xf82   World::GuaranteedGetRegionLevel     <-- 114.5 ms
++0xf8e   Character::GetSpawnPoint
++0xfd4   WorldVec3::TranslateToFloor         <-- 402.4 ms
++0xff4   World::AddEntity                    the player is placed
++0x1051  GameInfo::SetLevelName
+```
+
+**This is the game loading a world and spawning the player into it.** It reads
+the save, calls `World::Load`, finds the spawn point, forces the spawn
+region's level resident, snaps the spawn position to the floor, and adds the
+player entity. It runs under `Display::Update` inside `Engine::Render` --
+which is why `engine_update` and `game_update` read zero on every one of these
+frames across runs 26-32. The game is not simulating. It is loading, and it
+paints from the display update so the screen is not dead while it does.
+
+### Stage 5.1 cannot be applied here, and this is the end of that line
+
+Deferring the load at either site means `GuaranteedGetLevel` returns null,
+which means `TranslateToFloor` cannot find the floor, which means
+`World::AddEntity` places the player at an unsnapped position. That is not
+pop-in. It is spawning the player into a world that is not there.
+
+So the answer to §28's question -- rendering or placement -- is **placement**,
+and of the most consequential kind. `async_level_load` stays in the build:
+verified, inert, default `0`, and correct if a genuinely deferrable site is
+ever found. But it does nothing for this frame class and it never could.
+
+### What the frame actually is, and what is left in it
+
+```
+frame 1803, 1,470.2 ms          run 32; the same shape in runs 26-31
+  engine_render                 1,464.5 ms
+    |- Region::LoadLevel main     516.8 ms   the spawn region, mandatory
+    |    |- main-thread Sleep     435.3 ms   350 calls, 350 ms REQUESTED
+    |- archive inflate            270.5 ms   on the loader thread
+    |- arc_open                     1,299
+  engine_update                     0.0 ms
+  game_update                       0.0 ms
+```
+
+The main thread asks to sleep 350 ms and gets 435. It is polling a loader
+thread that is genuinely busy -- 1,299 archive entries opened and 270 ms of
+zlib on that frame. So the wait is real work elsewhere, not idleness, and the
+two levers on it are both already in the plan:
+
+- **4.3, libdeflate.** 270 ms of zlib on this frame; typically 2-3x faster, so
+  perhaps 110-140 ms off it. The largest remaining item, and its
+  justification is now much stronger than when it was written -- it attacks
+  the thing the main thread is actually waiting for.
+- **`timeBeginPeriod`.** 350 requested against 435 actual is 85 ms of host
+  granularity on 350 `Sleep(1)` calls, exactly as §25 measured. Nearly free.
+
+Everything else on the frame is the game loading a level, and no mod can make
+that not happen.
+
+### It IS the initial load, and the discriminator is game_collisions
+
+This section said "start-up world load"; §32's first draft then called that
+wrong and relabelled it a mid-play level change; this settles it back, on a
+column neither reading had used.
+
+`game_collisions` counts `InterpenetrationManager::FixupCharacterCollisions`,
+which cannot run without a character in a world:
+
+| | run 32 | run 33 |
+| --- | ---: | ---: |
+| the big frame | 1803 | 2704 |
+| `game_collisions` before it | **0** | **0** |
+| after it | 4,765 | 4,874 |
+| first non-zero frame | 2156 | 2828 |
+| `grass_draw` first non-zero | 3182 | 3474 |
+
+The player is not in the world until after that frame. **It is the initial
+load of the save from the menu**, once a session, before play starts.
+
+What produced the wrong correction was reading `game_update_us > 0` from frame
+631/1367 as "gameplay has started". It has not: `GameEngine::Update` ticks the
+**main menu** too. The menu runs at several hundred frames a second, so
+twenty-five seconds of menu and character select is 2,700 frames, which is why
+the frame index looked far too late to be a start-up load.
+
+**And the reporter's model of traversal is right** -- crossing a level
+boundary during play loads the next area without re-spawning anybody. That
+mechanism is real and it is measured: it is the 1,700-3,700 sub-millisecond
+loads a session in §32's table. It is simply not what this frame is.
+
+So the conclusion stands as first written, for the right reason now: this
+frame is a loading pause the player waits through once, `sub_45437` is the
+menu's load-game routine, and nothing in it can be deferred because the player
+is placed on a floor that has to exist.
+
+## 32. Traversal is already asynchronous — with exactly one exception
+
+The reporter asked the obvious follow-up to §31: the first world load has to be
+synchronous, but why should walking from region to region be? The frame data
+answers it without another boot, and the answer is that **it already is.**
+
+Main-thread `Region::LoadLevel`, bucketed by how much a frame spent in it:
+
+| forced load on the frame | run 28 | run 30 | run 32 |
+| --- | ---: | ---: | ---: |
+| >0 and under 1 ms | 1,195 frames | 3,697 | 1,739 |
+| 1-5 ms | **0** | **0** | **0** |
+| 5-20 ms | **0** | **0** | **0** |
+| 20-100 ms | **0** | **0** | **0** |
+| over 100 ms | 1 frame | 2 | 1 |
+| calls / total | 205,564 / 515.4 ms | 207,442 / 635.8 ms | 200,204 / 519.4 ms |
+
+**The distribution is bimodal with nothing whatever in the middle.** Two
+hundred thousand calls a session cost two to six milliseconds in total once the
+one or two big frames are set aside. There is no such thing as a
+medium-sized level load on this route.
+
+The renderer says the same thing from the other side: with `async_level_load=1`
+the two `AddElementsInBox` sites were reached 2,849 times and found the region
+already resident 2,849 times. `Region::PreLoad` and `RegionLoader` appear in
+the run 32 chain, and they are keeping ahead of the player. Nothing to make
+asynchronous, because nothing is synchronous.
+
+### The exception, and it is the case the question meant
+
+Run 30's longer session (11,055 frames) caught a second big frame that is not
+the world load: `Engine+0x117a94`, 105.7 ms, on frame 7085 -- `engine_update`
+108.1 ms, `engine_render` 3.0 ms. **An Engine::Update frame, so this one is
+during play.** Its containing function, `sub_117980`, is unmistakable:
+
+```
++0x8c    World::GetRegionsInFrustum
++0xc2    WorldFrustum::GetRelativeFrustum
++0x105   Portal::GetConnectedRegion
++0x114   Region::LoadLevel            <-- 105.7 ms
++0x148   Region::GetPortal
++0x158   Portal::GetChokePoint
+```
+
+Portal traversal: find the regions in view, walk the portals, take the region
+on the far side, and force its level resident. That is exactly "walking from
+one area to the next", and it is the only synchronous level load that happens
+during play.
+
+### And it is deferrable, on a stronger argument than the sites already patched
+
+```
+10117a8c  85 f6              test esi,esi
+10117a8e  74 7b              jz  past
+10117a90  6a 00              push 0
+10117a92  8b ce              mov ecx,esi
+10117a94  e8 <rel32>         call Region::LoadLevel      <- offset 8
+10117a99  80 7e 74 00        cmp byte [esi+0x74],0
+10117a9d  c7 46 6c 00..      mov dword [esi+0x6c],0
+10117aa4  75 19              jnz 0x10117abf              still loading -> skip
+...
+10117ac8  e8 <rel32>         call Region::GetPortal
+10117acd  85 c0              test eax,eax
+10117acf  74 3a              jz  0x10117b0b              NULL-CHECKED
+```
+
+The same shape as the two sites already in `kForceLoadSites` -- with the call
+at **offset 8** rather than 12, because the `jz` is the two-byte form here --
+already branching on `region+0x74`, **and** the one call it makes on that
+region afterwards has its result null-checked. That last part is what §28
+could not say about `GuaranteedGetLevel` and is why this site is a better
+candidate than either of the two already patched.
+
+### What that is worth, honestly
+
+105.7 ms, once in the longest session measured, on a frame the player is
+playing through rather than waiting on -- and run 33 then measured how rare
+that is. See §33.
+
+So §31's "Stage 5.1 is dead" was too broad. It is dead for the zone-transition
+*load* frame, where deferring would spawn the player into a world that is not
+there. It has exactly one live target during play, and pointing it there is a
+third `kForceLoadSites` entry plus a per-site call offset.
+
+## 33. Run 33: all three sites measured, and Stage 5 is finished
+
+`Async level load: 3/3 forced loads retargeted`, 8,130 frames, 120 seconds.
+
+| | calls | deferred |
+| --- | ---: | ---: |
+| the two renderers (`engine_async_*`) | 2,836 | **0** |
+| portal traversal (`engine_portal_async_*`) | **1,355** | **0** |
+
+**The portal site was exercised 1,355 times and never once had to load.** The
+reporter thought portals had gone untested because they took no teleport
+portal -- but `Portal` in this engine is a region *connection*, a doorway, and
+`sub_117980` walks them every update. The path ran constantly; the region on
+the far side was already resident every single time.
+
+So all three sites are now measured on the same route, and all three defer
+nothing. The engine's own `RegionLoader` keeps ahead of the player everywhere
+this mod can reach. Run 30's 105.7 ms event was one miss in five sessions and
+about 40,000 opportunities.
+
+A third slow caller also appeared, and it is the same story a fourth time:
+`slow GuaranteedGetLevel from Engine+0x27b026` -- `World::SetCoords+0x51` --
+**1.2 ms**, once.
+
+### Where that leaves async_level_load
+
+It stays: verified byte for byte, inert, default `0`, three sites, its own
+counters. It costs nothing and it is correct. It is simply worth nothing on
+this route, and the measurement that says so is now four sessions deep rather
+than an argument.
+
+**Stage 5 is finished.** Every synchronous `Region::LoadLevel` in the game has
+been found, attributed to its call site, and priced:
+
+| | cost | can it be deferred? |
+| --- | ---: | --- |
+| menu load-game, spawning the player | 516 ms, once a session | no -- the floor has to exist |
+| the two renderer sites | 0 | nothing to defer |
+| portal traversal | 105.7 ms once in five sessions | yes, and it is built |
+| `World::SetCoords` | 1.2 ms | not worth it |
+| everything else (~200k calls) | 2-6 ms a session total | already asynchronous |
+
+### And the freeze the reporter actually feels is still unexplained
+
+The 1,470-1,666 ms frame is the initial load and only 516 ms of it is
+`Region::LoadLevel`. **Some 950 ms of it is the rest of `World::Load` and has
+never been instrumented** -- and that is a loading pause, so it is the least
+interesting large number in the project.
+
+The in-play stutters remain frame 3168's class -- a render hitch with no level
+load, ~790 ms unaccounted, 193 ms of texture creation and 50 ms of main-thread
+lock contention the only footholds -- and frame 6914's, the message pump,
+closed as a host question in §17. 3168's class has been the honest next target
+since §25 and nothing since has displaced it.
+
+## 34. A fresh-eyes review, once "the player is in the world" became knowable
+
+`game_collisions` -- `InterpenetrationManager::FixupCharacterCollisions`, which
+cannot run without a character in a world -- turns out to be a clean marker for
+when play starts. Applying it to all nineteen recorded runs changes more than
+§33 did, and two of the three things it changes are mistakes this project has
+been carrying for a long time.
+
+### 1. Every headline number has included the menu
+
+| | whole session | in-game only |
+| --- | ---: | ---: |
+| p50 | 8.3-10.0 ms | **12.1-13.4 ms** |
+| menu share of frames | 25-47% | -- |
+| in-game frames | -- | 4,879-5,792, near-constant |
+
+**Menu frames are a quarter to nearly half of every session**, and they are
+cheap and short, so they have been dragging p50 down by about 40%. Worse, the
+menu's *length varied wildly between runs* -- 1,719 frames in run 31, 5,454 in
+run 30 -- while the in-game frame count barely moved. So run-to-run p50 and
+"the mod's share" comparisons have been differencing a varying amount of menu.
+Nothing in the plan turned on those comparisons, but they were being read.
+
+**`tools/frames.py` should split at the first frame with `game_collisions`
+non-zero and report the two halves.** That is a small change and every future
+run benefits from it.
+
+### 2. In almost every run, "the worst frame" was in the menu
+
+The load-game frame is bigger than anything that happens in play, so it won
+`max()` in fourteen of nineteen runs. Everything §21-§33 chased was that frame.
+The worst *in-game* frame is a different and much more consistent animal:
+
+| | worst in-game frame |
+| --- | --- |
+| when | 940-1,670 frames after the player enters the world |
+| size | 578-1,938 ms |
+| `Region::LoadLevel` | **0.0 ms** |
+| main-thread `Sleep` | **0.0 ms** |
+| `arc_open` / `texture_create` | ~200 / ~100 |
+| reproduced in | **16 of 19 runs** |
+
+Same shape every time, at nearly the same point on the route. This is §25's
+frame 3168 class, and it is the only large thing in this project that happens
+while the player is playing.
+
+### 3. It was never unaccounted, and that is the finding
+
+§25 anatomised frame 3168 as `Region::LoadLevel` 0.02 ms, texture creation
+193.3 ms, inflate 275.8 ms, lock contention 50.2 ms, and **"roughly 790 ms
+nothing accounts for"**. That table omitted a column that was in the same CSV
+row:
+
+```
+frame 3168, 1,113.3 ms
+  engine_render                          1,040.3 ms
+    |- ResourceLoader::LoadResource, MAIN THREAD  616.7 ms   <-- was in the row
+    |    |- archive inflate                       275.8 ms
+    |    |- off-thread texture creation           189.9 ms
+    |- texture_create (the mod's own phase)       193.3 ms
+    |- main-thread lock contention                 50.2 ms
+```
+
+`engine_res_load_main_us` has existed since run 10 and has had a `_main` split
+the whole time. Across the sixteen runs of this class it names **33% to 68% of
+`Engine::Render`, median 44%**:
+
+| run | frame | ms | render | res_load main | share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 20 | 3590 | 577.8 | 501.1 | 164.3 | 33% |
+| 26 | 3168 | 1,113.3 | 1,040.3 | 616.7 | 59% |
+| 19 | 2981 | 1,453.7 | 1,382.3 | 816.3 | 59% |
+| 30 | 7124 | 1,938.1 | 1,855.0 | 1,265.4 | **68%** |
+
+**The in-game stutter is the main thread synchronously loading resources
+inside `Engine::Render`** -- not levels, resources: textures and models, with
+the archive inflate and the texture creation nested inside. Stage 5 spent
+runs 27-33 on `Region::LoadLevel`, which is 0.0 ms on every one of these
+frames.
+
+This also re-founds **4.3 (libdeflate)** on something better than a session
+total: 106-366 ms of the inflate sits *inside* that main-thread resource load,
+on the frame the player actually feels.
+
+### 4. And there is a five-second frame nobody has ever looked at
+
+Runs 16 and 33 each contain one in-game frame of **5,016.9 ms** and
+**5,024.9 ms**, with `engine_render` of 5,007.5 and 5,007.9 ms and essentially
+nothing else named -- no resource load, no level load, no lock wait, no object
+wait, 33-228 archive opens.
+
+Two independent runs landing within 0.4 ms of each other, at 5.007 seconds,
+is not a coincidence: **that is a five-second timeout somewhere inside
+`Engine::Render`**, and it is the largest single event in the entire dataset.
+It is five times the in-game stutter and three times the load frame. Nothing
+in this project has ever mentioned it, because `max()` over the whole session
+usually found the load frame instead and these two runs were never compared.
+
+### The corrected taxonomy
+
+| class | size | when | status |
+| --- | ---: | --- | --- |
+| **A** menu load-game | ~1.5 s | once, before play | a loading pause; ~516 ms is `LoadLevel`, ~950 ms is the rest of `World::Load`, uninstrumented |
+| **B** in-game resource load | 578-1,938 ms | ~1,000-1,600 frames in, 16/19 runs | **the real target.** Main-thread `LoadResource`, 33-68% of `Engine::Render` |
+| **C** the five-second stall | ~5,007 ms | twice in 19 runs | **never investigated.** Looks like a timeout |
+| **D** the message pump | ~1,500 ms | rare | closed as a host question, §17 |
+
+§25 said to name the class whenever making a claim about "the worst frame".
+That was right, and the classes it named were nearly right -- but it put
+class A and class B in the same list as if they were comparable, and it
+mis-anatomised B by leaving out the column that explains it.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

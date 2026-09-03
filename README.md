@@ -74,6 +74,7 @@ peak_nits=auto
 streaming=optimized
 loose_texture_max=0
 archive_cache_mb=0
+async_level_load=0
 timer_period_ms=0
 
 [debug]
@@ -148,6 +149,43 @@ re-checked against the installed `Engine.dll` before anything is patched. With
 the performance probe on, `arc_cache_hit` against `engine_arc_blocks` is the
 result, `arc_cache_evict` says whether the slab is too small, and
 `arc_cache_bad` must be zero.
+
+`async_level_load` retargets the three call sites that force a synchronous
+`Region::LoadLevel` at `Region::BackgroundLoadLevel`, the engine's own
+asynchronous entry point, which raises the same `region+0x74` flag each of
+those sites already tests and branches on.
+
+**It defaults to `0`, installs nothing at `0`, and on the measured route it is
+worth nothing at `1` either.** That is four sessions of measurement rather
+than an estimate. The two renderer sites (`AddElementsInBox`) and the portal
+site between them were reached 4,191 times in one session and found the region
+already resident every single time. The game's own `RegionLoader` keeps ahead
+of the player, so ordinary traversal -- some 200,000 `Region::LoadLevel` calls
+a session -- is already asynchronous and costs 2 to 6 milliseconds in total.
+
+The one place it can ever pay is portal traversal, the region beyond a
+doorway: 105.7 ms, seen once in five sessions. That site is included and is
+the safest of the three, because `Region::GetPortal`'s result is null-checked
+immediately after the branch, so the code past it already copes with a region
+that did not load.
+
+It does nothing for the multi-second freeze when a save is loaded from the
+menu. That one is a full `World::Load` and a player spawn, and the level it
+forces is the region the character is about to be placed in -- deferring it
+would put them down before the floor beneath them exists. Only about a third
+of that frame is the level load at all.
+
+It is kept because it is verified and free: every byte of the three call
+windows, `BackgroundLoadLevel`'s own behaviour and the offsets they share are
+re-checked against the installed `Engine.dll` before anything is written, and
+a mismatch anywhere leaves the game byte-identical to `0`. The trade at `1` is
+pop-in at a doorway.
+
+With the performance probe on, `engine_async_load` / `engine_async_sync` count
+the two renderer sites and `engine_portal_async_load` /
+`engine_portal_async_sync` the portal one, kept apart because the deferral
+counts are expected to stay at zero and the fall-through counts are the
+evidence that the sites were reached at all.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
@@ -304,10 +342,19 @@ miss, so a cached session's amplification is still comparable to an uncached
 one's; `engine_arc_inflate_us` then covers only the blocks that were actually
 read and inflated.
 
+The four `engine_*async*` columns do the same job for `async_level_load`:
+between them they are every call the retargeted sites make. The renderer pair
+reading zero deferrals is not a fault -- it is the measurement that says
+ordinary traversal is already asynchronous.
+
 Those columns come from instrumentation written into `Engine.dll`'s own code,
-so they are gated twice: nothing is installed unless `performance_trace` is on
-**and** `engine_trace` is not `0`, which means a normal boot is byte-identical
-to a build without any of it. Every site is resolved by its exported name,
+so they are gated twice: no *instrument* is installed unless
+`performance_trace` is on **and** `engine_trace` is not `0`, which means a
+normal boot is byte-identical to a build without any of it. The two fixes that
+live in the same file -- `archive_cache_mb` and `async_level_load` -- are the
+exception, and only in one direction: they install with the probe off, because
+they change the game rather than measure it, and they bring none of the
+instrument with them. Every site is resolved by its exported name,
 checked against the address the audited build puts it at, and matched against
 16 to 24 bytes before 4 to 7 are written; a mismatch skips that one hook and
 leaves the rest. A build that is not the audited `Engine.dll` installs nothing

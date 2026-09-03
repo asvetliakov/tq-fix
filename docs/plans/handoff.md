@@ -2,19 +2,29 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Both are current as of run 26 on
-branch `stutter-mitigation`. **Start with "The order of work" and "Stage 5.1,
-ready to build" near the end — everything above them is history.**
+built, what is measured, and what to do next. Current as of **run 33** on
+branch `stutter-mitigation`.
+
+**Start at "The order of work" near the end, and read findings.md §34 before
+anything else.** §34 is a fresh-eyes review of all nineteen recorded runs and
+it invalidates the framing of a lot of what sits above it here: the frame this
+project chased from run 21 to run 33 is the menu's load-game, not an in-game
+stutter, and the real in-game stutter had been mis-anatomised since §25.
+Everything above "The order of work" is history and should be read as such.
 
 ## Read these first
 
-1. `docs/plans/game-stutter-mitigation.md` — the plan, and its Status section,
+1. `research/streaming/findings.md` **§34** — the corrected freeze taxonomy
+   (classes A–D) and what each is worth. Then **§31 and §33** for how Stage 5
+   ended, and **§25** for the three-class split §34 corrects.
+2. `docs/plans/game-stutter-mitigation.md` — the plan, and its Status section,
    which corrects two of its five headline findings and records what Stage 3
-   measured away.
-2. `research/streaming/findings.md` — §4–§7 for the probe's blindness, the
-   archive `File` class and the verified patch sites; **§8–§17 for everything
-   Stage 3 measured**, which is where the current picture lives; **§18 for the
-   block routine**, read end to end, which is what Stage 4.1 is built on.
+   measured away. Note it predates §34.
+3. `research/streaming/findings.md` — §4–§7 for the probe's blindness, the
+   archive `File` class and the verified patch sites; §8–§17 for what Stage 3
+   measured; **§18 for the block routine**, read end to end, which is what
+   Stage 4.1 is built on; §26–§30 for the instrument chain and how it was
+   built.
 3. `research/streaming/arc-format.md` — the container format and what was
    checked across all 135 archives. Read R1 for the container, not for the
    runtime structures: §18 records one field the engine rewrites at load.
@@ -441,21 +451,50 @@ discipline is the reason to keep resisting the urge to build first.
 
 ## The order of work, as it now stands
 
-1. **Stage 5.1 — build it next. It is the best-founded item in the plan.**
-   See the section below; the reverse engineering is done and verified.
-2. **Then widen the game's preload distance.** Async alone gives pop-in,
-   widening alone is worse (measured by the reporter), the two together are
-   preloading without pop-in.
-3. **Instrument frame 3168's class** — a render hitch with no level load.
-   ~790 ms unaccounted, and the only footholds are 193 ms of texture creation
-   and 50 ms of main-thread lock contention.
-4. **4.3 (libdeflate)** — 3,494 ms a session of zlib at 457 µs a block.
-   Riskiest item in the plan; after 5.1.
-5. **`timeBeginPeriod` behind a switch** — ~100 ms a session. Nearly free,
-   nearly pointless. Whenever.
-6. ~~4.2, bounded prefetch~~ — **struck**, run 24.
-7. ~~Pooling the archive scratch buffers~~ — **struck**, run 24.
-8. ~~The archive block cache beyond 8 MiB~~ — **struck**, run 22.
+**Read findings.md §34 first.** A fresh-eyes review of all nineteen runs, once
+`game_collisions` gave a reliable marker for "the player is in the world",
+found that the frame this project has been chasing since run 21 is the menu's
+load-game, that the real in-game stutter was mis-anatomised, and that there is
+a five-second frame nobody has ever looked at. §31 and §33 are the background.
+
+1. **Class B — the in-game stutter — and it already has an answer waiting.**
+   578–1,938 ms, ~1,000–1,600 frames after the player enters the world,
+   reproduced in 16 of 19 runs, `Region::LoadLevel` 0.0 ms on every one.
+   **`engine_res_load_main_us` names 33–68% of `Engine::Render` on it (median
+   44%)** — the main thread synchronously running
+   `ResourceLoader::LoadResource`, with the archive inflate and texture
+   creation nested inside. The column has existed since run 10; §25 left it
+   out of the frame-3168 table and called the remainder unaccounted. **Start
+   by re-reading these frames, not by building an instrument.**
+2. **Class C — the five-second frame.** Runs 16 and 33 each hold one in-game
+   frame of 5,016.9 / 5,024.9 ms, `engine_render` 5,007.5 / 5,007.9 ms, with
+   nothing else named at all. Two runs within 0.4 ms of 5.007 s is a timeout,
+   not a coincidence. Largest event in the dataset and never investigated.
+3. **`tools/frames.py`: split the session at world entry.** First frame with
+   `game_collisions` non-zero. Menu is 25–47% of every session and has been in
+   every p50, p99 and "mod's share" ever quoted; in-game p50 is 12.1–13.4 ms
+   against the 8.3–10.0 ms reported. Menu length also varied 1,719–5,454
+   frames between runs while in-game frames stayed near-constant, so
+   run-to-run comparisons were differencing a varying amount of menu.
+4. **4.3 (libdeflate)** — now re-founded on class B rather than on a session
+   total: 106–366 ms of inflate sits *inside* the main-thread resource load on
+   the frame the player actually feels. Still the riskiest item in the plan.
+5. **`timeBeginPeriod` behind a switch** — ~100 ms a session, and 85 ms of it
+   is on class A, which is a loading screen. Nearly free, nearly pointless.
+6. ~~**Stage 5 / `async_level_load`**~~ — **finished and measured out (§33).**
+   All three synchronous `Region::LoadLevel` sites found, attributed, priced;
+   4,191 calls through them in run 33 and zero deferrals. Traversal was
+   already asynchronous all along. The switch stays: verified, inert, default
+   `0`.
+7. **The instruments stay and are the reason any of this was settled.**
+   `hookLoadLevel` / `hookGuaranteedGetLevel` record slow callers; the stack
+   scan names the whole path across `Engine.dll`, `Game.dll` and `TQ.exe`.
+   Decode the call in front of each return address rather than trusting
+   nearest-export names; treat a repeated group as stale, with the per-frame
+   CSV columns as the arbiter.
+8. ~~4.2, bounded prefetch~~ — **struck**, run 24.
+9. ~~Pooling the archive scratch buffers~~ — **struck**, run 24.
+10. ~~The archive block cache beyond 8 MiB~~ — **struck**, run 22.
 
 **Deferred at the reporter's request:** `cache/runs/play-with-cache-verify.ini`
 and `play-with-cache.ini` — the long-play validation and then serving. To be
@@ -475,12 +514,18 @@ Run 26 added what was not known when it was parked: **the forced load is 85%
 a `Sleep(1)` poll loop**, so it is mostly waiting, not working — which both
 explains why it is so expensive and predicts that the pop-in will be brief.
 
-## Stage 5.1, ready to build: everything verified, nothing written
+## Stage 5.1, built and run. The design record, and where it was wrong
 
-I started this and reverted it at the reporter's request so a fresh session
-begins clean. **The reverse engineering below was done against the pinned
-`Engine.dll` this session and is recorded so it does not have to be redone —
-but re-verify it anyway before writing bytes, per the conventions.**
+**Built behind `[performance] async_level_load`, default `0`, installing
+nothing at `0`.** Every byte below was re-read against the pinned `Engine.dll`
+and held, with the corrections marked; findings.md §26 records what
+re-verification added.
+
+**Then run 28 measured it and the target was wrong.** The two
+`AddElementsInBox` sites never force a load — 2,849 calls, 2,849 already
+resident — and on the zone-transition frame they are not called at all. Read
+**§27 before this section**: everything below is sound about the mechanism and
+wrong about where the cost is.
 
 ### The two call sites
 
@@ -501,9 +546,11 @@ pinned image (not the audit export):
   0f 85 <rel32>          jnz epilogue      region skipped while loading
 ```
 
-30 bytes, call at **offset 12**. Displacements: `e8 68 46 0a 00` (deferred)
-and `e8 f8 e5 08 00` (forward); both resolve to `0x1020bec0`,
-`?LoadLevel@Region@GAME@@QAE_N_N@Z`. `detour::patchCall` handles `E8` sites by
+**34 bytes** — the count above stops before the trailing `JNZ`'s displacement
+— call at **offset 12**. Displacements: `e8 68 46 0a 00` (deferred) and
+`e8 f8 e5 08 00` (forward); both resolve to `0x1020bec0`,
+`?LoadLevel@Region@GAME@@QAE_N_N@Z`. Each window ends exactly where that
+renderer's `kLockSites` window begins, which checks both tables at once. `detour::patchCall` handles `E8` sites by
 rewriting the displacement, and `expectedTarget` is the safety check.
 
 `MOV` does not touch flags, so `mov dword [edi+0x6c],0` runs on the skip path
@@ -564,6 +611,11 @@ int __fastcall hookAddElementsLoadLevel(void* region, void* edx, int flag) {
 }
 ```
 
+Built as written, with one change: the flag is **forwarded** rather than
+passed as a literal `0`. Both sites push `0` — it is in the byte tables — so
+the two are the same call today; forwarding keeps that a fact about the sites
+rather than an assumption baked into the thunk.
+
 Call the resolved **export address** rather than the trace's trampoline, so
 the thunk works with the probe off; if the trace *is* installed the call still
 lands in `hookLoadLevel` and is counted, which is what we want. `patchCall`
@@ -604,15 +656,24 @@ run 26 found the forced load is 85% a `Sleep(1)` poll — 435 ms of waiting in a
 513 ms call — so the loader thread is nearly finished by the time the renderer
 is told to skip the region.
 
-### Also to do
+### Also to do — all done
 
-- `verify-sites.py`: add both windows, assert `E8` at offset 12 in each, and
-  assert `?BackgroundLoadLevel@Region@GAME@@QAEX_N0@Z` resolves to `0x20be60`.
-- `README.md`: document `async_level_load` and the pop-in trade.
-- `test/selftest.cpp`: assert the switch defaults off and installs nothing.
-- Two run inis: `async_level_load=0` (baseline, confirms the build changed
-  nothing) then `=1`. And the reporter should be told to watch for regions
-  appearing late, since that is the trade being made.
+- `verify-sites.py`: done, and further than asked. Both call-site windows,
+  both `BackgroundLoadLevel` behaviour windows plus its epilogue, `E8` at
+  offset 12 with its displacement re-derived onto `Region::LoadLevel`, the
+  export RVA, the owner exports, the window adjacency, and the offset the
+  renderer skips on asserted equal to the offset the async path raises. 120
+  checks; every constant perturbation fails it.
+- `README.md`: done, including a correction — the "gated twice" paragraph
+  claimed nothing installs without the probe, which stopped being true when
+  `archive_cache_mb` landed.
+- `test/selftest.cpp`: done, eight assertions.
+- Two run inis: `cache/runs/run27-async-baseline.ini` and
+  `run28-async-level-load.ini`, both diffed against the live file. Three
+  differences from live each (`trace`, `performance_trace`,
+  `async_level_load`); the two differ from each other only in
+  `async_level_load`. Run 28's header names the pop-in as the thing to
+  watch.
 
 ## Conventions
 

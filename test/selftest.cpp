@@ -742,6 +742,232 @@ void testEngineProbe() {
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     DeleteFileW(ini);
+
+    // The fourth way in: async_level_load, which retargets the two forced
+    // level loads inside the renderer. Same shape as archive_cache_mb -- a
+    // fix rather than an instrument -- so the same three things have to hold.
+    //
+    // First, that it is off unless it is asked for. An INI with no key at all
+    // and no INI at all both have to read as off, because the shipping
+    // configuration is the second of those.
+    check(!tq::engineprobe::asyncLevelLoadForTest(),
+          "async_level_load is off with no INI at all");
+    WritePrivateProfileStringW(L"performance", L"loose_texture_max", L"4096",
+                               ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::engineprobe::asyncLevelLoadForTest(),
+          "async_level_load is off in a [performance] section that omits it");
+    WritePrivateProfileStringW(L"performance", L"async_level_load", L"0", ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::engineprobe::asyncLevelLoadForTest(),
+          "async_level_load=0 is off");
+
+    // Second, that at 1 it reaches install() with the performance probe off
+    // -- the boot the reporter actually runs -- and still installs nothing
+    // into a module that is not the audited Engine.dll.
+    WritePrivateProfileStringW(L"performance", L"async_level_load", L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled() && tq::engineprobe::asyncLevelLoadForTest()
+          && !tq::arccache::configured()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "async_level_load reaches install() with the probe off, and still"
+          " installs nothing into a module that is not Engine.dll");
+
+    // Third, that it brings none of the instrument with it. engine_trace
+    // defaults to 1, so every group would say yes if the mask were consulted
+    // on its own; what makes them say no is the probe being off.
+    check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(16)
+          && !tq::engineprobe::wantsForTest(8192),
+          "an async-only boot installs no trace group either");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::asyncLevelLoadForTest(),
+          "shutting down and re-reading no INI puts async_level_load back off");
+    DeleteFileW(ini);
+
+    // The slow-LoadLevel caller table. Five calls a session decide where
+    // Stage 5.1 should point, so a slot bug costs a boot rather than a build;
+    // this drives the aggregator directly.
+    {
+        BYTE* const base = (BYTE*)0x10000000;
+        unsigned long rva = 0;
+        long calls = 0, mainCalls = 0, us = 0, worst = 0;
+        tq::engineprobe::slowLoadResetForTest(base);
+        check(!tq::engineprobe::slowLoadSlotForTest(0, &rva, &calls, &mainCalls,
+                                                    &us, &worst)
+              && tq::engineprobe::slowLoadLostForTest() == 0,
+              "the slow-load table starts empty");
+
+        tq::engineprobe::slowLoadRecordForTest(base + 0x20e7bc, 100000, true);
+        tq::engineprobe::slowLoadRecordForTest(base + 0x20e7bc, 60000, false);
+        tq::engineprobe::slowLoadRecordForTest(base + 0x20aebc, 5000, true);
+        tq::engineprobe::slowLoadRecordForTest(base + 0x20e7bc, 80000, true);
+        check(tq::engineprobe::slowLoadSlotForTest(0, &rva, &calls, &mainCalls,
+                                                   &us, &worst)
+              && rva == 0x20e7bc && calls == 3 && mainCalls == 2
+              && us == 240000 && worst == 100000,
+              "repeat callers share a slot and accumulate calls, main, total"
+              " and worst");
+        check(tq::engineprobe::slowLoadSlotForTest(1, &rva, &calls, &mainCalls,
+                                                   &us, &worst)
+              && rva == 0x20aebc && calls == 1 && mainCalls == 1
+              && us == 5000 && worst == 5000,
+              "a second caller takes the next slot");
+
+        // The module bound is what keeps an RVA meaningful. A caller below the
+        // base or past SizeOfImage is a different module's, and recording it
+        // against Engine.dll would name an address that means nothing.
+        tq::engineprobe::slowLoadRecordForTest(base - 0x1000, 9000, true);
+        tq::engineprobe::slowLoadRecordForTest(base + 0x44b000, 9000, true);
+        check(tq::engineprobe::slowLoadLostForTest() == 2
+              && !tq::engineprobe::slowLoadSlotForTest(2, &rva, &calls,
+                                                       &mainCalls, &us, &worst),
+              "a caller outside Engine.dll is counted as lost, not recorded");
+
+        // Sixteen slots, and the seventeenth distinct caller is dropped rather
+        // than overwriting one that has already been recorded.
+        for (unsigned i = 0; i < 20; ++i)
+            tq::engineprobe::slowLoadRecordForTest(base + 0x100000 + i * 0x10,
+                                                   2000, false);
+        check(tq::engineprobe::slowLoadSlotForTest(15, &rva, &calls, &mainCalls,
+                                                   &us, &worst)
+              && tq::engineprobe::slowLoadLostForTest() > 2,
+              "the table fills to sixteen and drops the rest rather than"
+              " overwriting");
+        tq::engineprobe::slowLoadResetForTest(nullptr);
+        check(!tq::engineprobe::slowLoadSlotForTest(0, &rva, &calls, &mainCalls,
+                                                    &us, &worst),
+              "and it resets");
+    }
+
+    // The stack scan. Without frame pointers the only thing separating a
+    // return address from a stale dword is "the bytes before it are a call",
+    // so that filter is the whole instrument -- and a false negative on a
+    // virtual call would drop exactly the frames the render path is made of.
+    {
+        // A synthetic .text: every candidate is an offset into this buffer, so
+        // the filter can be driven over all five encodings and their misses
+        // without needing a real module.
+        const SIZE_T textSize = 0x400;
+        BYTE* text = (BYTE*)VirtualAlloc(nullptr, textSize, MEM_COMMIT,
+                                         PAGE_READWRITE);
+        if (!text) {
+            check(false, "allocate a synthetic .text for the stack scan");
+        } else {
+            memset(text, 0xcc, textSize);
+            tq::engineprobe::slowLoadResetForTest(text);
+            tq::engineprobe::chainTextForTest(text, textSize, 'E');
+
+            // E8 rel32 at 0x100, calling 0x200: return address is 0x105.
+            text[0x100] = 0xe8;
+            *(int32_t*)(text + 0x101) = 0x200 - 0x105;
+            check(tq::engineprobe::precededByCallForTest(text + 0x105),
+                  "E8 rel32 whose destination is in .text is a call");
+
+            // Same shape, but the displacement leaves the section. That is the
+            // half of the E8 test that rejects a coincidence.
+            text[0x120] = 0xe8;
+            *(int32_t*)(text + 0x121) = 0x40000000;
+            check(!tq::engineprobe::precededByCallForTest(text + 0x125),
+                  "E8 whose destination is outside .text is not");
+
+            // The four indirect forms, which are how the render path calls
+            // anything virtual.
+            text[0x140] = 0xff; text[0x141] = 0x15;      // call [disp32]
+            check(tq::engineprobe::precededByCallForTest(text + 0x146),
+                  "FF 15 disp32 is a call");
+            text[0x160] = 0xff; text[0x161] = 0x90;      // call [eax+disp32]
+            check(tq::engineprobe::precededByCallForTest(text + 0x166),
+                  "FF 90 disp32 is a call");
+            text[0x180] = 0xff; text[0x181] = 0x50;      // call [eax+disp8]
+            check(tq::engineprobe::precededByCallForTest(text + 0x183),
+                  "FF 50 disp8 is a call");
+            text[0x1a0] = 0xff; text[0x1a1] = 0xd0;      // call eax
+            check(tq::engineprobe::precededByCallForTest(text + 0x1a2),
+                  "FF D0 (call reg) is a call");
+
+            check(!tq::engineprobe::precededByCallForTest(text + 0x300),
+                  "a run of int3 is not a call");
+            check(!tq::engineprobe::precededByCallForTest(text + 2),
+                  "and a candidate too close to the start of .text is refused"
+                  " rather than read behind");
+
+            // A synthetic stack: two real return addresses with junk around
+            // them, one of the junk values pointing into .text but not after
+            // a call. The scan must keep the two and drop the third.
+            uintptr_t frame[8];
+            frame[0] = (uintptr_t)(text + 0x105);   // a call return address
+            frame[1] = 0xdeadbeef;                  // not in .text
+            frame[2] = (uintptr_t)(text + 0x300);   // in .text, not after a call
+            frame[3] = (uintptr_t)(text + 0x105);   // repeat, collapsed
+            frame[4] = (uintptr_t)(text + 0x146);   // a second call site
+            frame[5] = 0;
+            frame[6] = 0;
+            frame[7] = 0;
+            unsigned depth = 0;
+            char tags[32] = {};
+            const unsigned first =
+                tq::engineprobe::captureChainForTest(frame, &depth, tags);
+            check(first == 0x105 && depth == 2 && tags[0] == 'E'
+                  && tags[1] == 'E',
+                  "the scan keeps call-preceded addresses in stack order,"
+                  " drops the rest, and collapses repeats");
+
+            // The second module, which is the whole point of run 32: the
+            // chain leaves Engine.dll, and a frame in Game.dll or TQ.exe has
+            // to be kept and labelled rather than dropped. Its RVAs are
+            // against its own base, so the same offset in two modules is two
+            // different frames.
+            BYTE* other = (BYTE*)VirtualAlloc(nullptr, textSize, MEM_COMMIT,
+                                              PAGE_READWRITE);
+            if (!other) {
+                check(false, "allocate a second synthetic module");
+            } else {
+                memset(other, 0xcc, textSize);
+                tq::engineprobe::chainTextForTest(other, textSize, 'T');
+                other[0x100] = 0xe8;
+                *(int32_t*)(other + 0x101) = 0x200 - 0x105;
+                check(tq::engineprobe::precededByCallForTest(other + 0x105),
+                      "a call site in the second module is recognised there");
+                // An E8 in one module whose displacement lands in the other is
+                // not a call within either -- the destination check is
+                // per-module, which is what keeps it strong.
+                text[0x1c0] = 0xe8;
+                *(int32_t*)(text + 0x1c1) =
+                    (int32_t)((other + 0x200) - (text + 0x1c5));
+                check(!tq::engineprobe::precededByCallForTest(text + 0x1c5),
+                      "an E8 pointing into a different module is not accepted");
+
+                uintptr_t mixed[4];
+                mixed[0] = (uintptr_t)(text + 0x105);
+                mixed[1] = (uintptr_t)(other + 0x105);
+                mixed[2] = 0;
+                mixed[3] = 0;
+                unsigned mixedDepth = 0;
+                char mixedTags[32] = {};
+                const unsigned head = tq::engineprobe::captureChainForTest(
+                    mixed, &mixedDepth, mixedTags);
+                // Depth is >= rather than ==, and that is the instrument
+                // being honest rather than the test being loose: the scan
+                // walks 8 KiB upward, so it also finds the previous check's
+                // array further up this same stack. That is exactly the
+                // superset behaviour the design accepts and the reason the
+                // log is read as ranked candidates, not as a backtrace.
+                check(head == 0x105 && mixedDepth >= 2 && mixedTags[0] == 'E'
+                      && mixedTags[1] == 'T',
+                      "a chain that crosses modules keeps both frames and"
+                      " labels each with the module it came from");
+                VirtualFree(other, 0, MEM_RELEASE);
+            }
+
+            tq::engineprobe::chainTextForTest(nullptr, 0, 0);
+            tq::engineprobe::slowLoadResetForTest(nullptr);
+            VirtualFree(text, 0, MEM_RELEASE);
+        }
+    }
     // ---- patchImport, which is how the game's own main loop is instrumented.
     // It writes four bytes into an import table rather than into anybody's
     // code, and it is scoped to one module -- so the test that matters is

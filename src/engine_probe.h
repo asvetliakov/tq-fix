@@ -70,6 +70,29 @@ void readOptions(const wchar_t* iniPath);
 // happens to come back with. It only takes effect while the engine trace is
 // installed, so a shipping boot never reaches it.
 
+// [performance] async_level_load, which unlike timer_period_ms is a fix, and
+// so -- like archive_cache_mb -- installs with the performance probe off.
+//
+// Three call sites force a synchronous Region::LoadLevel; at 1 all three are
+// retargeted at Region::BackgroundLoadLevel, which raises the same
+// region+0x74 flag each of them already tests and branches on.
+//
+// Two are the renderers' AddElementsInBox, and runs 27-32 measured them
+// deferring nothing whatever: 2,849 calls, 2,849 already resident. Ordinary
+// traversal is asynchronous already, by way of the engine's own RegionLoader.
+// The third is portal traversal -- the region beyond a doorway -- and is the
+// only synchronous level load that happens during play. It is also the
+// best-founded: Region::GetPortal's result is null-checked immediately after
+// the branch, so the code past it already copes with a region that did not
+// load.
+//
+// It does nothing for the 1.5-second freeze on walking into an interior. That
+// is a full World::Load and a re-spawn, and the load it forces is for the
+// region the player is about to be placed in; deferring it would place them
+// before the floor exists. See findings.md §27-§32.
+//
+// 0, the default, installs nothing. The trade at 1 is pop-in at a doorway.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
@@ -87,6 +110,25 @@ void setTraceMaskForTest(unsigned mask);
 // decides it. archive_cache_mb can reach install() with the performance probe
 // off, and this is what says the trace does not come with it.
 bool wantsForTest(unsigned group);
+// [performance] async_level_load as readOptions() parsed it, so a test can
+// assert the default is off without inferring it from install() refusing a
+// module that was never Engine.dll anyway.
+bool asyncLevelLoadForTest();
+// The slow-LoadLevel caller table, which decides where Stage 5.1 should point.
+// Driven directly rather than through a real detour: what is worth testing is
+// the aggregation and the module bound, not __builtin_return_address.
+void slowLoadResetForTest(const void* base);
+void slowLoadRecordForTest(const void* caller, unsigned us, bool main);
+bool slowLoadSlotForTest(unsigned slot, unsigned long* rva, long* calls,
+                         long* main, long* us, long* worst);
+long slowLoadLostForTest();
+// The stack scan that replaces hooking one function per boot. The filter is
+// the part worth testing off-game: it is what makes a raw scan trustworthy
+// without frame pointers, and a false negative on a virtual call would lose
+// exactly the frames the render path is made of.
+void chainTextForTest(BYTE* begin, SIZE_T size, char tag);
+bool precededByCallForTest(const BYTE* ret);
+unsigned captureChainForTest(const void* from, unsigned* depth, char* tags);
 // The region-lock thunk, so the off-game test can drive it both contended and
 // not. It enters the section exactly as EnterCriticalSection would.
 void enterCriticalSectionForTest(LPCRITICAL_SECTION section);
