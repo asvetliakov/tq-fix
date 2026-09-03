@@ -118,6 +118,7 @@ void shutdown() {
     for (unsigned i = 0; i < kMaxUploadJobs; ++i) {
         UploadJob& job = g_uploadJobs[i];
         if (job.lowView) job.lowView->Release();
+        if (job.fullView) job.fullView->Release();
         if (job.texture) job.texture->Release();
         memset(&job, 0, sizeof(job));
     }
@@ -212,6 +213,14 @@ void noteShaderResourceView(ID3D11Device* device, ID3D11Resource* resource,
             ID3D11ShaderResourceView* lowView = nullptr;
             if (SUCCEEDED(g_calls.createShaderResourceView(device, resource,
                                                            &low, &lowView))) {
+                // Referenced, not merely remembered. substituteLocked matches
+                // it by raw pointer, so if the engine released it and D3D
+                // handed the allocation to an unrelated texture's view, this
+                // job would start substituting its own low mip for that
+                // texture. Harmless while no job ever ran; with 465 jobs in a
+                // session, and SRV churn highest exactly during the level
+                // loads when jobs are running, it is a live corruption path.
+                view->AddRef();
                 job.fullView = view;
                 job.lowView = lowView;
             }
@@ -239,6 +248,7 @@ void advance(ID3D11DeviceContext* context) {
     if (!g_uploadLockReady || !context) return;
     ID3D11Texture2D* releaseTexture = nullptr;
     ID3D11ShaderResourceView* releaseLowView = nullptr;
+    ID3D11ShaderResourceView* releaseFullView = nullptr;
     void* releaseToken = nullptr;
     bool retired = false;
 
@@ -329,6 +339,7 @@ void advance(ID3D11DeviceContext* context) {
         tq::probe::count(tq::probe::CounterUploadJobsDone);
         releaseTexture = job.texture;
         releaseLowView = job.lowView;
+        releaseFullView = job.fullView;
         releaseToken = job.token;
         retired = true;
         memset((BYTE*)&job + sizeof(job.state), 0,
@@ -342,6 +353,9 @@ void advance(ID3D11DeviceContext* context) {
     // of megabytes freed inside the render thread's Present callback.
     int64_t releaseStart = (releaseLowView || releaseTexture) ? g_calls.now() : 0;
     if (releaseLowView) releaseLowView->Release();
+    // Safe even if the engine still has it bound: PSSetShaderResources takes
+    // its own reference on whatever it is given.
+    if (releaseFullView) releaseFullView->Release();
     if (releaseTexture) releaseTexture->Release();
     if (releaseStart) {
         double ms = g_calls.millisecondsSince(releaseStart);

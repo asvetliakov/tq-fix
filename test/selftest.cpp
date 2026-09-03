@@ -852,6 +852,29 @@ void testUpload() {
     check(peakAfterFirst && peakAfterFirst <= 1024u * 1024u,
           "a job's own chunks stay under the per-texture cap however cheap they get");
 
+    // The full view has to be referenced while a job holds it, or the engine
+    // can release it, D3D can reuse the allocation, and the substitution
+    // matches an unrelated texture by raw pointer.
+    tq::upload::shutdown();
+    memset(&g_upload, 0, sizeof(g_upload));
+    g_upload.nextChunkMs = 0.5;
+    tq::upload::resetRateForTest();
+    tq::upload::install(fakeUploadCalls());
+    created = nullptr;
+    handled = false;
+    tq::upload::create(nullptr, &texture.desc, texture.initial, &created,
+                       texture.topBytes, &g_upload, &handled);
+    initFakeCom(&g_upload.fullView);
+    LONG before = g_upload.fullView.refs;
+    tq::upload::noteShaderResourceView(nullptr, (ID3D11Resource*)created, nullptr,
+                                       (ID3D11ShaderResourceView*)&g_upload.fullView);
+    check(g_upload.fullView.refs == before + 1,
+          "a job takes a reference on the full view it will substitute for");
+    for (unsigned i = 0; i < 12 && tq::upload::runningJobsForTest(); ++i)
+        tq::upload::advance(context);
+    check(g_upload.fullView.refs == before,
+          "and gives it back when the job retires");
+
     tq::upload::shutdown();
     check(!tq::upload::ready() && tq::upload::runningJobsForTest() == 0,
           "shutdown clears the job pool");
