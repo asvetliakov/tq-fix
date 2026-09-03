@@ -257,6 +257,18 @@ enum Counter {
     // exactly like this, and one call a frame settles it rather than leaving
     // it as a second run.
     CounterProcAvailVaMib,
+    // Engine::PresentSurface, and the collision fixup beside it. Reading
+    // TQ.exe's main loop settled where the residual has to be: the loop runs
+    // GameEngine::Update, then *PresentSurface*, then Engine::Render -- and
+    // the probe's own frame boundary is the D3D Present *inside*
+    // PresentSurface. So the head of that function, where a wait on the
+    // swapchain or the GPU would live, has been in every frame's window and
+    // inside none of the brackets. Both are reached through TQ.exe's import
+    // table, so neither costs a byte of patched code.
+    CounterEnginePresentSurface,
+    CounterEnginePresentSurfaceUs,
+    CounterGameCollisions,
+    CounterGameCollisionsUs,
     CounterCount
 };
 

@@ -148,7 +148,38 @@ over 50 ms and 44.7% over 100 ms.
 The residual is not a steady tax: median 0.12–0.61 ms on ordinary frames, and
 twenty discrete events of 50–398 ms arriving in **bursts**.
 
-## Next: run 13, and the instrument that patches nothing
+## Run 13 killed the main-loop hypotheses, so I read the loop
+
+`Sleep`: **one call** in the session, 100 ms asked and 100 ms delivered.
+`GetMessageA`: **zero calls**. `WaitForSingleObject`: **zero**. Free address
+space never below **3,445 MiB**. The residual survived at 10.8% of the
+session and 36.3% of the time in hitching frames.
+
+`Engine::Render` has exactly one caller, `TQ.exe+0x44eea6`, and every call in
+that loop resolves through the import table. The order is `GameEngine::Update`
+→ `FixupCharacterCollisions` → **`Engine::PresentSurface`** → `Engine::Render`:
+the present is *deferred* to the top of the next iteration.
+
+**And the probe's frame boundary is the renderer's `Present`, which is called
+inside `Engine::PresentSurface`.** So the head of that function — everything
+before it reaches D3D, exactly where a swapchain or GPU wait would sit — has
+been inside every frame's window and inside none of the brackets since run 11.
+The residual was never mysterious; the instrument was standing in the one
+place it could not see.
+
+## Next: run 14
+
+`Engine::PresentSurface` and the collision fixup, both bracketed through
+TQ.exe's import table — **no patched code at all**. Ini:
+`cache/runs/run14-present-surface.ini`, settings identical to runs 10–13.
+
+If `engine_present_surface_us` takes the residual, the stalls are the game
+waiting to present, and that is mod-reachable: buffer count, sync interval,
+flip model. If neither it nor `game_collisions_us` does, what remains is two
+TQ.exe-internal calls in that loop (`0x44b590`, `0x4aa3c0`), which would need
+`.text` detours in the executable.
+
+## Superseded: run 13
 
 TQ.exe imports `Sleep`, `WaitForSingleObject`, `GetMessageA` and **no
 `PeekMessage`** — so its pump is the blocking one — and it imports

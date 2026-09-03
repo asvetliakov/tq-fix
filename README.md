@@ -233,8 +233,9 @@ sweeps beside it, any time the render path blocked on a region lock, and
 `Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
 against the half of the frame they happened in, and `GameEngine::Update` from
 `Game.dll` for the simulation that is in neither. Beside them the `loop_*`
-columns time what TQ.exe's own main loop blocks in -- its sleep, with what it
-asked for next to what it got, its message pump, and its waits -- and
+columns time what TQ.exe's own main loop does -- its sleep, with what it
+asked for next to what it got, its message pump, its waits,
+`Engine::PresentSurface` and the per-frame collision fixup -- and
 `proc_avail_va_mib` gauges the free address space. That
 last one is why a hitch row that used to say only "38 ms" can now name the
 load that caused it. Durations there are microseconds and end in `_us`, so

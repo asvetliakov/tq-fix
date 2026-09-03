@@ -837,6 +837,55 @@ above on a machine that is occasionally busy.  Both live in TQ.exe's import
 table, so measuring them is an IAT write and not a `.text` write -- the
 cheapest and most reversible instrument in this whole investigation.
 
+## 11. Run 13, and reading the main loop instead of guessing at it
+
+Run 13 timed the three things TQ.exe's main loop could block in, through its
+import table.  All three are negative, and decisively:
+
+| | |
+| --- | --- |
+| `Sleep` | **1 call in the session.** 100 ms requested, 100 ms delivered. It is not a frame limiter and it is not being overslept. |
+| `GetMessageA` | **0 calls.**  The import exists; the loop never uses it. |
+| `WaitForSingleObject` | **0 calls.** |
+| free address space | never below **3,445 MiB**.  Exhaustion is closed for good. |
+
+The residual survived at 10,476 ms -- 10.8% of the session and **36.3% of the
+time in frames over 50 ms**.
+
+So the guessing stopped and the loop was read.  `Engine::Render` has exactly
+one caller, `TQ.exe+0x44eea6`, and every call in the surrounding loop resolves
+through the import table:
+
+```
+  GetInputDevice / WorldFrustum / GetFrustumForPlayer / IsRenderingEnabled
+  Engine::Update                        <- bracketed, 10.4%
+  WorldCamera::UpdateFromInput
+  Engine::GetUpdateTime
+  GameEngine::Update                    <- bracketed, 0.4%
+  InterpenetrationManager::FixupCharacterCollisions
+  GetMachineTime                        ; [ebx+0x23c] = update time
+  Engine::PresentSurface                <- NOT BRACKETED
+  GetMachineTime                        ; edi = present time
+  Engine::Render                        <- bracketed, 57.4%
+  GetMachineTime                        ; [ebx+0x240] = render time
+  AreStatsEnabled / AddStatisticText / PlayStats::Display / UpdatePerfTracker
+  Profile::EndFrame / GameEngine::NeedsSleep
+```
+
+The loop's own order is `Update`, then **`PresentSurface`**, then `Render` --
+the present is deferred to the start of the next iteration -- and the game
+times all three for itself with `GetMachineTime`.
+
+**That is where the residual has to be, and it is a consequence of the
+instrument's own geometry.**  The probe's frame boundary is the renderer's
+`Present`, which is called *inside* `Engine::PresentSurface`.  So the head of
+that function -- everything it does before reaching D3D, which is exactly
+where a wait on the swapchain or on the GPU would sit -- has been inside every
+frame's measured window and inside none of the brackets, in every run so far.
+
+`Engine::PresentSurface` and the collision fixup are both imported by TQ.exe,
+so both are now bracketed through the import table: no patched code at all.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

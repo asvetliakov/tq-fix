@@ -574,6 +574,34 @@ BOOL __stdcall hookLoopGetMessage(LPMSG message, HWND window, UINT first,
     return result;
 }
 
+// Both __thiscall, both reached through TQ.exe's import table, both once a
+// frame. PresentSurface takes no arguments; the collision fixup takes one
+// reference, so it pops four.
+typedef void (__fastcall* PresentSurfaceFn)(void* self, void* edx);
+typedef void (__fastcall* CollisionsFn)(void* self, void* edx, const void* camera);
+PresentSurfaceFn g_presentSurface;
+CollisionsFn g_collisions;
+CallPatch g_presentSurfacePatch;
+CallPatch g_collisionsPatch;
+
+void __fastcall hookPresentSurface(void* self, void* edx) {
+    if (!g_presentSurface) return;
+    const int64_t started = tq::probe::now();
+    g_presentSurface(self, edx);
+    tq::probe::engineCount(tq::probe::CounterEnginePresentSurface);
+    tq::probe::engineCount(tq::probe::CounterEnginePresentSurfaceUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookCollisions(void* self, void* edx, const void* camera) {
+    if (!g_collisions) return;
+    const int64_t started = tq::probe::now();
+    g_collisions(self, edx, camera);
+    tq::probe::engineCount(tq::probe::CounterGameCollisions);
+    tq::probe::engineCount(tq::probe::CounterGameCollisionsUs,
+                           tq::probe::microsecondsSince(started));
+}
+
 DWORD __stdcall hookLoopWait(HANDLE handle, DWORD milliseconds) {
     if (!g_loopWait) return WAIT_FAILED;
     const int64_t started = tq::probe::now();
@@ -851,7 +879,18 @@ bool installLoop() {
     installed += redirectImport(g_loopWaitPatch, executable, "kernel32.dll",
                                 "WaitForSingleObject", (void**)&g_loopWait,
                                 (const void*)&hookLoopWait) ? 1u : 0u;
-    tq::hdr::log("Engine trace: TQ.exe main loop %u/3 imports redirected\r\n",
+    // The two calls the loop makes that do real work and sit in none of the
+    // brackets. PresentSurface is the one the loop's shape points at.
+    installed += redirectImport(g_presentSurfacePatch, executable, "Engine.dll",
+                                "?PresentSurface@Engine@GAME@@QAEXXZ",
+                                (void**)&g_presentSurface,
+                                (const void*)&hookPresentSurface) ? 1u : 0u;
+    installed += redirectImport(
+        g_collisionsPatch, executable, "Game.dll",
+        "?FixupCharacterCollisions@InterpenetrationManager@GAME@@QAEXABV"
+        "GameCamera@2@@Z",
+        (void**)&g_collisions, (const void*)&hookCollisions) ? 1u : 0u;
+    tq::hdr::log("Engine trace: TQ.exe main loop %u/5 imports redirected\r\n",
                  installed);
     if (installed) ++g_installedHooks;
     return installed != 0;
@@ -935,6 +974,10 @@ bool install(HMODULE engine) {
 void shutdown() {
     // Reverse of the install order, and each restore checks the site still
     // holds what we wrote before it puts the original back.
+    tq::detour::restoreCall(g_collisionsPatch);
+    g_collisions = nullptr;
+    tq::detour::restoreCall(g_presentSurfacePatch);
+    g_presentSurface = nullptr;
     tq::detour::restoreCall(g_loopWaitPatch);
     g_loopWait = nullptr;
     tq::detour::restoreCall(g_loopMessagePatch);
