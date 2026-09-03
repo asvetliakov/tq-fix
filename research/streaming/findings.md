@@ -1076,6 +1076,83 @@ work inside it: 4.38 s a session in archive block inflates, 1.88 GiB inflated
 to serve 1.03 GiB.  That is Stage 4.1, and it is the last item in this
 investigation with both a number and a fix.
 
+## 15. Run 17: Greece, and the peek split
+
+A different act, different archives, different terrain, and the finding
+holds -- but the split inside it is the opposite of what §14 predicted, and
+the correction matters.
+
+### The pump is route-independent
+
+| | Eternal Embers (run 16) | Greece (run 17) |
+| --- | ---: | ---: |
+| session | 101,378 ms | 87,496 ms |
+| `PeekMessageA` | 8,297 ms, **8.2%** of wall | 4,568 ms, **5.2%** of wall |
+| mean per peek | 730 µs | 455 µs |
+| worst frame | 212.0 ms | 165.2 ms |
+| `DispatchMessageA` | 15.7 µs mean | 15.4 µs mean |
+| pump's share of frames over 50 ms | 11.3% | 12.1% |
+
+Greece is quieter in absolute terms and identical in shape.  Two completely
+different regions produce the same behaviour at the same share of the hitch
+time, which is what a property of the host looks like and is not what content
+looks like.
+
+### But the expensive peeks are the ones that find a message
+
+§14 predicted the cost was in polling an empty queue.  It is not:
+
+| | calls | total | mean |
+| --- | ---: | ---: | ---: |
+| peeks that returned a message | 4,193 | 3,440 ms | **820 µs** |
+| peeks that found the queue empty | 5,844 | 1,129 ms | 193 µs |
+
+Retrieving a message costs four times what finding nothing costs, and 75% of
+all the peek time is in retrieval.
+
+The per-frame numbers say what that means, and it is not queue depth.  The
+median frame sees **one** message and 2,574 of 5,842 frames see none; the
+maximum in any frame is six.  On the worst frames:
+
+```
+ frame       ms |   peek(empty)  peek(message) | #peek #empty #msg
+  4633    188.7 |          0.0          165.2  |     4      1     3
+  5360    141.7 |          0.0          126.3  |     2      1     1
+  3451    147.1 |          0.0          125.2  |     2      1     1
+  4858    131.5 |        118.9            0.0  |     1      1     0
+```
+
+**A single `PeekMessageA` retrieving a single message takes 126-165 ms.**  And
+frame 4858 shows an empty poll doing the same thing, so both forms can block.
+
+That is not a cost proportional to work; it is a round trip that sometimes
+does not come back for a fifth of a second.  Retrieval is dearer on average
+only because it must always ask, where an empty poll can sometimes be answered
+without asking.  The conclusion of §14 survives -- the cost is the round trip,
+not anything the game or its window does -- but the reasoning given for it was
+wrong and is corrected here.
+
+### Also from this run: Stage 4.1's case is stronger in the base game
+
+| | blocks | inflated | requested | amplification |
+| --- | ---: | ---: | ---: | ---: |
+| Eternal Embers | 7,491 | 1,917,696 KiB | 1,070,055 KiB | 1.8x |
+| **Greece** | 4,560 | 1,167,360 KiB | 505,729 KiB | **2.3x** |
+
+Greece does about half the archive work and wastes a larger fraction of it:
+2.3 bytes inflated for every byte asked for, at 467 µs a block.  The
+single-slot cache is worse where the reads are smaller, which is what a
+one-entry cache in front of a 2 GB file should do.
+
+### A note on why the message histogram is missing from this run
+
+It was written from `engineprobe::shutdown()`, which never runs.  Titan Quest
+exits without unloading, so `reserved` is set at `DLL_PROCESS_DETACH` and
+`src/fix.cpp` takes the branch that calls only `probe::flushOnExit()` -- the
+reason that function exists at all.  The histogram now writes from the
+`Engine::Render` bracket every 1,800 frames instead, so the last snapshot
+covers nearly the whole session whether or not teardown is reached.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to
