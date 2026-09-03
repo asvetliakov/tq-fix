@@ -2,13 +2,27 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 47 measured
-and rejected**, after its one-frame shadow reuse visibly flickered and deferred
-the remaining felt play burst by one frame, on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current as of **run 48 measured**,
+after it proved that every shadow-nested resource load in play is cold state-0
+demand rather than work already in the loader queue, on branch
+`stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**Run 48 result -- read findings §52 and §51 first.** Across **play**, all 214
+directional-shadow resource loads and all 451.588 ms enter in raw loaded state
+0; state 1, state 2, other, and the queue-link count are all exactly zero. On
+the marked collision-active full-scene **play** transition, all 65 nested loads
+and all 147.135 ms are state 0 with no queue link, beside a 230.289 ms
+directional GPU interval. The renderer discovers cold resources inside the
+shadow build; it is not joining loader work already in flight. Pure loader
+priority is therefore out. Earlier residency would need explicit earlier
+shadow-caster discovery. The next boundary to identify is the caller above
+`Resource::EnsureAvailable` and its per-caster selection/draw site, so an exact
+preload or state-0-caster omission can be designed. `shadow_split` remains
+untouched.
 
 **Run 47 result -- read findings §50 and §49 first.** The one-frame whole-map
 reuse is rejected. Before the CSV was read, the reporter observed three
@@ -686,12 +700,12 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   playable configuration:
   `cp cache/runs/live-config.ini "$GAME/tqflicker.ini"`.
 - **The CSVs live in the game directory** as
-  `tqflicker-frames.runN.csv`, runs 9-47, plus `tqflicker-debug.runN.log` for
+  `tqflicker-frames.runN.csv`, runs 9-48, plus `tqflicker-debug.runN.log` for
   runs 9-33. **Runs 34-39 have no debug log** because they ran with `trace=0`;
   if the message histogram or the slow-caller tables are wanted, a run needs
   `[debug] trace=1`.
-- **Runs 34-47 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
-  only run 39 has `pump_timer_full` / `pump_timer_split`, runs 40-47 have the
+- **Runs 34-48 are the only ones with `draw_submit_ms` / `map_resource_ms`,**
+  only run 39 has `pump_timer_full` / `pump_timer_split`, runs 40-48 have the
   F12 marker, run 42 has the sent-window-procedure split, and only run 43 has
   the withdrawn thread-CPU/query columns, run 44 has the external
   `sample` reports under `cache/samples/`, and run 45 is the corrected-writer
@@ -708,7 +722,13 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   `cache/runs/run47-shadow-transition-reuse.ini` differs from the normal live
   config by one performance variable (`shadow_transition_reuse=1`) and the
   same two instruments as run 46. See findings §50; the switch is rejected.
-- **The route is scripted and identical in all twenty-six full runs**: menu,
+- **Run 48 is archived.** `tqflicker-frames.run48.csv` has SHA-256
+  `1c3a51470c485f21eb44fd18844d8cdf598ddf0435929051285eff9f3279609b`.
+  `cache/runs/run48-shadow-resource-lifecycle.ini` differs from normal only by
+  full performance tracing and the passive F12 marker. It changes no game
+  behaviour and leaves `shadow_transition_reuse` absent/default-off. See
+  findings §52.
+- **The route is scripted and identical in all twenty-seven full runs**: menu,
   load-game, a 9-16 s loading screen, an outdoor stretch, an indoor stretch, an
   outdoor stretch, exit. World entry is the first frame with
   `draw_indexed >= 500`; the in-play transition stutter lands at
@@ -719,15 +739,15 @@ then the indoor/outdoor share both vary with how the route is walked (§34,
   appends to nothing.
 - **The pinned `Engine.dll` is SHA-256 `0aedbb18...f694f6`**;
   `research/streaming/tools/verify-sites.py` checks every byte table in
-  `src/engine_probe.cpp` against it and the other two modules. **154 checks**,
+  `src/engine_probe.cpp` against it and the other two modules. **162 checks**,
   and every constant perturbation must fail it.
 - **The normal safe configuration is installed.** The installed `winmm.dll`
-  is byte-identical to
+  remains byte-identical to
   `build/winmm.dll`, SHA-256
-  `91fa19140f2989f2de6998f306da64bf551f322ef2dec9e6aa8cfad90b411a06`;
+  `87f9b12da26c055d9134064b0d87701c54eca1aa9048cc767e75f34744d8fbec`;
   the installed `tqflicker.ini` is byte-identical to `live-config.ini`, so
-  `shadow_transition_reuse` is default-off, and the archived live CSV has been
-  removed. The game has not been launched since that restoration.
+  `shadow_transition_reuse` is absent/default-off, and the archived live CSV
+  has been removed. The game has not been launched since that restoration.
 
 ## Stage 5.1, built and run. The design record, and where it was wrong
 

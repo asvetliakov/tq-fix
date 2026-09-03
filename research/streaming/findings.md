@@ -4506,6 +4506,99 @@ configuration. A further shadow fix needs to make the caster resources ready
 before the visible transition or genuinely distribute the build without
 showing a stale map; merely postponing the same call is not such a fix.
 
+## 51. Run 48 design: shadow-resource lifecycle, before choosing a fix
+
+Run 47 makes the architectural question narrower, but does not answer it. On
+the deferred **play** build, all 117.641 ms of main-thread resource loading is
+inside `RenderDirectional`. That can still mean either that the loader worker
+had already started those resources and the render thread joined unfinished
+work, or that shadow caster traversal discovered unloaded resources and forced
+their first load synchronously. The first supports resource priority/readiness
+work; the second supports earlier caster discovery or omitting only unavailable
+casters. Guessing between them would repeat the error this project has made.
+
+Run 48 adds a raw, per-frame partition of every main-thread
+`ResourceLoader::LoadResource` call nested inside the directional build. It
+samples the resource immediately before calling the original function:
+
+- `engine_shadow_res_state0` / `_us`: loaded state 0 and its complete call
+  duration;
+- `engine_shadow_res_state1` / `_us`: loaded state 1 and its duration;
+- `engine_shadow_res_state2` / `_us`: loaded state 2, retained as a
+  race/assumption check;
+- `engine_shadow_res_state_other` / `_us`: every other raw value;
+- `engine_shadow_res_in_queue` / `_us`: queue-link non-null and the same call
+  duration, deliberately overlapping the state partition.
+
+The meanings come from the engine rather than names invented for the columns.
+`Resource::EnsureAvailable` calls `LoadResource` when state is not 2;
+`LoadResource` waits on the resource lock when state is 1; and exported
+`Resource::GetLoadedState` is exactly `mov eax,[ecx+0x30]; ret`. Exported
+`Resource::GetInLoadingQueue` tests `[ecx+0x60]` against null. Two new 16-byte
+windows and both exact exports are checked at runtime before either field is
+read. `verify-sites.py` performs 162 checks after adding the same assertions.
+
+This adds no new detour or call-site patch. The existing verified
+`LoadResource` detour reads two fields only for the small population that is
+both on the main thread and already inside the existing directional-shadow
+bracket. Every engine duration remains `_us`; no game time is charged to the
+mod. The switch rejected by run 47 is absent from the run INI, so no shadow or
+resource behaviour changes.
+
+`cache/runs/run48-shadow-resource-lifecycle.ini` differs from
+`live-config.ini` only by `performance_trace=full` and the passive F12 marker.
+Judge the marked collision-active full-scene **play** transition. State 1 and
+the queue flag owning the time would support option 2, loader scheduling or
+priority. State 0 owning it would support option 3 or shadow-specific early
+residency. Neither result by itself authorizes a fix; it chooses which boundary
+to reverse-engineer next.
+
+## 52. Run 48: shadow traversal demands cold resources; the queue has none
+
+Run 48 is archived as `tqflicker-frames.run48.csv`, SHA-256
+`1c3a51470c485f21eb44fd18844d8cdf598ddf0435929051285eff9f3279609b`.
+It contains 7,474 contiguous rows. The five session parts are: **menu** frames
+0-1906 (17.885 s), **load-game frame** 1907 (1.536 s), **loading screen**
+1908-3090 (10.434 s), **first world frame** 3091 (1.438 s), and **play**
+frames 3092-7473 (67.253 s).
+
+The lifecycle partition is exact, not a majority result. Across **play**, all
+214 directional-shadow resource loads, totaling 451.588 ms, enter
+`ResourceLoader::LoadResource` in raw loaded state 0. State 1, state 2,
+state-other, and the non-null queue-link count are all zero. The state buckets
+equal `engine_shadow_res_load` in both count and microseconds on every row, so
+there is no missing or misaligned population. The one shadow load in the
+**menu** and the one on the **first world frame** are also state 0; neither the
+**load-game frame** nor the **loading screen** has a directional-shadow load.
+
+The one F12 marker is frame 6764 in **play**. Its reaction window contains the
+collision-active full-scene outdoor-transition onset on frame 6728: 318.412 ms
+for the frame, 298.020 ms in `Engine::Render`, and 151.041 ms in the
+directional-shadow call. All 65 resource loads nested there and all 147.135 ms
+of their duration are state 0, with no queue link. The same call has a 230.289
+ms directional GPU interval. These intervals overlap and must not be added.
+The following **play** frame 6729 is 97.419 ms with no resource load. Its Peek
+times are 0.308 and 0.132 ms respectively, so the marked class is again not
+the message pump.
+
+The later non-region event is also cold demand. **Play** frame 6804 has 31
+state-0 shadow loads totaling 74.212 ms and a 131.852 ms directional GPU
+interval, with no state-1 or queued resource and no region change. Frame 6805
+then lasts 78.457 ms. This is the same limitation seen in runs 46-47: a region
+change is neither necessary for a shadow-resource burst nor a complete
+scheduling trigger.
+
+This rules out the narrow loader-priority hypothesis for the felt class: there
+is no already-queued or already-loading work for the main thread to prioritize
+or wait out. It does not rule out explicit earlier residency, but that fix
+would first have to discover the shadow-only caster resources the stock queue
+has not seen. The supported next boundary is therefore the call path above
+`Resource::EnsureAvailable` inside `RenderDirectional`: identify the resource
+types and the per-caster selection/draw site, then choose between explicitly
+preloading those resources earlier and omitting only state-0 casters until
+resident. No whole-map reuse, longer skip, `shadow_split` reduction, message
+pump change, or general resource-loader rewrite follows from this result.
+
 
 ## Cross-references worth acting on
 

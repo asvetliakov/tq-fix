@@ -1910,6 +1910,37 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     check(tq::probe::counterForTest(0, tq::probe::CounterEngineTexCreateOff) == 0,
           "the engine channel drains, so a count is charged to one frame only");
 
+    // Run 48's shadow-resource lifecycle split. The four loaded-state buckets
+    // partition the nested calls; in_queue is deliberately overlapping and
+    // must carry the same call duration rather than stealing it from state 1.
+    tq::engineprobe::countShadowResourceStateForTest(0, false, 1100);
+    tq::engineprobe::countShadowResourceStateForTest(1, true, 2200);
+    tq::engineprobe::countShadowResourceStateForTest(2, false, 3300);
+    tq::engineprobe::countShadowResourceStateForTest(7, true, 4400);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState0) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState0Us) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState1) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState1Us) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState2) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResState2Us) == 3300
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResStateOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResStateOtherUs) == 4400,
+          "shadow resource loaded-state buckets partition calls and durations");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResInQueue) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResInQueueUs) == 6600,
+          "shadow resource queue flag overlaps its loaded-state buckets");
+
     // A steady baseline, then one frame that spikes in a single phase. The row
     // for that frame has to name the phase, not merely report the frame time.
     for (unsigned i = 0; i < 90; ++i) tq::probe::endFrame(16.7f);
@@ -1998,7 +2029,12 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     check(csvText && strstr(csvText, "engine_shadow_render_us") != nullptr
           && strstr(csvText, "engine_shadow_region_change") != nullptr
           && strstr(csvText, "engine_shadow_reuse") != nullptr
-          && strstr(csvText, "engine_shadow_res_load_us") != nullptr,
+          && strstr(csvText, "engine_shadow_res_load_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_state0_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_state1_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_state2_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_state_other_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_in_queue_us") != nullptr,
           "the header carries the directional-shadow attribution columns");
     // The permanent regression test for the header buffer. snprintf truncation
     // is silent -- `n += snprintf(...)` returns the length it wanted, so an

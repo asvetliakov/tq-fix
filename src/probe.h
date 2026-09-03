@@ -231,6 +231,23 @@ enum Counter {
     CounterEngineShadowReuse,
     CounterEngineShadowResLoad,
     CounterEngineShadowResLoadUs,
+    // State sampled immediately before each main-thread resource load nested
+    // in the directional-shadow call. These subsets answer whether the
+    // renderer waited for work already in flight (state 1) or discovered an
+    // unloaded caster resource and loaded it itself (state 0). State 2 is
+    // retained as a race/assumption check. `in_queue` overlaps the states and
+    // is not a fourth partition. Every `_us` is the complete corresponding
+    // LoadResource call duration.
+    CounterEngineShadowResState0,
+    CounterEngineShadowResState0Us,
+    CounterEngineShadowResState1,
+    CounterEngineShadowResState1Us,
+    CounterEngineShadowResState2,
+    CounterEngineShadowResState2Us,
+    CounterEngineShadowResStateOther,
+    CounterEngineShadowResStateOtherUs,
+    CounterEngineShadowResInQueue,
+    CounterEngineShadowResInQueueUs,
     CounterEngineRegionUnload,
     CounterEngineRegionUnloadUs,
     // Archive::ReadFromFile calls and the bytes they asked for. Counted, not

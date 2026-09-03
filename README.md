@@ -385,7 +385,13 @@ own resource work rather than the mod's: forced level loads and how much of
 their cost landed on the game's main thread, resource loads and the queue
 behind them, region unloads, archive reads, the 256 KiB block inflates under
 them, the directional-shadow build and any main-thread resource loads nested
-inside it, the loader-fence wait in `Engine::Update`, the seven resource-manager
+inside it, and the loaded state sampled immediately before each of those
+shadow loads. `engine_shadow_res_state0` / `state1` / `state2` / `state_other`
+are mutually exclusive; their `_us` partners carry the corresponding complete
+`LoadResource` durations. `engine_shadow_res_in_queue` is an overlapping
+cross-check, not another bucket to add. State 0 means the shadow traversal
+demanded an unloaded resource; state 1 means it met resource work already in
+flight. The loader-fence wait in `Engine::Update`, the seven resource-manager
 sweeps beside it, any time the render path blocked on a region lock, and
 `Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
 against the half of the frame they happened in, and `GameEngine::Update` from
@@ -399,6 +405,11 @@ window message pump, and its sleep with what it asked for beside what it got
 last one is why a hitch row that used to say only "38 ms" can now name the
 load that caused it. Durations there are microseconds and end in `_us`, so
 `frames.py` counts them separately from the mod's own millisecond phases.
+
+Run 48 found the lifecycle split entirely in state 0: all 214 nested shadow
+loads in play, totaling 451.588 ms, were unloaded and none had a queue link.
+For this class the renderer discovers cold work; it is not joining work the
+loader already has in flight.
 
 The `arc_cache_*` columns beside them are the mod's, not the game's: they price
 `archive_cache_mb` against the `engine_arc_*` columns it exists to reduce.
@@ -430,7 +441,9 @@ update/render brackets, `256` `Game.dll`'s simulation tick, `512` TQ.exe's
 main loop, `1024` the inside of the window message pump, `2048`
 `Engine.dll`'s array allocator, `4096` the seek and read under the archive
 block routine, `8192` everything in `Engine.dll` that can block -- so a run
-that misbehaves can be narrowed without a rebuild.
+that misbehaves can be narrowed without a rebuild. `16384` brackets the direct
+directional-shadow build; combine it with `2` to populate both the nested-load
+totals and their loaded-state/queue lifecycle split.
 
 `timer_period_ms` is an experiment attached to that trace rather than a
 setting to leave on. Three quarters of the slow message retrievals measured on

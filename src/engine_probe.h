@@ -57,8 +57,11 @@ namespace engineprobe {
 //      because they check these same slots still hold kernel32's exports.
 //16384 the deferred renderer's one GraphicsShadowMapDx11::RenderDirectional
 //      call: whole-call CPU time, region changes, and main-thread resource
-//      loads nested inside it. Select group 2 as well when using a mask so
-//      ResourceLoader::LoadResource is present to populate the nested pair.
+//      loads nested inside it. With group 2, each nested load is also split by
+//      the resource's raw pre-call loaded state (0/1/2/other) and overlapping
+//      in-queue flag, choosing between cold shadow demand and joining work the
+//      loader already had in flight. Select group 2 as well when using a mask
+//      so ResourceLoader::LoadResource is present to populate both splits.
 void readOptions(const wchar_t* iniPath);
 
 // [performance] timer_period_ms, an experiment rather than a fix.
@@ -140,6 +143,8 @@ bool shadowTransitionReuseForTest();
 // module. The production wrapper uses these same two helpers.
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix);
 bool reuseShadowForTest(void* region, void* surface, void* matrix);
+void countShadowResourceStateForTest(unsigned state, bool inQueue,
+                                     unsigned elapsedUs);
 // The slow-LoadLevel caller table, which decides where Stage 5.1 should point.
 // Driven directly rather than through a real detour: what is worth testing is
 // the aggregation and the module bound, not __builtin_return_address.

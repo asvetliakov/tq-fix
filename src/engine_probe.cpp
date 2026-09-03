@@ -129,6 +129,32 @@ const BYTE kLoadResourceBytes[] = {
 };
 const Relocation kLoadResourceRelocs[] = {{3, 0x2a2db8}};
 
+// Resource::GetLoadedState and Resource::GetInLoadingQueue derive the two
+// fields the shadow-resource lifecycle trace reads. These accessors are not
+// patched; their 16-byte windows and exports make the layout a runtime-checked
+// fact before hookLoadResource dereferences either offset.
+const DWORD kResourceLoadedStateRva = 0x213180;
+const DWORD kResourceLoadedStateOffset = 0x30;
+const char kResourceLoadedStateName[] =
+    "?GetLoadedState@Resource@GAME@@QBE?AW4LoadState@12@XZ";
+const BYTE kResourceLoadedStateBytes[] = {
+    0x8b, 0x41, 0x30,                          // mov eax,[ecx+0x30]
+    0xc3,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc
+};
+const DWORD kResourceInQueueRva = 0x212d20;
+const DWORD kResourceInQueueOffset = 0x60;
+const char kResourceInQueueName[] =
+    "?GetInLoadingQueue@Resource@GAME@@QBE_NXZ";
+const BYTE kResourceInQueueBytes[] = {
+    0x33, 0xc0,                                // xor eax,eax
+    0x39, 0x41, 0x60,                          // cmp [ecx+0x60],eax
+    0x0f, 0x95, 0xc0,                          // setne al
+    0xc3,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+};
+
 // --- The deferred renderer's one call to the DX11 directional-shadow build.
 // This is a call-site patch, not another entry detour: only this orchestration
 // path is timed, and the four-byte E8 displacement is the only code changed.
@@ -998,6 +1024,7 @@ int g_cachedShadowResult;
 bool g_cachedShadowValid;
 bool g_reusedLastShadow;
 bool g_shadowTracing;
+bool g_resourceStateVerified;
 
 // Which call site the expensive forced loads actually come from -- the one
 // fact runs 27 and 28 left missing, and the reason Stage 5.1 was aimed wrong.
@@ -1353,20 +1380,60 @@ void* __fastcall hookGuaranteedGetLevel(void* self, void* edx, int flag) {
     return level;
 }
 
+void countShadowResourceState(unsigned state, bool inQueue,
+                              uint32_t elapsed) {
+    tq::probe::Counter count = tq::probe::CounterEngineShadowResStateOther;
+    tq::probe::Counter duration =
+        tq::probe::CounterEngineShadowResStateOtherUs;
+    if (state == 0) {
+        count = tq::probe::CounterEngineShadowResState0;
+        duration = tq::probe::CounterEngineShadowResState0Us;
+    } else if (state == 1) {
+        count = tq::probe::CounterEngineShadowResState1;
+        duration = tq::probe::CounterEngineShadowResState1Us;
+    } else if (state == 2) {
+        count = tq::probe::CounterEngineShadowResState2;
+        duration = tq::probe::CounterEngineShadowResState2Us;
+    }
+    tq::probe::engineCount(count);
+    tq::probe::engineCount(duration, elapsed);
+    if (inQueue) {
+        tq::probe::engineCount(tq::probe::CounterEngineShadowResInQueue);
+        tq::probe::engineCount(tq::probe::CounterEngineShadowResInQueueUs,
+                               elapsed);
+    }
+}
+
 void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     if (!g_loadResource) return;
+    // Sample before entering the game function: state 1 is the branch that
+    // waits for the loader worker, while state 0 falls through to a direct
+    // load on this thread. The resource is necessarily a live Resource -- the
+    // original reads +0x30 before doing anything else -- and the two offsets
+    // are enabled only after their exported accessors and bytes verify.
+    const bool main = onMainThread();
+    const bool inShadow = main
+        && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0;
+    const bool classify = inShadow && g_resourceStateVerified && resource;
+    const unsigned state = classify
+        ? *(const unsigned*)((const BYTE*)resource + kResourceLoadedStateOffset)
+        : 0;
+    const bool inQueue = classify
+        && *(void* const*)((const BYTE*)resource + kResourceInQueueOffset)
+            != nullptr;
     const int64_t started = tq::probe::now();
     g_loadResource(self, edx, resource);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
     tq::probe::engineCount(tq::probe::CounterEngineResLoad);
     tq::probe::engineCount(tq::probe::CounterEngineResLoadUs, elapsed);
-    if (onMainThread()) {
+    if (main) {
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMain);
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMainUs, elapsed);
-        if (InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0) {
+        if (inShadow) {
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoad);
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoadUs,
                                    elapsed);
+            if (classify) countShadowResourceState(state, inQueue, elapsed);
         }
     }
 }
@@ -2183,9 +2250,29 @@ void note(const char* what, bool ok) {
     tq::hdr::log("Engine trace: %s %s\r\n", what, ok ? "installed" : "skipped");
 }
 
+bool verifyResourceStateLayout(HMODULE engine) {
+    void* const state = resolve(engine, kResourceLoadedStateName,
+                                kResourceLoadedStateRva);
+    void* const queue = resolve(engine, kResourceInQueueName,
+                                kResourceInQueueRva);
+    const bool ok = state && queue
+        && tq::detour::matches(
+               engine, state,
+               signature(kResourceLoadedStateBytes,
+                         sizeof(kResourceLoadedStateBytes)))
+        && tq::detour::matches(
+               engine, queue,
+               signature(kResourceInQueueBytes,
+                         sizeof(kResourceInQueueBytes)));
+    tq::hdr::log("Engine trace: Resource loaded-state/queue layout %s\r\n",
+                 ok ? "verified" : "unavailable");
+    return ok;
+}
+
 // Every attach here hands the detour the global the hook calls through, so the
 // trampoline is published before the entry is patched rather than after.
 bool installLoads(HMODULE engine) {
+    g_resourceStateVerified = verifyResourceStateLayout(engine);
     void* target = resolve(engine, kLoadLevelName, kLoadLevelRva);
     if (target)
         tq::detour::attach(g_loadLevelDetour, engine, target,
@@ -3027,6 +3114,7 @@ void shutdown() {
     g_unloadLevel = nullptr;
     tq::detour::detach(g_loadResourceDetour);
     g_loadResource = nullptr;
+    g_resourceStateVerified = false;
     tq::detour::detach(g_guaranteedDetour);
     g_guaranteedGetLevel = nullptr;
     tq::detour::detach(g_loadLevelDetour);
@@ -3059,6 +3147,10 @@ bool reuseShadowForTest(void* region, void* surface, void* matrix) {
         region && g_lastShadowRegion && region != g_lastShadowRegion;
     if (region) g_lastShadowRegion = region;
     return reusePreviousShadow(changed, surface, matrix);
+}
+void countShadowResourceStateForTest(unsigned state, bool inQueue,
+                                     unsigned elapsedUs) {
+    countShadowResourceState(state, inQueue, elapsedUs);
 }
 void slowLoadResetForTest(const void* base) {
     g_engineBase = (const BYTE*)base;

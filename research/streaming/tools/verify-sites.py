@@ -420,6 +420,28 @@ def check_directional_shadow(engine):
        % (argument[20], copy[3]))
 
 
+def check_resource_lifecycle(engine):
+    """Prove the two Resource fields sampled before a shadow-forced load."""
+    print("\nShadow-resource lifecycle")
+    state = table("kResourceLoadedStateBytes")
+    state_offset = const("kResourceLoadedStateOffset")
+    queue = table("kResourceInQueueBytes")
+    queue_offset = const("kResourceInQueueOffset")
+    ok(len(state) == 16 and state[0:2] == [0x8b, 0x41]
+       and state[2] == state_offset and state[3] == 0xc3,
+       "Resource::GetLoadedState returns resource+%#x" % state_offset)
+    ok(len(queue) == 16 and queue[0:2] == [0x33, 0xc0]
+       and queue[2:4] == [0x39, 0x41] and queue[4] == queue_offset
+       and queue[5:9] == [0x0f, 0x95, 0xc0, 0xc3],
+       "Resource::GetInLoadingQueue tests resource+%#x" % queue_offset)
+    ok(engine.exports().get(cstr("kResourceLoadedStateName"))
+       == const("kResourceLoadedStateRva"),
+       "loaded-state accessor export resolves to its recorded RVA")
+    ok(engine.exports().get(cstr("kResourceInQueueName"))
+       == const("kResourceInQueueRva"),
+       "in-queue accessor export resolves to its recorded RVA")
+
+
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
     game = PE(os.path.join(GAME, "Game.dll"))
@@ -434,6 +456,8 @@ def main():
     for label, rva, rel in [
             ("kLoadLevelBytes", "kLoadLevelRva", None),
             ("kLoadResourceBytes", "kLoadResourceRva", "kLoadResourceRelocs"),
+            ("kResourceLoadedStateBytes", "kResourceLoadedStateRva", None),
+            ("kResourceInQueueBytes", "kResourceInQueueRva", None),
             ("kUnloadLevelBytes", "kUnloadLevelRva", "kUnloadLevelRelocs"),
             ("kEnqueueBytes", "kEnqueueRva", "kEnqueueRelocs"),
             ("kReadFromFileBytes", "kReadFromFileRva", None),
@@ -480,6 +504,10 @@ def main():
     for pe, label, name_const, rva_const in [
             (engine, "Engine", "kLoadLevelName", "kLoadLevelRva"),
             (engine, "Engine", "kLoadResourceName", "kLoadResourceRva"),
+            (engine, "Engine", "kResourceLoadedStateName",
+             "kResourceLoadedStateRva"),
+            (engine, "Engine", "kResourceInQueueName",
+             "kResourceInQueueRva"),
             (engine, "Engine", "kUnloadLevelName", "kUnloadLevelRva"),
             (engine, "Engine", "kEnqueueName", "kEnqueueRva"),
             (engine, "Engine", "kReadFromFileName", "kReadFromFileRva"),
@@ -520,6 +548,7 @@ def main():
     check_archive_cache(engine)
     check_async_level_load(engine, sites)
     check_directional_shadow(engine)
+    check_resource_lifecycle(engine)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}
