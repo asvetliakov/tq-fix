@@ -1153,6 +1153,59 @@ reason that function exists at all.  The histogram now writes from the
 `Engine::Render` bracket every 1,800 frames instead, so the last snapshot
 covers nearly the whole session whether or not teardown is reached.
 
+## 16. Run 18: what the messages are
+
+The histogram, from the last snapshot of a 105-second Eternal Embers session:
+
+| message | count | retrieved by a peek over 5 ms | slow rate |
+| --- | ---: | ---: | ---: |
+| `WM_MOUSEMOVE` | 2,158 | 28 | 1.3% |
+| **`WM_TIMER`** | **1,495** | **90** | **6.0%** |
+| `WM_LBUTTONDOWN` / `UP` | 53 | 0 | |
+| `WM_MOUSEWHEEL` | 9 | 0 | |
+| keyboard | 9 | 0 | |
+| `WM_PAINT` | 1 | 0 | |
+
+Nine kinds of message in a whole session, 3,725 in total.  **76% of the slow
+retrievals (90 of 118) return `WM_TIMER`**, and a `WM_TIMER` retrieval is 4.6
+times more likely to be slow than a mouse move.
+
+That is a real asymmetry and it has a mechanical explanation.  `WM_TIMER` is
+**synthesized, not queued**: nothing posts it, and `PeekMessage` manufactures
+it when the queue is otherwise empty and a timer has expired.  Finding one
+therefore *requires* asking the host, where a queued message may already be in
+the client's own buffer.  So the messages most likely to be slow are exactly
+the messages that cannot be answered without a round trip -- which is the same
+explanation §14 and §15 arrived at, arriving a third time by a different road.
+
+**The timer is the game's own.**  `TQ.exe` imports `SetTimer` and `KillTimer`
+(`Engine.dll` and `Game.dll` import neither), and `WM_TIMER` arrives at 14.2 a
+second against `WM_MOUSEMOVE`'s 20.5.
+
+Run 18's peek numbers, for the record: 9,002 ms, 8.5% of wall clock;
+retrievals 6,651 ms over 5,042 calls (1,319 µs mean); empty polls 2,351 ms
+over 7,925 calls (297 µs mean).
+
+### Correlation or cause, and the experiment that separates them
+
+Two readings fit the asymmetry equally well so far:
+
+- the timer *causes* the stalls, because servicing it forces a round trip
+  fourteen times a second; or
+- the timer merely *correlates*, because a peek that has to go to the host is
+  both slow and the only kind that can come back with a `WM_TIMER`.
+
+They differ in what would help.  `[performance] timer_period_ms` settles it:
+`0` is the default and leaves the game's own period alone, byte for byte; any
+other value replaces the period `TQ.exe` asks for.  If the stalls scale with
+the timer rate the first reading is right; if lengthening the period changes
+nothing, the second is, and the pump is closed as a host property with no
+lever in it.
+
+`SetTimer` is now also logged with its arguments on the first eight calls, so
+the next run reports the period the game actually asks for -- which nothing
+has ever recorded.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

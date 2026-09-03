@@ -73,6 +73,7 @@ peak_nits=auto
 [performance]
 streaming=optimized
 loose_texture_max=0
+timer_period_ms=0
 
 [debug]
 frame_overlay=0
@@ -256,6 +257,16 @@ the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the
 update/render brackets, `256` `Game.dll`'s simulation tick, `512` TQ.exe's
 main loop, `1024` the inside of the window message pump -- so a run that
 misbehaves can be narrowed without a rebuild.
+
+`timer_period_ms` is an experiment attached to that trace rather than a
+setting to leave on. Three quarters of the slow message retrievals measured on
+this install return `WM_TIMER`, which is synthesized rather than queued -- so
+retrieving it means asking the host whether a timer expired, and under
+CrossOver that ask is the expensive part. At `0`, the default, the game's own
+period is used and the build is byte-identical to not having the option. Any
+other value (up to 1000) replaces the period `TQ.exe` asks for, so a run can
+test whether the stalls scale with the timer rate. It only takes effect while
+the engine trace is installed.
 
 The `512` group is the only one that patches nothing: it redirects three
 entries of TQ.exe's own import address table, so it is scoped to the one

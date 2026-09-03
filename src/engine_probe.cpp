@@ -344,6 +344,7 @@ const unsigned kGroupLoop = 0x200;
 const unsigned kGroupPump = 0x400;
 
 unsigned g_traceMask = 1;
+unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
 
 LONG g_installed;
 unsigned g_installedHooks;
@@ -687,6 +688,26 @@ ThisVoidFn g_quests;
 PumpFn g_pump;
 CallPatch g_platformPatch, g_gfxOptionsPatch, g_jukeboxPatch;
 CallPatch g_soundPatch, g_questsPatch, g_pumpPatch;
+
+// The game's timer, logged and optionally re-periodised. Hooking SetTimer
+// costs nothing -- it is called a handful of times in a session -- and the
+// first few calls say what the period actually is, which nothing has ever
+// reported.
+typedef UINT_PTR (WINAPI* SetTimerFn)(HWND, UINT_PTR, UINT, TIMERPROC);
+SetTimerFn g_setTimer;
+CallPatch g_setTimerPatch;
+LONG g_setTimerCalls;
+
+UINT_PTR __stdcall hookSetTimer(HWND window, UINT_PTR id, UINT elapse,
+                                TIMERPROC callback) {
+    if (!g_setTimer) return 0;
+    const UINT period = g_timerPeriodMs ? g_timerPeriodMs : elapse;
+    if (InterlockedIncrement(&g_setTimerCalls) <= 8)
+        tq::hdr::log("Engine trace: SetTimer(hwnd=%p id=%u elapse=%u proc=%p)"
+                     " -> period %u\r\n", (void*)window, (unsigned)id, elapse,
+                     (void*)callback, period);
+    return g_setTimer(window, id, period, callback);
+}
 
 void __stdcall hookPlatform(void) {
     if (!g_platform) return;
@@ -1103,8 +1124,11 @@ bool installLoop() {
                                 "?ProcessMessages@EWindow@GAME@@QAE_NXZ",
                                 (void**)&g_pump,
                                 (const void*)&hookPump) ? 1u : 0u;
-    tq::hdr::log("Engine trace: TQ.exe main loop %u/11 imports redirected\r\n",
-                 installed);
+    installed += redirectImport(g_setTimerPatch, executable, "user32.dll",
+                                "SetTimer", (void**)&g_setTimer,
+                                (const void*)&hookSetTimer) ? 1u : 0u;
+    tq::hdr::log("Engine trace: TQ.exe main loop %u/12 imports redirected"
+                 " (timer_period_ms=%u)\r\n", installed, g_timerPeriodMs);
     if (installed) ++g_installedHooks;
     return installed != 0;
 }
@@ -1165,6 +1189,14 @@ void readOptions(const wchar_t* iniPath) {
     g_traceMask = iniPath && iniPath[0]
         ? (unsigned)GetPrivateProfileIntW(L"debug", L"engine_trace", 1, iniPath)
         : 1u;
+    // A game-behaviour change, so it lives under [performance] and defaults
+    // to leaving the game alone. Clamped: a period of zero would be a request
+    // for the system minimum, and anything over a second would stop whatever
+    // the timer drives rather than slow it.
+    const int period = iniPath && iniPath[0]
+        ? GetPrivateProfileIntW(L"performance", L"timer_period_ms", 0, iniPath)
+        : 0;
+    g_timerPeriodMs = period > 0 && period <= 1000 ? (unsigned)period : 0u;
 }
 
 bool install(HMODULE engine) {
@@ -1208,6 +1240,8 @@ void shutdown() {
     g_dispatchMessage = nullptr;
     tq::detour::restoreCall(g_peekPatch);
     g_peekMessage = nullptr;
+    tq::detour::restoreCall(g_setTimerPatch);
+    g_setTimer = nullptr;
     tq::detour::restoreCall(g_pumpPatch);
     g_pump = nullptr;
     tq::detour::restoreCall(g_questsPatch);

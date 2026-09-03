@@ -42,6 +42,20 @@ namespace engineprobe {
 //      Engine.dll's imports rather than the executable's
 void readOptions(const wchar_t* iniPath);
 
+// [performance] timer_period_ms, an experiment rather than a fix.
+//
+// 76% of the slow message retrievals return WM_TIMER, and WM_TIMER is
+// synthesized rather than queued -- PeekMessage has to ask the host whether a
+// timer has expired, which under CrossOver is the round trip that costs. The
+// game sets one via TQ.exe's SetTimer import at about 14 messages a second.
+//
+// 0, the default, changes nothing and is byte-identical to not having this.
+// Any other value replaces the period TQ.exe asks for, so a run can test
+// whether the stalls scale with the timer rate -- which is the difference
+// between WM_TIMER causing them and WM_TIMER merely being what a slow peek
+// happens to come back with. It only takes effect while the engine trace is
+// installed, so a shipping boot never reaches it.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
