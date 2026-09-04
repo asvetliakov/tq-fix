@@ -987,7 +987,8 @@ bool logsEveryFrame();
 // Timing.
 
 // QueryPerformanceCounter, or 0 while disabled.
-int64_t now();
+int64_t nowInternal();
+inline int64_t now() { return detail::active ? nowInternal() : 0; }
 
 // Adds the interval from `startTicks` to now into this frame's `phase` total.
 // Phases and counters record the render thread only: the frame record is one
@@ -1024,15 +1025,20 @@ inline void count(Counter counter, uint32_t amount = 1) {
     if (detail::active) countInternal(counter, amount);
 }
 
-// Whether the caller is the thread whose frames are being recorded. True
-// before the first frame closes, when no render thread has been learned yet,
-// so a call site that branches on this behaves the same way count() does.
-bool isRenderThread();
+// Whether the caller is the thread whose frames are being recorded. While
+// enabled, true before a render thread has been learned; false when disabled.
+bool isRenderThreadInternal();
+inline bool isRenderThread() {
+    return detail::active && isRenderThreadInternal();
+}
 
 // Index of the frame currently accumulating. The stutter-marker resource
 // diagnostic uses it to retain pre-reaction events without logging on the
 // slow frame itself. Meaningful only while the probe is enabled.
-unsigned currentFrameIndex();
+unsigned currentFrameIndexInternal();
+inline unsigned currentFrameIndex() {
+    return detail::active ? currentFrameIndexInternal() : 0;
+}
 
 // The counting channel for the game's own threads. Accumulates into an
 // interlocked side array and folds into the frame record at endFrame, so the
@@ -1051,7 +1057,11 @@ inline void engineCount(Counter counter, uint32_t amount = 1) {
 // Elapsed microseconds since a now() reading, saturating at UINT32_MAX and 0
 // while the probe is disabled. For the `_us` counters, whose whole point is to
 // carry a duration through the integer channel.
-uint32_t microsecondsSince(int64_t startTicks);
+uint32_t microsecondsSinceInternal(int64_t startTicks);
+inline uint32_t microsecondsSince(int64_t startTicks) {
+    return detail::active && startTicks
+        ? microsecondsSinceInternal(startTicks) : 0;
+}
 
 // ---------------------------------------------------------------------------
 // GPU regions. Created on the shader-build worker rather than the render
@@ -1059,12 +1069,21 @@ uint32_t microsecondsSince(int64_t startTicks);
 // device objects created re-entrantly from inside a hooked call.
 bool createResources(ID3D11Device* device);
 void releaseResources();
-void gpuBegin(ID3D11DeviceContext* context, GpuPhase phase);
-void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase);
+void gpuBeginInternal(ID3D11DeviceContext* context, GpuPhase phase);
+void gpuEndInternal(ID3D11DeviceContext* context, GpuPhase phase);
+inline void gpuBegin(ID3D11DeviceContext* context, GpuPhase phase) {
+    if (detail::active) gpuBeginInternal(context, phase);
+}
+inline void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase) {
+    if (detail::active) gpuEndInternal(context, phase);
+}
 // Borrowed for the duration of a render-thread scope. Null off the thread that
 // opened the frame, before beginFrame, or when timestamp resources are
 // unavailable; callers must not retain it.
-ID3D11DeviceContext* currentGpuContext();
+ID3D11DeviceContext* currentGpuContextInternal();
+inline ID3D11DeviceContext* currentGpuContext() {
+    return detail::active ? currentGpuContextInternal() : nullptr;
+}
 
 // Scoped form, so a function with several returns cannot leave a region open
 // -- an unclosed region is never resolved and its column silently reads blank.
@@ -1081,10 +1100,16 @@ struct GpuScope {
 // Frame boundary. beginFrame collects whatever GPU results have landed and
 // opens the whole-frame region; endFrame closes the record with the frame time
 // the overlay measured, decides whether it hitched, and queues a row.
-void beginFrame(ID3D11DeviceContext* context);
+void beginFrameInternal(ID3D11DeviceContext* context);
+inline void beginFrame(ID3D11DeviceContext* context) {
+    if (detail::active) beginFrameInternal(context);
+}
 // Closes the whole-frame GPU region on the context beginFrame was given, so it
 // needs no context of its own.
-void endFrame(float cpuFrameMilliseconds);
+void endFrameInternal(float cpuFrameMilliseconds);
+inline void endFrame(float cpuFrameMilliseconds) {
+    if (detail::active) endFrameInternal(cpuFrameMilliseconds);
+}
 
 // The three phases with the largest recent mean, and the phase that dominated
 // the most recent hitch, formatted for the overlay panel. Writes an empty
@@ -1101,6 +1126,9 @@ void shutdown();
 void flushOnExit();
 
 #ifdef TQ_SELFTEST
+// Counts entries into the out-of-line recorder, including clock/thread/GPU
+// helpers. Disabled inline gates must leave this unchanged.
+unsigned runtimeEntriesForTest();
 // The frame the ring is about to write, so a test can drive frames and then
 // assert on what was recorded without waiting for the writer.
 unsigned frameCountForTest();

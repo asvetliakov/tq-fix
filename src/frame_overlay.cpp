@@ -197,8 +197,9 @@ void renderTextPanel(uint32_t mode, unsigned visible, unsigned oldest) {
              (unsigned)kHitchMs, hitches, historySeconds);
     drawText(12, 51, line, muted);
     // Where the time went, when the probe is on to answer it.
-    char attribution[80];
-    tq::probe::summarize(attribution, sizeof(attribution));
+    char attribution[80] = {};
+    if (tq::probe::enabled())
+        tq::probe::summarize(attribution, sizeof(attribution));
     if (attribution[0]) drawText(12, 65, attribution, muted);
 }
 

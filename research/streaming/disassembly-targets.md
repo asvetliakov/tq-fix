@@ -2,8 +2,27 @@
 
 This is the durable index for the static code behind the measured **play**
 loading bursts. It records what to reopen in Ghidra or a disassembler and why;
-it is not a substitute for the bytes compiled into `src/engine_probe.cpp` or
+it is not a substitute for the bytes compiled into the Engine modules or
 for `tools/verify-sites.py` checking those bytes against the installed game.
+
+After the findings §111 refactor, shared audited constants and ABI contracts
+are in `src/engine_internal.h`; each implementation keeps its unshared tables.
+The verifier reads all seven units, including that header. No game target,
+signature, relocation, structure offset or stolen length changed.
+
+| Implementation | Owned path |
+| --- | --- |
+| `src/shadow_defer.cpp` | Directional cold-root/alpha-resource omission, Actor pose deferral, unused/overridden texture filtering and their audited installation. |
+| `src/terrain_preload.cpp` | Exact TerrainRT `LoadTextures` completion followed by stock `TerrainType::PreLoad(true)`. |
+| `src/secondary_admission.cpp` | Shared renderable identity budget, terrain/mesh Draw suppression scopes and reflection boundary. |
+| `src/archive_hooks.cpp` | Verified archive layout, block-cache wrapper and installation. |
+| `src/engine_hooks.cpp` | Image identity, common patch coordination, activation dependencies and teardown. |
+| `src/engine_probe.cpp` | Optional Engine observers and bounded retained diagnostic records. |
+
+The secondary admission feature no longer patches reflection `BuildScene`
+when tracing is off. Its self-arming identity budget does not consume that
+old buffer-population signal. The exact `RenderLightStyle` boundary and the
+three renderable wrappers still install for the behavior.
 
 The supported binary is the PE32/i386 `Engine.dll` identified in
 `../shadows/supported-build.md`, preferred image base `0x10000000`. Every
@@ -399,7 +418,8 @@ For runtime changes, the authority order is:
 
 1. pinned module identity in `research/shadows/supported-build.md`;
 2. exact 16--24-byte tables, relocation descriptors, vtable identities, and
-   call destinations in `src/engine_probe.cpp`;
+   call destinations in the corresponding Engine implementation and shared
+   `src/engine_internal.h` contracts;
 3. independent checks in `research/streaming/tools/verify-sites.py`;
 4. generated Ghidra disassembly/decompilation as navigational evidence.
 

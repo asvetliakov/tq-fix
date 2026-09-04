@@ -7,6 +7,14 @@
 
 namespace tq {
 namespace probe {
+#ifdef TQ_SELFTEST
+static unsigned g_runtimeEntriesForTest;
+unsigned runtimeEntriesForTest() { return g_runtimeEntriesForTest; }
+#define TQ_PROBE_ENTER() (++g_runtimeEntriesForTest)
+#else
+#define TQ_PROBE_ENTER() ((void)0)
+#endif
+
 
 namespace detail {
 bool active;
@@ -894,7 +902,8 @@ void setOutputPath(const wchar_t* csvPath) {
 
 bool logsEveryFrame() { return g_mode == ModeFull; }
 
-int64_t now() {
+int64_t nowInternal() {
+    TQ_PROBE_ENTER();
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
     return counter.QuadPart;
@@ -905,6 +914,7 @@ void addPhaseInternal(Phase phase, int64_t startTicks) {
 }
 
 uint32_t finishPhaseInternal(Phase phase, int64_t startTicks) {
+    TQ_PROBE_ENTER();
     if (!detail::active || !startTicks || phase >= PhaseCount) return 0;
     if (g_renderThread && GetCurrentThreadId() != g_renderThread) return 0;
     int64_t elapsed = now() - startTicks;
@@ -918,23 +928,28 @@ uint32_t finishPhaseInternal(Phase phase, int64_t startTicks) {
 }
 
 void countInternal(Counter counter, uint32_t amount) {
+    TQ_PROBE_ENTER();
     if (!detail::active || counter >= CounterCount) return;
     if (g_renderThread && GetCurrentThreadId() != g_renderThread) return;
     g_current.counters[counter] += amount;
 }
 
-bool isRenderThread() {
+bool isRenderThreadInternal() {
+    TQ_PROBE_ENTER();
     return !g_renderThread || GetCurrentThreadId() == g_renderThread;
 }
 
-unsigned currentFrameIndex() { return detail::active ? g_frameIndex : 0; }
+unsigned currentFrameIndexInternal() {
+    TQ_PROBE_ENTER(); return detail::active ? g_frameIndex : 0; }
 
 void engineCountInternal(Counter counter, uint32_t amount) {
+    TQ_PROBE_ENTER();
     if (!detail::active || counter >= CounterCount || !amount) return;
     InterlockedExchangeAdd(&g_engineCounters[counter], (LONG)amount);
 }
 
-uint32_t microsecondsSince(int64_t startTicks) {
+uint32_t microsecondsSinceInternal(int64_t startTicks) {
+    TQ_PROBE_ENTER();
     if (!detail::active || !startTicks || !g_frequency.QuadPart) return 0;
     int64_t elapsed = now() - startTicks;
     if (elapsed <= 0) return 0;
@@ -981,14 +996,16 @@ void releaseResources() {
     }
 }
 
-void gpuBegin(ID3D11DeviceContext* context, GpuPhase phase) {
+void gpuBeginInternal(ID3D11DeviceContext* context, GpuPhase phase) {
+    TQ_PROBE_ENTER();
     if (!detail::active || !g_gpuReady || !context || !g_gpuCurrent) return;
     if (phase >= GpuPhaseCount || g_gpuCurrent->opened[phase]) return;
     context->End(g_gpuCurrent->begin[phase]);
     g_gpuCurrent->opened[phase] = true;
 }
 
-void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase) {
+void gpuEndInternal(ID3D11DeviceContext* context, GpuPhase phase) {
+    TQ_PROBE_ENTER();
     if (!detail::active || !g_gpuReady || !context || !g_gpuCurrent) return;
     if (phase >= GpuPhaseCount || !g_gpuCurrent->opened[phase]) return;
     // A timestamp query records the most recent End, so a region entered and
@@ -999,7 +1016,8 @@ void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase) {
     g_gpuCurrent->closed[phase] = true;
 }
 
-ID3D11DeviceContext* currentGpuContext() {
+ID3D11DeviceContext* currentGpuContextInternal() {
+    TQ_PROBE_ENTER();
     // The immediate context and current query slot belong to the thread that
     // opened the frame. A diagnostic hook may itself be reached by a loader;
     // never let that hook issue End(query) concurrently with rendering.
@@ -1007,7 +1025,8 @@ ID3D11DeviceContext* currentGpuContext() {
         ? g_gpuContext : nullptr;
 }
 
-void beginFrame(ID3D11DeviceContext* context) {
+void beginFrameInternal(ID3D11DeviceContext* context) {
+    TQ_PROBE_ENTER();
     if (!detail::active) return;
     if (!g_gpuReady || !context) return;
     for (unsigned i = 0; i < kGpuSlotCount; ++i) resolveSlot(context, g_gpu[i]);
@@ -1025,7 +1044,8 @@ void beginFrame(ID3D11DeviceContext* context) {
     gpuBegin(context, GpuFrame);
 }
 
-void endFrame(float cpuFrameMilliseconds) {
+void endFrameInternal(float cpuFrameMilliseconds) {
+    TQ_PROBE_ENTER();
     if (!detail::active || !g_records) return;
     g_renderThread = GetCurrentThreadId();
     // Fold the game's threads in first, so their counts belong to the frame

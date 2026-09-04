@@ -8,6 +8,7 @@
 
 namespace tq {
 namespace arccache {
+namespace detail { bool reporting; }
 namespace {
 
 const unsigned kMaxMegabytes = 256;
@@ -108,6 +109,9 @@ unsigned evict(bool* reused) {
 }  // namespace
 
 void readOptions(const wchar_t* iniPath) {
+    // Cache verification logs belong to explicit debug tracing, independently
+    // of the performance recorder. Ordinary trace-off boots take no report lock.
+    detail::reporting = tq::hdr::readSettings().trace;
     g_megabytes = 0;
     g_verify = false;
 
@@ -287,7 +291,7 @@ void store(const Key& key, const void* source) {
     if (reused) tq::probe::engineCount(tq::probe::CounterArcCacheEvict);
 }
 
-void report() {
+void reportInternal() {
     if (!g_lockReady) return;
     EnterCriticalSection(&g_lock);
     ++g_requests;

@@ -7,6 +7,8 @@
 #include "probe.h"
 #include "shadow_fix.h"
 #include "engine_probe.h"
+#include "engine.h"
+#include "secondary_admission.h"
 
 #include "streaming.h"
 #include "upload.h"
@@ -372,7 +374,7 @@ void readOptions() {
     }
     tq::frameoverlay::readOptions(path);
     tq::probe::readOptions(path);
-    tq::engineprobe::readOptions(path);
+    tq::engine::readOptions(path);
     int anisotropy = GetPrivateProfileIntW(L"graphics", L"anisotropy", 16, path);
     g_options.anisotropy = anisotropy == 1 ? 1
                          : anisotropy >= 2 && anisotropy <= 16 ? (UINT)anisotropy : 16;
@@ -1304,6 +1306,8 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     // them, and precisely the ones under investigation -- was being discarded
     // by the instrument meant to be watching it. Off-thread calls go to the
     // engine channel instead, where they survive.
+    if (!tq::probe::enabled())
+        return createTexture2DDispatch(device, desc, initial, texture, caller);
     const bool renderThread = tq::probe::isRenderThread();
     const int64_t started = tq::probe::enabled() ? tq::probe::now() : 0;
     const unsigned startFrame = started ? tq::probe::currentFrameIndex() : 0;
@@ -2081,7 +2085,7 @@ bool createBloomProgramResources(ID3D11Device* device) {
 bool createProgramResources(ID3D11Device* device) {
     // Timestamp queries are device objects like any other, so they are built
     // here rather than from inside a hooked call.
-    tq::probe::createResources(device);
+    if (tq::probe::enabled()) tq::probe::createResources(device);
     bool ok = true;
     if (g_options.smaa) ok = createSmaaProgramResources(device);
     if (ok) ok = createHdrProgramResources(device);
@@ -2856,7 +2860,7 @@ HRESULT WINAPI hookCreateBuffer(ID3D11Device* device, const D3D11_BUFFER_DESC* d
     const uint32_t elapsed = started && tq::probe::isRenderThread()
         ? tq::probe::finishPhase(tq::probe::PhaseBufferCreate, started)
         : started ? tq::probe::microsecondsSince(started) : 0;
-    if (SUCCEEDED(result) && buffer && *buffer && desc)
+    if (tq::probe::enabled() && SUCCEEDED(result) && buffer && *buffer && desc)
         tq::engineprobe::noteDeferredBufferCreated(
             *buffer, elapsed, desc->ByteWidth, desc->BindFlags,
             (unsigned)desc->Usage, desc->CPUAccessFlags, desc->MiscFlags);
@@ -2920,8 +2924,8 @@ void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT ba
 }
 
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
-    if (!g_inside && tq::engineprobe::secondaryAdmissionDrawSuppressed()) {
-        tq::engineprobe::noteSecondaryAdmissionDrawSkipped();
+    if (!g_inside && tq::secondaryadmission::secondaryAdmissionDrawSuppressed()) {
+        tq::secondaryadmission::noteSecondaryAdmissionDrawSkipped();
         return;
     }
     if (!g_inside) tq::probe::count(tq::probe::CounterDraw);
@@ -2958,8 +2962,8 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
-    if (!g_inside && tq::engineprobe::secondaryAdmissionDrawSuppressed()) {
-        tq::engineprobe::noteSecondaryAdmissionDrawSkipped();
+    if (!g_inside && tq::secondaryadmission::secondaryAdmissionDrawSuppressed()) {
+        tq::secondaryadmission::noteSecondaryAdmissionDrawSkipped();
         return;
     }
     if (!g_inside) tq::probe::count(tq::probe::CounterDrawIndexed);
@@ -3029,7 +3033,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     g_deferredBindingTracing =
         tq::engineprobe::deferredDrawTraceRequested();
     const bool secondaryAdmissionDrawHooks =
-        tq::engineprobe::secondaryPassAdmissionRequested();
+        tq::secondaryadmission::secondaryPassAdmissionRequested();
     memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
     g_bloomToggleKeyDown = false;
     g_bloomEnhancedRuntime = true;
@@ -3161,7 +3165,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         g_drawIndexed = (DrawIndexedFn)cv[12];
         g_draw = (DrawFn)cv[13];
     }
-    tq::engineprobe::setSecondaryAdmissionDrawHooksReady(
+    tq::secondaryadmission::setSecondaryAdmissionDrawHooksReady(
         secondaryAdmissionDrawHooks && secondaryAdmissionDrawHooksReady);
     if (g_options.streaming || g_deferredBindingTracing)
         ok &= patchSlot(&cv[8], (void*)&hookPSSetShaderResources,
@@ -3192,7 +3196,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     // Last of the Engine.dll work, and the only part that writes into .text.
     // Its trace groups require the probe, while accepted performance fixes
     // enter independently and install only their audited sites.
-    tq::engineprobe::install(GetModuleHandleW(L"Engine.dll"));
+    tq::engine::install(GetModuleHandleW(L"Engine.dll"));
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -3246,7 +3250,7 @@ void onPresent(IDXGISwapChain* swapChain) {
     // were accumulated over: our own post-work here, the game's Present, and
     // the game's next rendered frame.
     tq::frameoverlay::recordFrame();
-    tq::engineprobe::secondaryAdmissionFrameBoundary();
+    tq::secondaryadmission::secondaryAdmissionFrameBoundary();
     tq::probe::beginFrame(g_context);
     // The probe and the overlay both need device objects, and the worker that
     // builds them is otherwise only started by a matched shader -- which never
@@ -3325,7 +3329,7 @@ void onResize(IDXGISwapChain* swapChain) {
 void shutdown() {
     // First: these are writes into Engine.dll's .text, and every one of them
     // has to be back before the probe they report into goes away.
-    tq::engineprobe::shutdown();
+    tq::engine::shutdown();
     g_deferredBindingTracing = false;
     memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
     tq::streaming::setPresentCallback(nullptr);

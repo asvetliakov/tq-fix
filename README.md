@@ -555,10 +555,20 @@ read and inflated.
 Those columns come from instrumentation written into `Engine.dll`'s own code,
 so they are gated twice: no *instrument* is installed unless
 `performance_trace` is on **and** `engine_trace` is not `0`, which means a
-normal boot installs none of the trace groups. The behavior fixes in the same
-file—archive caching, cold-shadow-resource deferral, terrain-layer preload,
-and secondary-pass admission—install with the probe off and bring none of the
-instrument with them. Every site is resolved by its exported name,
+normal boot installs none of the trace groups. The behavior fixes live in
+`archive_hooks.cpp`, `shadow_defer.cpp`, `terrain_preload.cpp`, and
+`secondary_admission.cpp`; `engine_hooks.cpp` coordinates their shared sites.
+They install with the probe off. `engine_probe.cpp` owns the optional Engine
+observers, and `probe.cpp` owns the frame recorder.
+
+With `performance_trace=0`, shared behavior hooks bypass the observers. There
+are no probe clock reads, GPU queries, frame recording, or trace-only Engine
+hooks; even the reflection `BuildScene` observer is absent. The fixes still
+need their own hooks, and small inline enable checks remain. A separate DLL
+build is unnecessary to disable recording. Full mode enables the same
+instrumentation in the same DLL.
+
+Every site is resolved by its exported name,
 checked against the address the audited build puts it at, and matched against
 16 to 24 bytes before 4 to 7 are written; a mismatch skips that one hook and
 leaves the rest. A build that is not the audited `Engine.dll` installs nothing

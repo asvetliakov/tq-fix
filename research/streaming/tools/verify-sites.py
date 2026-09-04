@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every byte table in src/engine_probe.cpp against the pinned binaries.
+"""Check every audited Engine byte table against the pinned binaries.
 
 `findings.md` records the patch sites, but a record is not a licence: this
 reads the tables out of the source as they are actually compiled and compares
@@ -15,10 +15,19 @@ and a `moduleText` check that failed for every hook after the first.
       research/streaming/tools/verify-sites.py
 """
 import os, re, struct, sys
+from functools import lru_cache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from pe import PE
+from pe import PE as BinaryPE
+
+
+class PE(BinaryPE):
+    # The pinned image is immutable throughout a verification. Re-parsing its
+    # several thousand exports for every assertion obscures mutation testing.
+    @lru_cache(maxsize=None)
+    def exports(self):
+        return super().exports()
 
 GAME = os.environ.get("TQ_GAME_DIR") or os.path.expanduser(
     "~/Library/Application Support/CrossOver/Bottles/Titan Quest/drive_c/"
@@ -45,12 +54,22 @@ FLOW_DOC = os.environ.get("TQ_VERIFY_FLOW_DOC") or os.path.join(
 FINDINGS = os.environ.get("TQ_VERIFY_FINDINGS") or os.path.join(
     HERE, "..", "findings.md")
 
-src = open(SRC).read()
+ENGINE_UNITS = ('engine_probe.cpp', 'engine_hooks.cpp',
+                'shadow_defer.cpp', 'terrain_preload.cpp',
+                'secondary_admission.cpp', 'archive_hooks.cpp', 'engine_internal.h')
+# TQ_VERIFY_SRC still accepts one combined source for deliberate mutations.
+# Normal verification reads every actual compiled implementation and the shared
+# contracts, so moving a table cannot remove it from verification.
+src = (open(SRC).read() if os.environ.get('TQ_VERIFY_SRC') else
+       '\n'.join(open(os.path.join(os.path.dirname(SRC), unit)).read()
+                 for unit in ENGINE_UNITS))
 cache_src = open(CACHE_H).read()
 arc_src = open(ARC_CPP).read()
 probe_src = open(PROBE_CPP).read()
 probe_h = open(PROBE_H).read()
 engine_h = open(ENGINE_PROBE_H).read()
+engine_h += '\n' + open(os.path.join(os.path.dirname(SRC), 'engine.h')).read()
+engine_h += '\n' + open(os.path.join(os.path.dirname(SRC), 'secondary_admission.h')).read()
 visual_src = open(VISUAL_CPP).read()
 selftest_src = open(SELFTEST_CPP).read()
 readme_src = open(README).read()
@@ -67,9 +86,162 @@ def ok(good, what):
     return good
 
 
+
+def definition_start(text, marker):
+    """Find a definition rather than a declaration in the shared contracts."""
+    start = text.find(marker)
+    while start >= 0:
+        opening = text.find('{', start)
+        semicolon = text.find(';', start)
+        if opening >= 0 and (semicolon < 0 or opening < semicolon):
+            return start
+        start = text.find(marker, start + 1)
+    return -1
+
+
+def block_end(text, start):
+    """Balanced C++ body boundary; independent of file and function order."""
+    if start < 0:
+        return -1
+    opening = text.find('{', start)
+    if opening < 0:
+        return -1
+    # Skip strings/comments, including assembly strings and their braces.
+    token = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|[{}]')
+    depth = 0
+    for match in token.finditer(text, opening):
+        if match[0] == '{':
+            depth += 1
+        elif match[0] == '}':
+            depth -= 1
+            if not depth:
+                return match.end()
+    return -1
+
+
+def cpp_body(marker, text=None):
+    text = src if text is None else text
+    start = definition_start(text, marker)
+    end = block_end(text, start)
+    return text[start:end] if start >= 0 and end > start else ''
+
+
+def check_trace_off_isolation():
+    """Behavior ownership and the disabled recorder's actual call boundaries."""
+    print("\nPerformance modules and trace-off isolation")
+    root = os.path.dirname(SRC)
+    probe_impl = open(os.path.join(root, 'engine_probe.cpp')).read()
+    owners = {
+        'shadow_defer.cpp': ('readShadowOptions', 'hookShadowMeshPassCount',
+                             'hookShadowActorUpdateMeshInstance',
+                             'shadowMaterialTextureFiltered', 'installShadow'),
+        'terrain_preload.cpp': ('readTerrainOptions', 'hookTerrainRtLoadTextures',
+                                'installTerrain'),
+        'secondary_admission.cpp': ('readSecondaryOptions',
+                                    'shouldDeferSecondaryAdmission',
+                                    'hookGraphicsMeshInstanceRenderPass',
+                                    'installReflections'),
+        'archive_hooks.cpp': ('describeBlock', 'hookArchiveBlock', 'installArchive')}
+    for unit, functions in owners.items():
+        implementation = open(os.path.join(root, unit)).read()
+        ok(all(cpp_body(name + '(', implementation)
+               and not cpp_body(name + '(', probe_impl) for name in functions),
+           unit + ' owns its behavior and installation independently of the observer')
+    for name in ('now', 'microsecondsSince', 'isRenderThread',
+                 'currentFrameIndex', 'currentGpuContext',
+                 'gpuBegin', 'gpuEnd', 'beginFrame', 'endFrame'):
+        gate = cpp_body(name + '(', probe_h)
+        ok('detail::active' in gate and name + 'Internal(' in gate
+           and 'QueryPerformanceCounter' not in gate,
+           name + ' checks the inline enable flag before entering the recorder')
+    for name in ('hookRenderDirectional', 'hookReflectionRenderLight',
+                 'hookGraphicsMeshInstanceRenderPass',
+                 'hookTerrainPlugRender', 'hookTerrainBlockRender'):
+        hook = cpp_body(name + '(')
+        fast = cpp_body('if (!g_tracing)', hook)
+        ok(bool(fast) and 'return' in fast
+           and 'tq::probe::' not in fast and 'GpuScope' not in fast
+           and 'GpuChunkRenderableCallScope' not in fast
+           and 'countAdmissionRenderable' not in fast,
+           name + ' bypasses observer work with tracing disabled')
+    light_install = cpp_body('bool installReflections(')
+    ok('const bool buildOk = planeOk && (!trace || tq::detour::patchCall('
+       in light_install,
+       'trace-off admission installs no reflection BuildScene observer hook')
+    material = cpp_body('shadowMaterialTextureFiltered(')
+    ok('const bool cold = g_shadowTracing && inShadow' in material
+       and 'if (!g_shadowTracing)\n'
+           '        return g_graphicsTextureGetTexture(texture, nullptr);'
+           in material,
+       'shadow material filtering bypasses cold-texture diagnostic work')
+    for name in ('countDeferredShadowMesh', 'countDeferredShadowActorPose'):
+        ok(('if (g_shadowTracing) ' + name + '(') in src,
+           name + ' is never called by the disabled behavior path')
+    ok('if (g_tracing) resetEngineTraceState();' in cpp_body('bool install(')
+       and 'memset(g_gpuChunkEvents' in cpp_body('void resetEngineTraceState('),
+       'trace-off startup does not touch the large observer history rings')
+    texture = cpp_body('HRESULT WINAPI hookCreateTexture2D(', visual_src)
+    ok('if (!tq::probe::enabled())\n'
+       '        return createTexture2DDispatch(device, desc, initial, texture, caller);'
+       in texture,
+       'texture creation bypasses thread/frame/descriptor observers with tracing off')
+    buffer = cpp_body('HRESULT WINAPI hookCreateBuffer(', visual_src)
+    ok('if (tq::probe::enabled() && SUCCEEDED(result)' in buffer,
+       'grass buffer hooks do not enter Engine creation observers with tracing off')
+    ok('exerciseTraceOffHooksForTest()' in selftest_src
+       and 'without entering either recorder' in selftest_src,
+       'off-game test executes real preload, cold-root and shared admission hooks without recorder entries')
+    ok('if (detail::reporting) reportInternal();' in cache_src
+       and 'detail::reporting = tq::hdr::readSettings().trace;' in arc_src,
+       'cache debug reports remain explicit and take no reporting lock with debug trace off')
+
+
+def check_legacy_scalar_contract(engine):
+    """Cover historical constants exposed by the refactor perturbation audit."""
+    print("\nHistorical call offsets, thread identity and diagnostic bounds")
+    instruction = engine.read(engine.base + 0x14476b, 6)
+    ok(instruction[:2] == b'\x3b\x05'
+       and struct.unpack_from('<I', instruction, 2)[0]
+           == engine.base + const('kMainThreadIdRva'),
+       'Engine::Update CMP operand independently proves the main-thread-id RVA')
+    for name, table_name, opcode in (
+            ('kRegionLockCallOffset', 'kRegionLockEbxBytes', [0xff, 0x15]),
+            ('kRegionLockCallOffset', 'kRegionLockEdiBytes', [0xff, 0x15]),
+            ('kForceLoadCallOffset', 'kForceLoadDeferredBytes', [0xe8]),
+            ('kForceLoadCallOffset', 'kForceLoadForwardBytes', [0xe8]),
+            ('kFenceCallOffset', 'kFenceWindowBytes', [0xff, 0x15])):
+        offset = const(name)
+        window_bytes = table(table_name)
+        ok(window_bytes[offset:offset + len(opcode)] == opcode,
+           name + ' identifies the verified call opcode in ' + table_name)
+    sweep_sites = re.search(r'const SweepSite kSweepSites\[kSweepCount\] = \{(.*?)\};', src, re.S)
+    ok(bool(sweep_sites)
+       and const('kSweepCount') == sweep_sites[1].count('{'),
+       'sweep patch count equals the seven verified call-site entries')
+    groups = ('All', 'Loads', 'Archive', 'Fence', 'Lock', 'Sweeps', 'Wait',
+              'Frame', 'Game', 'Loop', 'Pump', 'Heap', 'ArcIo', 'Blocking',
+              'Shadow', 'Terrain', 'DeferredPasses', 'Reflections')
+    for bit, name in enumerate(groups):
+        ok(const('kGroup' + name) == 1 << bit,
+           'documented trace-mask bit for ' + name + ' is exact')
+    # These are diagnostic policy, not Engine structure offsets. Pin the
+    # established retention/scan limits so a typo cannot expand hot-path work.
+    for name, expected in (('kSlowLoadUs', 1000), ('kLoadCallerSlots', 16),
+                           ('kChainSlots', 8), ('kChainDepth', 32),
+                           ('kStackWords', 2048), ('kChainModules', 3),
+                           ('kMessageKinds', 64)):
+        ok(const(name) == expected, name + ' preserves the existing diagnostic bound')
+
+
 def const(name, text=None):
     """A `const DWORD/unsigned/uint32_t <name> = <n>;` from the source."""
-    text = src if text is None else text
+    return source_constant(name, src if text is None else text)
+
+
+@lru_cache(maxsize=1024)
+def source_constant(name, text):
+    # Include the source text in the key so in-memory perturbations cannot
+    # accidentally reuse an unperturbed result.
     m = re.search(r"const (?:DWORD|unsigned|uint32_t) %s = (0x[0-9a-fA-F]+|\d+);"
                   % name, text)
     return int(m.group(1), 0)
@@ -88,21 +260,13 @@ def dword_table(name):
         r"0x[0-9a-fA-F]+|(?<![\w.])\d+", body)]
 
 
-NAMED_RVA = {"kEnterCriticalSectionSlotRva": 0x2ac17c,
-             "kLeaveCriticalSectionSlotRva": 0x2ac178,
-             "kWaitForSingleObjectSlotRva": 0x2ac188,
-             "kSetFilePointerExSlotRva": 0x2ac190,
-             "kReadFileSlotRva": 0x2ac1a4}
-
-
 def relocs(name):
     if not name:
         return []
     m = re.search(r"const Relocation %s\[\] = \{(.*?)\};" % name, src, re.S)
     out = []
     for off, r in re.findall(r"\{\s*(\w+)\s*,\s*(\w+)\s*\}", m.group(1)):
-        target = (NAMED_RVA[r] if r in NAMED_RVA else
-                  int(r, 0) if re.match(r"^(?:0x|\d)", r) else const(r))
+        target = int(r, 0) if re.match(r"^(?:0x|\d)", r) else const(r)
         out.append((int(off, 0), target))
     return out
 
@@ -222,21 +386,20 @@ def check_archive_cache(engine):
 def check_configuration_contract():
     """Shipping defaults and removal of behavior experiments."""
     print("\nCurrent configuration contract")
-    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
-    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
-    options = src[read_begin:read_end]
-    probe_begin = probe_src.find("void readOptions(const wchar_t* iniPath)")
-    probe_end = probe_src.find("\n}\n\nbool stutterMarkerEnabled()", probe_begin)
+    read_begin = definition_start(src, "void readOptions(const wchar_t* iniPath)")
+    read_end = block_end(src, read_begin)
+    options = src[read_begin:read_end] + "\n".join(cpp_body("void " + f + "(") for f in ("readShadowOptions", "readTerrainOptions", "readSecondaryOptions"))
+    probe_begin = definition_start(probe_src, "void readOptions(const wchar_t* iniPath)")
+    probe_end = block_end(probe_src, probe_begin)
     probe_options = probe_src[probe_begin:probe_end]
-    visual_read_begin = visual_src.find("void readOptions()")
-    visual_read_end = visual_src.find("\n}\n\nbool contains", visual_read_begin)
+    visual_read_begin = definition_start(visual_src, "void readOptions()")
+    visual_read_end = block_end(visual_src, visual_read_begin)
     visual_options = visual_src[visual_read_begin:visual_read_end]
-    visual_install_begin = visual_src.find(
-        "void install(ID3D11Device* device, ID3D11DeviceContext* context,")
-    visual_install_end = visual_src.find("\n}\n\nvoid onPresent", visual_install_begin)
+    visual_install_begin = definition_start(visual_src, "void install(ID3D11Device* device, ID3D11DeviceContext* context,")
+    visual_install_end = block_end(visual_src, visual_install_begin)
     visual_install = visual_src[visual_install_begin:visual_install_end]
-    engine_install_begin = src.find("bool install(HMODULE engine)")
-    engine_install_end = src.find("\n}\n\nvoid shutdown()", engine_install_begin)
+    engine_install_begin = definition_start(src, "bool install(HMODULE engine)")
+    engine_install_end = block_end(src, engine_install_begin)
     engine_install = src[engine_install_begin:engine_install_end]
     rejected = [
         "async_level_load", "timer_period_ms", "pump_timer_min_ms",
@@ -323,12 +486,11 @@ def check_configuration_contract():
            "        && shadowReady && reflectionReady;" in engine_install,
        "secondary admission gets its complete trace-independent hook chain")
 
-    progressive_begin = visual_src.find("bool progressiveTextureCandidate(")
-    progressive_end = visual_src.find("\n}\n\nHRESULT createProgressiveTexture",
-                                      progressive_begin)
+    progressive_begin = definition_start(visual_src, "bool progressiveTextureCandidate(")
+    progressive_end = block_end(visual_src, progressive_begin)
     progressive = visual_src[progressive_begin:progressive_end]
-    present_begin = visual_src.find("void onPresent(IDXGISwapChain* swapChain)")
-    present_end = visual_src.find("\n}\n\nvoid onPostPresent", present_begin)
+    present_begin = definition_start(visual_src, "void onPresent(IDXGISwapChain* swapChain)")
+    present_end = block_end(visual_src, present_begin)
     present = visual_src[present_begin:present_end]
     ok("if (!g_options.streaming" in progressive
        and "probe::enabled()" not in progressive
@@ -337,9 +499,8 @@ def check_configuration_contract():
        and "advanceTextureUploadsInternal();" in present,
        "streaming work and the behavior frame boundary run with the probe off")
 
-    loose_begin = visual_src.find("void* __fastcall hookDirectoryOpenFile(")
-    loose_end = visual_src.find("\n}\n\nvoid* __fastcall hookArchiveOpenFile",
-                                loose_begin)
+    loose_begin = definition_start(visual_src, "void* __fastcall hookDirectoryOpenFile(")
+    loose_end = block_end(visual_src, loose_begin)
     loose_hook = visual_src[loose_begin:loose_end]
     ok("const UINT limit = g_options.looseTextureMax;" in loose_hook
        and "if (!file || !limit" in loose_hook
@@ -349,8 +510,8 @@ def check_configuration_contract():
        and "probe::enabled()" not in loose_hook,
        "loose-texture rejection is gated only by its configured cap")
 
-    archive_begin = src.find("int __fastcall hookArchiveBlock(")
-    archive_end = src.find("\n}\n\n// Semantically what", archive_begin)
+    archive_begin = definition_start(src, "int __fastcall hookArchiveBlock(")
+    archive_end = block_end(src, archive_begin)
     archive_hook = src[archive_begin:archive_end]
     ok("if (tq::arccache::running())" in archive_hook
        and "if (tq::arccache::lookup(key, dest))" in archive_hook
@@ -360,17 +521,15 @@ def check_configuration_contract():
        and "probe::enabled()" not in archive_hook,
        "archive lookup/store behavior does not depend on tracing")
 
-    actor_begin = src.find(
-        "void __fastcall hookShadowActorUpdateMeshInstance(")
-    actor_end = src.find("\n}\n\nint __fastcall hookShadowMeshPassCount",
-                         actor_begin)
+    actor_begin = definition_start(src, "void __fastcall hookShadowActorUpdateMeshInstance(")
+    actor_end = block_end(src, actor_begin)
     actor_hook = src[actor_begin:actor_end]
     mesh_begin = actor_end + 3
     mesh_end = src.find("\n}\n\nint __fastcall hookBuildShadowRecord",
                         mesh_begin)
     mesh_hook = src[mesh_begin:mesh_end]
-    directional_begin = src.find("int __fastcall hookRenderDirectional(")
-    directional_end = src.find("\n}\n\n", directional_begin)
+    directional_begin = definition_start(src, "int __fastcall hookRenderDirectional(")
+    directional_end = block_end(src, directional_begin)
     directional_hook = src[directional_begin:directional_end]
     ok("if (!g_shadowActorPoseDeferActive" in actor_hook
        and "probe::enabled()" not in actor_hook
@@ -379,9 +538,8 @@ def check_configuration_contract():
        and "g_shadowTracing || g_shadowDeferActive" in directional_hook,
        "shadow behavior uses active fix flags while trace wraps counters only")
 
-    terrain_begin = src.find("void __fastcall hookTerrainRtLoadTextures(")
-    terrain_end = src.find("\n}\n\nint __fastcall hookTerrainRtLoadRenderData",
-                           terrain_begin)
+    terrain_begin = definition_start(src, "void __fastcall hookTerrainRtLoadTextures(")
+    terrain_end = block_end(src, terrain_begin)
     terrain_hook = src[terrain_begin:terrain_end]
     ok("if (g_terrainTracing) {" in terrain_hook
        and "if (g_terrainPreloadLayersActive && g_terrainPreloadEntry)\n"
@@ -390,11 +548,11 @@ def check_configuration_contract():
            > terrain_hook.find("if (g_terrainTracing) {"),
        "terrain preload executes outside its diagnostic-only trace block")
 
-    secondary_begin = src.find("SecondaryAdmissionContext currentSecondaryAdmissionContext()")
-    secondary_end = src.find("\nstruct SecondaryAdmissionDrawScope", secondary_begin)
-    secondary = src[secondary_begin:secondary_end]
-    draw_begin = visual_src.find("void WINAPI hookDraw(")
-    draw_end = visual_src.find("\n}\n\nvoid WINAPI hookDrawIndexed", draw_begin)
+    secondary_begin = definition_start(src, "SecondaryAdmissionContext currentSecondaryAdmissionContext()")
+    secondary_end = block_end(src, secondary_begin)
+    secondary = cpp_body("SecondaryAdmissionContext currentSecondaryAdmissionContext(") + cpp_body("bool shouldDeferSecondaryAdmission(") + cpp_body("void armSecondaryAdmission(") + cpp_body("enum SecondaryAdmissionState {")
+    draw_begin = definition_start(visual_src, "void WINAPI hookDraw(")
+    draw_end = block_end(visual_src, draw_begin)
     draw_hook = visual_src[draw_begin:draw_end]
     indexed_begin = draw_end + 3
     indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
@@ -712,10 +870,9 @@ def check_terrain_diagnostics(engine):
        "TerrainRT::LoadRenderData verifies 20 bytes and starts with two"
        " complete instructions")
 
-    install_begin = src.find(
-        "bool installTerrain(HMODULE engine, bool traceTerrain,"
+    install_begin = definition_start(src, "bool installTerrain(HMODULE engine, bool traceTerrain,"
         " bool preloadLayers,\n                    bool secondaryPassAdmission)")
-    install_end = src.find("\n}\n\n// Brackets the renderer", install_begin)
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
        and "kTerrainPreloadRelocs, 1),\n            6," in install
@@ -868,15 +1025,14 @@ def check_terrain_diagnostics(engine):
     slots = const("kTerrainPreloadStateSlots")
     ok(slots == 2048 and slots & (slots - 1) == 0,
        "TerrainType preload history is a fixed 2048-slot power-of-two table")
-    remember_begin = src.find("void rememberTerrainPreloadAtFrame(")
-    remember_end = src.find("\n}\n\nvoid rememberTerrainPreload(", remember_begin)
+    remember_begin = definition_start(src, "void rememberTerrainPreloadAtFrame(")
+    remember_end = block_end(src, remember_begin)
     remember = src[remember_begin:remember_end]
     ok("CounterEngineTerrainPreloadTableOverflow" in remember
        and "if (!state)" in remember,
        "a full TerrainType identity table is explicit in the CSV")
-    rt_event_begin = src.find("void rememberTerrainRtEventAtFrame(")
-    rt_event_end = src.find("\n}\n\nvoid rememberTerrainRtEvent(",
-                            rt_event_begin)
+    rt_event_begin = definition_start(src, "void rememberTerrainRtEventAtFrame(")
+    rt_event_end = block_end(src, rt_event_begin)
     rt_event = src[rt_event_begin:rt_event_end]
     ok(rt_event_begin >= 0 and rt_event_end > rt_event_begin
        and "InterlockedCompareExchange(first, framePlusOne, 0);" in rt_event
@@ -886,8 +1042,8 @@ def check_terrain_diagnostics(engine):
            "rtLoadAttachCount", "rtLoadTexturesCount",
            "rtOwnerPreloadCount"]),
        "each TerrainRT boundary retains independent first/last/count history")
-    report_begin = src.find("void reportOutsideDirResourcesAtMarker()")
-    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report_begin = definition_start(src, "void reportOutsideDirResourcesAtMarker()")
+    report_end = block_end(src, report_begin)
     report = src[report_begin:report_end]
     ok(report_begin >= 0 and report_end > report_begin
        and '"Engine trace: outside-dir Resource %ld TerrainRT"' in report
@@ -897,8 +1053,8 @@ def check_terrain_diagnostics(engine):
        and "rtLoadTexturesCount" in report
        and "rtOwnerPreloadCount" in report,
        "F12 writes all three exact TerrainRT histories during the session")
-    load_begin = src.find("void __fastcall hookLoadResource(")
-    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load_begin = definition_start(src, "void __fastcall hookLoadResource(")
+    load_end = block_end(src, load_begin)
     load = src[load_begin:load_end]
     original = load.find("g_loadResource(self, edx, resource);")
     snapshot = load.find("terrainPreloadSnapshot(terrainType)")
@@ -906,8 +1062,8 @@ def check_terrain_diagnostics(engine):
     ok(snapshot >= 0 and snapshot < original and retained > original
        and "g_activeTerrainThread == GetCurrentThreadId()" in load,
        "each terrain load retains its exact pre-call preload snapshot")
-    render_begin = src.find("void __fastcall hookTerrainRenderGround(")
-    render_end = src.find("\n}\n\nvoid __fastcall hookLoadResource", render_begin)
+    render_begin = definition_start(src, "void __fastcall hookTerrainRenderGround(")
+    render_end = block_end(src, render_begin)
     render = src[render_begin:render_end]
     original_ground = render.find("g_terrainRenderGround(")
     ok("GpuTerrainGround" in render and "currentGpuContext()" in render
@@ -919,8 +1075,8 @@ def check_terrain_diagnostics(engine):
             ("LoadRenderData", "hookTerrainRtLoadRenderData",
              "GpuTerrainRtLoadRender", "CounterEngineTerrainRtLoadRender",
              "CounterEngineTerrainRtLoadRenderUs")]:
-        begin = src.find("__fastcall %s(" % hook_name)
-        end = src.find("\n}\n", begin)
+        begin = definition_start(src, "__fastcall %s(" % hook_name)
+        end = block_end(src, begin)
         hook = src[begin:end]
         ok(begin >= 0 and end > begin and gpu_name in hook
            and "currentGpuContext()" in hook and count_name in hook
@@ -935,8 +1091,8 @@ def check_terrain_diagnostics(engine):
              "CounterEngineTerrainPlug", "CounterEngineTerrainPlugUs"),
             ("TerrainBlock", "hookTerrainBlockRender",
              "CounterEngineTerrainBlock", "CounterEngineTerrainBlockUs")]:
-        begin = src.find("__fastcall %s(" % hook_name)
-        end = src.find("\n}\n", begin)
+        begin = definition_start(src, "__fastcall %s(" % hook_name)
+        end = block_end(src, begin)
         hook = src[begin:end]
         ok(begin >= 0 and end > begin
            and "GpuScope" not in hook and "currentGpuContext()" not in hook
@@ -944,8 +1100,8 @@ def check_terrain_diagnostics(engine):
            "%s retains CPU diagnostics without per-call GPU timestamps"
            % label)
 
-    load_render_begin = src.find("int __fastcall hookTerrainRtLoadRenderData(")
-    load_render_end = src.find("\n}\n", load_render_begin)
+    load_render_begin = definition_start(src, "int __fastcall hookTerrainRtLoadRenderData(")
+    load_render_end = block_end(src, load_render_begin)
     load_render_hook = src[load_render_begin:load_render_end]
     ok(load_render_begin >= 0 and load_render_end > load_render_begin
        and "const bool main = onMainThread();" in load_render_hook
@@ -965,23 +1121,21 @@ def check_terrain_diagnostics(engine):
        "LoadRenderData timestamps only on the main thread and records an"
        " exact main/other CPU partition")
 
-    gpu_context_begin = probe_src.find(
-        "ID3D11DeviceContext* currentGpuContext()")
-    gpu_context_end = probe_src.find("\n}", gpu_context_begin)
+    gpu_context_begin = definition_start(probe_src, "ID3D11DeviceContext* currentGpuContextInternal()")
+    gpu_context_end = block_end(probe_src, gpu_context_begin)
     gpu_context = probe_src[gpu_context_begin:gpu_context_end]
     ok(gpu_context_begin >= 0 and gpu_context_end > gpu_context_begin
        and "g_gpuCurrent && isRenderThread()" in gpu_context,
        "the shared GPU-context accessor rejects every non-render thread")
 
-    load_hook_begin = src.find("int __fastcall hookTerrainRtLoad(")
-    load_hook_end = src.find("\n}\n", load_hook_begin)
+    load_hook_begin = definition_start(src, "int __fastcall hookTerrainRtLoad(")
+    load_hook_end = block_end(src, load_hook_begin)
     load_hook = src[load_hook_begin:load_hook_end]
-    texture_hook_begin = src.find(
-        "void __fastcall hookTerrainRtLoadTextures(")
-    texture_hook_end = src.find("\n}\n", texture_hook_begin)
+    texture_hook_begin = definition_start(src, "void __fastcall hookTerrainRtLoadTextures(")
+    texture_hook_end = block_end(src, texture_hook_begin)
     texture_hook = src[texture_hook_begin:texture_hook_end]
-    preload_hook_begin = src.find("void __fastcall hookTerrainRtPreload(")
-    preload_hook_end = src.find("\n}\n", preload_hook_begin)
+    preload_hook_begin = definition_start(src, "void __fastcall hookTerrainRtPreload(")
+    preload_hook_end = block_end(src, preload_hook_begin)
     preload_hook = src[preload_hook_begin:preload_hook_end]
     ok("if (result)" in load_hook
        and "TerrainRtLoadAttach" in load_hook,
@@ -1000,10 +1154,9 @@ def check_terrain_diagnostics(engine):
            in texture_hook,
        "layer fix invokes stock TerrainType::PreLoad(true) only after"
        " LoadTextures completes")
-    read_options_begin = src.find("void readOptions(const wchar_t* iniPath)")
-    read_options_end = src.find("\n}\n\nbool install(HMODULE engine)",
-                                read_options_begin)
-    read_options = src[read_options_begin:read_options_end]
+    read_options_begin = definition_start(src, "void readOptions(const wchar_t* iniPath)")
+    read_options_end = block_end(src, read_options_begin)
+    read_options = src[read_options_begin:read_options_end] + "\n".join(cpp_body("void " + f + "(") for f in ("readShadowOptions", "readTerrainOptions", "readSecondaryOptions"))
     public_install = src[read_options_end:]
     ok('L"performance", L"terrain_preload_layers", 1' in read_options
        and "const bool terrainPreload = g_terrainPreloadLayers;"
@@ -1022,8 +1175,8 @@ def check_terrain_diagnostics(engine):
        and "CounterEngineTerrainRtPreloadUs" in preload_hook,
        "runtime owner PreLoad associates layers before calling through")
 
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok(shutdown_begin >= 0 and shutdown_end > shutdown_begin
        and all(name in shutdown for name in [
@@ -1126,8 +1279,8 @@ def check_outside_directional_resources():
        "marker ring is 128 records, 120 frames, 128 filename bytes, and"
        " 24 upstream frames")
 
-    load_begin = src.find("void __fastcall hookLoadResource(")
-    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load_begin = definition_start(src, "void __fastcall hookLoadResource(")
+    load_end = block_end(src, load_begin)
     load = src[load_begin:load_end]
     original = load.find("g_loadResource(self, edx, resource);")
     copied = load.find("copyResourceName(resourceNameCopy, resourceName);")
@@ -1153,9 +1306,8 @@ def check_outside_directional_resources():
            in load,
        "the exact original call runs once before passive counting and retention")
 
-    remember_begin = src.find("void rememberOutsideDirResource(")
-    remember_end = src.find("\n}\n\nconst char* outsideDirResourcePhaseName",
-                            remember_begin)
+    remember_begin = definition_start(src, "void rememberOutsideDirResource(")
+    remember_end = block_end(src, remember_begin)
     remember = src[remember_begin:remember_end]
     ok(remember_begin >= 0 and remember_end > remember_begin
        and "% kOutsideDirResourceReportSlots" in remember
@@ -1187,15 +1339,14 @@ def check_outside_directional_resources():
        and "InterlockedExchange(&report.ready, sequence + 1);" in remember,
        "the bounded filename and all metadata are published last")
 
-    report_begin = src.find("void reportOutsideDirResourcesAtMarker(")
-    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report_begin = definition_start(src, "void reportOutsideDirResourcesAtMarker(")
+    report_end = block_end(src, report_begin)
     report = src[report_begin:report_end]
-    window_begin = src.find("OutsideDirResourceWindow outsideDirResourceWindow(")
-    window_end = src.find("\n}\n\nbool outsideDirResourceInWindow", window_begin)
+    window_begin = definition_start(src, "OutsideDirResourceWindow outsideDirResourceWindow(")
+    window_end = block_end(src, window_begin)
     window = src[window_begin:window_end]
-    member_begin = src.find("bool outsideDirResourceInWindow(")
-    member_end = src.find("\n}\n\nvoid reportOutsideDirResourcesAtMarker",
-                          member_begin)
+    member_begin = definition_start(src, "bool outsideDirResourceInWindow(")
+    member_end = block_end(src, member_begin)
     member = src[member_begin:member_end]
     ok(report_begin >= 0 and report_end > report_begin
        and "outsideDirResourceWindow(markerFrame)" in report
@@ -1212,8 +1363,8 @@ def check_outside_directional_resources():
            in member,
        "window membership and truncation use the same bounded ring metadata")
     ok("report.callerVerified" in report
-       and '" %c+%#lx, resource %.*s' in report
-       and '" unverified, resource %.*s' in report
+       and '" caller %c+%#lx, resource %.*s' in report
+       and '" caller unverified, resource %.*s' in report
        and "report.resource" in report
        and "report.callerDepth" in report
        and "appendFrame(at, chain + sizeof(chain) - 1" in report
@@ -1224,12 +1375,11 @@ def check_outside_directional_resources():
        and "window.truncated ? 1u : 0u" in report,
        "a marker reports rather than hides ring truncation")
 
-    update_begin = src.find("void __fastcall hookEngineUpdate(")
-    update_end = src.find("\n}\n\n// What the window", update_begin)
+    update_begin = definition_start(src, "void __fastcall hookEngineUpdate(")
+    update_end = block_end(src, update_begin)
     update = src[update_begin:update_end]
-    render_begin = src.find("void __fastcall hookEngineRender(")
-    render_end = src.find("\n}\n\ntypedef BOOL (WINAPI* GetMessageFn)",
-                          render_begin)
+    render_begin = definition_start(src, "void __fastcall hookEngineRender(")
+    render_end = block_end(src, render_begin)
     render = src[render_begin:render_end]
     update_in = update.find("InterlockedIncrement(&g_insideEngineUpdate)")
     update_call = update.find("g_engineUpdate(self, edx, frustum, flag);")
@@ -1241,17 +1391,16 @@ def check_outside_directional_resources():
        and 0 <= render_in < render_call < render_out,
        "verified Engine Update and Render hooks bracket both phase classes")
 
-    marker_begin = src.find("BOOL __stdcall hookPeekMessage(")
-    marker_end = src.find("\n}\n\nvoid __stdcall hookDispatchMessage",
-                          marker_begin)
+    marker_begin = definition_start(src, "BOOL __stdcall hookPeekMessage(")
+    marker_end = block_end(src, marker_begin)
     marker = src[marker_begin:marker_end]
     emit = marker.find("reportOutsideDirResourcesAtMarker();")
     mark = marker.find("tq::probe::markStutter();")
     ok(emit >= 0 and mark > emit and "message->wParam == VK_F12" in marker,
        "the existing F12 retrieval emits the pre-reaction records before marking")
 
-    install_begin = src.find("bool install(HMODULE engine)")
-    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install_begin = definition_start(src, "bool install(HMODULE engine)")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok("g_outsideDirResourceTracing = g_loadResource && g_engineUpdate"
        in install
@@ -1259,8 +1408,8 @@ def check_outside_directional_resources():
            in install
        and "&& g_resourceFileNameVerified;" in install,
        "attribution activates only after every load, phase, shadow, and accessor hook")
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok("g_outsideDirResourceTracing = false;" in shutdown
        and "InterlockedExchange(&g_insideEngineUpdate, 0);" in shutdown
@@ -1276,8 +1425,8 @@ def check_directional_mesh_resource_retention():
        and const("kShadowMeshResourceMarkerFrames") == 120,
        "directional mesh ring is 128 records with a 120-frame horizon")
 
-    load_begin = src.find("void __fastcall hookLoadResource(")
-    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load_begin = definition_start(src, "void __fastcall hookLoadResource(")
+    load_end = block_end(src, load_begin)
     load = src[load_begin:load_end]
     original = load.find("g_loadResource(self, edx, resource);")
     retained = load.find("rememberShadowMeshResource(")
@@ -1296,9 +1445,8 @@ def check_directional_mesh_resource_retention():
        and "caller, &resource, resourceNameCopy, inQueue, frame" in load,
        "the original load runs once before directional mesh retention")
 
-    remember_begin = src.find("void rememberShadowMeshResource(")
-    remember_end = src.find("\n}\n\nstruct ShadowMeshResourceWindow",
-                            remember_begin)
+    remember_begin = definition_start(src, "void rememberShadowMeshResource(")
+    remember_end = block_end(src, remember_begin)
     remember = src[remember_begin:remember_end]
     ok(remember_begin >= 0 and remember_end > remember_begin
        and "% kShadowMeshResourceReportSlots" in remember
@@ -1310,14 +1458,11 @@ def check_directional_mesh_resource_retention():
        and "InterlockedExchange(&report.ready, sequence + 1);" in remember,
        "retention publishes a bounded verified caller-chain record last")
 
-    window_begin = src.find(
-        "ShadowMeshResourceWindow shadowMeshResourceWindow(")
-    window_end = src.find("\n}\n\nbool shadowMeshResourceInWindow",
-                          window_begin)
+    window_begin = definition_start(src, "ShadowMeshResourceWindow shadowMeshResourceWindow(")
+    window_end = block_end(src, window_begin)
     window = src[window_begin:window_end]
-    member_begin = src.find("bool shadowMeshResourceInWindow(")
-    member_end = src.find("\n}\n\nvoid reportShadowMeshResourcesAtMarker",
-                          member_begin)
+    member_begin = definition_start(src, "bool shadowMeshResourceInWindow(")
+    member_end = block_end(src, member_begin)
     member = src[member_begin:member_end]
     ok("window.total - (LONG)kShadowMeshResourceReportSlots" in window
        and "markerFrame - oldest.frame <= kShadowMeshResourceMarkerFrames"
@@ -1327,8 +1472,8 @@ def check_directional_mesh_resource_retention():
            in member,
        "mesh window membership and truncation share exact ring metadata")
 
-    report_begin = src.find("void reportShadowMeshResourcesAtMarker(")
-    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report_begin = definition_start(src, "void reportShadowMeshResourcesAtMarker(")
+    report_end = block_end(src, report_begin)
     report = src[report_begin:report_end]
     ok(report_begin >= 0 and report_end > report_begin
        and "directional mesh Resource %ld" in report
@@ -1341,9 +1486,8 @@ def check_directional_mesh_resource_retention():
        "F12 log emits exact mesh identity, queue state, caller chain and"
        " truncation once")
 
-    marker_begin = src.find("BOOL __stdcall hookPeekMessage(")
-    marker_end = src.find("\n}\n\nvoid __stdcall hookDispatchMessage",
-                          marker_begin)
+    marker_begin = definition_start(src, "BOOL __stdcall hookPeekMessage(")
+    marker_end = block_end(src, marker_begin)
     marker = src[marker_begin:marker_end]
     outside = marker.find("reportOutsideDirResourcesAtMarker();")
     mesh = marker.find("reportShadowMeshResourcesAtMarker();")
@@ -1351,11 +1495,11 @@ def check_directional_mesh_resource_retention():
     ok(0 <= outside < mesh < mark and "message->wParam == VK_F12" in marker,
        "the existing F12 path emits both delayed reports before marking")
 
-    install_begin = src.find("bool install(HMODULE engine)")
-    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install_begin = definition_start(src, "bool install(HMODULE engine)")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok("g_shadowMeshResourceTracing = g_loadResource && g_shadowTracing"
        in install
@@ -1400,8 +1544,8 @@ def check_shadow_mesh_boundary(engine):
     ok(engine.exports().get(cstr("kEnsureAvailableName")) == ensure,
        "EnsureAvailable export resolves to its recorded RVA")
 
-    prepare_begin = src.find("bool prepareShadowAlphaDefer(HMODULE engine)")
-    prepare_end = src.find("\n}\n\nbool verifyShadowTextureDirectCallers", prepare_begin)
+    prepare_begin = definition_start(src, "bool prepareShadowAlphaDefer(HMODULE engine)")
+    prepare_end = block_end(src, prepare_begin)
     prepare = src[prepare_begin:prepare_end]
     ok(prepare_begin >= 0 and prepare_end > prepare_begin
        and "resolve(engine, kShadowMeshPassCountName" in prepare
@@ -1410,12 +1554,11 @@ def check_shadow_mesh_boundary(engine):
            "               signature(kShadowMeshPassCountBytes" in prepare,
        "the fix verifies the root-mesh export before changing any entry")
 
-    hook_begin = src.find(
-        "int __fastcall hookShadowMeshPassCount(void* self, void* edx)")
-    hook_end = src.find("\n}\n\nint __fastcall hookBuildShadowRecord", hook_begin)
+    hook_begin = definition_start(src, "int __fastcall hookShadowMeshPassCount(void* self, void* edx)")
+    hook_end = block_end(src, hook_begin)
     hook = src[hook_begin:hook_end]
-    predicate_begin = src.find("bool shouldDeferShadowMesh(unsigned state)")
-    predicate_end = src.find("\n}\n", predicate_begin)
+    predicate_begin = definition_start(src, "bool shouldDeferShadowMesh(unsigned state)")
+    predicate_end = block_end(src, predicate_begin)
     predicate = src[predicate_begin:predicate_end]
     ok(predicate_begin >= 0 and predicate_end > predicate_begin
        and "return state <= 1;" in predicate,
@@ -1431,12 +1574,11 @@ def check_shadow_mesh_boundary(engine):
     ok("g_shadowEnqueue(loader, nullptr, mesh, 1, 1, 0);" in hook
        and "kResourceInQueueOffset" in hook
        and "countDeferredShadowMesh(state, enqueued, failed);" in hook
-       and hook.rstrip().endswith("return 0;"),
+       and hook.rstrip().endswith("return 0;\n}"),
        "state-0 root meshes use the stock enqueue tuple and return zero passes")
 
-    install_begin = src.find(
-        "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
-    install_end = src.find("\n    if (ok && trace", install_begin)
+    install_begin = definition_start(src, "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
        and "g_shadowMeshPassCountDetour" in install
@@ -1448,8 +1590,8 @@ def check_shadow_mesh_boundary(engine):
        "the 24-byte root-mesh target steals six bytes and is atomic with the fix")
     ok("g_shadowDeferActive = deferOk;" in install,
        "root-mesh behavior becomes active only after the complete patch set")
-    trace_begin = src.find("if (ok && trace && g_resourceStateVerified) {")
-    trace_end = src.find("\n        void* const materialOwner", trace_begin)
+    trace_begin = definition_start(src, "if (ok && trace && g_resourceStateVerified) {")
+    trace_end = block_end(src, trace_begin)
     trace = src[trace_begin:trace_end]
     ok(trace_begin >= 0 and trace_end > trace_begin
        and "bool meshOk = g_shadowDeferActive\n"
@@ -1457,8 +1599,8 @@ def check_shadow_mesh_boundary(engine):
        and "if (!meshOk)" in trace
        and "g_shadowMeshEnsurePatch" in trace,
        "the trace reuses the behavior detour instead of patching inside it")
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok(shutdown_begin >= 0 and shutdown_end > shutdown_begin
        and "restoreCall(g_shadowMeshEnsurePatch);" in shutdown
@@ -1497,10 +1639,8 @@ def check_shadow_actor_pose_boundary(engine):
     ok(engine.exports().get(cstr("kActorUpdateMeshInstanceName")) == callee_at,
        "Actor::UpdateMeshInstance export resolves to its recorded RVA")
 
-    hook_begin = src.find(
-        "void __fastcall hookShadowActorUpdateMeshInstance(")
-    hook_end = src.find("\n}\n\nint __fastcall hookShadowMeshPassCount",
-                        hook_begin)
+    hook_begin = definition_start(src, "void __fastcall hookShadowActorUpdateMeshInstance(")
+    hook_end = block_end(src, hook_begin)
     hook = src[hook_begin:hook_end]
     ok(hook_begin >= 0 and hook_end > hook_begin
        and "!g_shadowActorPoseDeferActive || !onMainThread()" in hook
@@ -1511,9 +1651,8 @@ def check_shadow_actor_pose_boundary(engine):
        and "if (!shouldDeferShadowMesh(state))" in hook,
        "the earlier gate is exact Actor class, main-thread, directional and"
        " cold-state only")
-    confirm_begin = src.find("bool shadowActorPoseQueueConfirmed(")
-    confirm_end = src.find("\n}\n\nvoid countShadowActorPoseEnqueueFailure",
-                           confirm_begin)
+    confirm_begin = definition_start(src, "bool shadowActorPoseQueueConfirmed(")
+    confirm_end = block_end(src, confirm_begin)
     confirm = src[confirm_begin:confirm_end]
     ok(confirm_begin >= 0 and confirm_end > confirm_begin
        and "return state == 1 || (state == 0 && inQueue);" in confirm,
@@ -1537,8 +1676,8 @@ def check_shadow_actor_pose_boundary(engine):
        "resident-after-enqueue and unconfirmed-enqueue paths fall back to"
        " stock pose work before a deferred event is counted")
 
-    install_begin = src.find("if (ok && g_shadowDeferColdActorPose) {")
-    install_end = src.find("\n    if (ok && trace", install_begin)
+    install_begin = definition_start(src, "if (ok && g_shadowDeferColdActorPose) {")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
        and "resolve(engine, kActorUpdateMeshInstanceName" in install
@@ -1553,11 +1692,11 @@ def check_shadow_actor_pose_boundary(engine):
        and "if (!actorPoseOk) g_actorUpdateMeshInstance = nullptr;" in install,
        "a failed call patch cannot leave the earlier behavior active")
 
-    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
-    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
-    options = src[read_begin:read_end]
-    install_all_begin = src.find("bool install(HMODULE engine)")
-    install_all_end = src.find("\n}\n\nvoid shutdown()", install_all_begin)
+    read_begin = definition_start(src, "void readOptions(const wchar_t* iniPath)")
+    read_end = block_end(src, read_begin)
+    options = src[read_begin:read_end] + "\n".join(cpp_body("void " + f + "(") for f in ("readShadowOptions", "readTerrainOptions", "readSecondaryOptions"))
+    install_all_begin = definition_start(src, "bool install(HMODULE engine)")
+    install_all_end = block_end(src, install_all_begin)
     install_all = src[install_all_begin:install_all_end]
     ok('L"shadow_defer_cold_actor_pose", 1' in options
        and "const bool shadowDefer = g_shadowDeferColdResources || shadowActorPose;"
@@ -1575,8 +1714,8 @@ def check_shadow_actor_pose_boundary(engine):
        "Actor pose diagnostics are counts and no engine duration is charged"
        " to the mod")
 
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok("restoreCall(g_shadowActorUpdateMeshPatch);" in shutdown
        and "g_actorUpdateMeshInstance = nullptr;" in shutdown
@@ -1681,13 +1820,11 @@ def check_shadow_material_textures(engine):
        and '"addl $16, %%esp' in adapter_text,
        "material adapter forwards its verified enclosing caller and shader")
 
-    report_begin = src.find("void reportShadowMaterialDependency(")
-    report_end = src.find("\n}\n\nvoid flushPendingShadowMaterialTexture",
-                          report_begin)
+    report_begin = definition_start(src, "void reportShadowMaterialDependency(")
+    report_end = block_end(src, report_begin)
     report = src[report_begin:report_end]
-    flush_begin = src.find("void flushPendingShadowMaterialTexture(")
-    flush_end = src.find("\n}\n\nextern \"C\" void* __cdecl",
-                         flush_begin)
+    flush_begin = definition_start(src, "void flushPendingShadowMaterialTexture(")
+    flush_end = block_end(src, flush_begin)
     flush = src[flush_begin:flush_end]
     ok(report_begin >= 0 and report_end > report_begin
        and "g_shadowMaterialReports" in report
@@ -1816,8 +1953,8 @@ def check_shadow_texture_attribution(engine):
     slots = const("kShadowRecordContextSlots")
     ok(slots == 4096 and slots & (slots - 1) == 0,
        "shadow context join has the recorded 4096 power-of-two slots")
-    miss_begin = src.find("void explainShadowRecordMiss(")
-    miss_end = src.find("\n}\n\n// Which call site", miss_begin)
+    miss_begin = definition_start(src, "void explainShadowRecordMiss(")
+    miss_end = block_end(src, miss_begin)
     miss = src[miss_begin:miss_end]
     ok(miss_begin >= 0 and miss_end > miss_begin
        and "g_meshShadowStyle" not in miss
@@ -1825,8 +1962,8 @@ def check_shadow_texture_attribution(engine):
        and "g_graphicsTextureGetTexture" not in miss
        and "context->match = ShadowContextInstanceMissing" in miss,
        "context miss explanation scans retained identities without engine calls")
-    build_begin = src.find("int __fastcall hookBuildShadowRecord(")
-    build_end = src.find("\n}\n\nvoid __fastcall hookShadowMeshEnsure", build_begin)
+    build_begin = definition_start(src, "int __fastcall hookBuildShadowRecord(")
+    build_end = block_end(src, build_begin)
     build = src[build_begin:build_end]
     accepted = build.find("const int result = g_buildShadowRecord(")
     retained = build.find("rememberShadowRecordContext(")
@@ -1834,9 +1971,8 @@ def check_shadow_texture_attribution(engine):
        and accepted >= 0 and retained > accepted
        and "if (result && g_shadowTracing" in build,
        "only accepted directional records populate the diagnostic join")
-    filtered_begin = src.find(
-        'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
-    filtered_end = src.find("\n}\n\n// The material Name", filtered_begin)
+    filtered_begin = definition_start(src, 'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
+    filtered_end = block_end(src, filtered_begin)
     filtered = src[filtered_begin:filtered_end]
     ok(filtered_begin >= 0 and filtered_end > filtered_begin
        and "if (cold && !context.active) explainShadowRecordMiss(&context);"
@@ -1846,11 +1982,11 @@ def check_shadow_texture_attribution(engine):
        and "|| outerCaller ==" in filtered,
        "outer caller retains the verified instance site through its wrapper")
 
-    chain_begin = src.find("void reportUnresolvedShadowTextureChain(")
-    chain_end = src.find("\n}\n\nvoid reportChains()", chain_begin)
+    chain_begin = definition_start(src, "void reportUnresolvedShadowTextureChain(")
+    chain_end = block_end(src, chain_begin)
     chain = src[chain_begin:chain_end]
-    load_begin = src.find("void __fastcall hookLoadResource(")
-    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load_begin = definition_start(src, "void __fastcall hookLoadResource(")
+    load_end = block_end(src, load_begin)
     load = src[load_begin:load_end]
     ok(chain_begin >= 0 and chain_end > chain_begin
        and "g_shadowTextureChainReports" in chain
@@ -2020,9 +2156,8 @@ def check_shadow_alpha_defer(engine):
                                   0xc2, 0x10, 0x00],
        "texture setter's missing-parameter target returns success")
 
-    wrapper_begin = src.find(
-        'extern "C" void __cdecl shadowInstanceBumpEnsureFiltered(')
-    wrapper_end = src.find("\n}\n\n// At the patched E8", wrapper_begin)
+    wrapper_begin = definition_start(src, 'extern "C" void __cdecl shadowInstanceBumpEnsureFiltered(')
+    wrapper_end = block_end(src, wrapper_begin)
     wrapper = src[wrapper_begin:wrapper_end]
     ok(wrapper_begin >= 0 and wrapper_end > wrapper_begin
        and "g_shadowDeferActive && inShadow && shader" in wrapper
@@ -2030,9 +2165,8 @@ def check_shadow_alpha_defer(engine):
        and "g_engineBase + kBumpTextureNameRva" in wrapper
        and "g_ensureAvailable(texture, nullptr)" in wrapper,
        "bump omission is directional-only and forwards every used case")
-    install_begin = src.find(
-        "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
-    install_end = src.find("\n    if (ok && trace", install_begin)
+    install_begin = definition_start(src, "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
        and "g_shadowInstanceBumpEnsurePatch" in install
@@ -2087,9 +2221,8 @@ def check_shadow_alpha_defer(engine):
     ok(engine.read(engine.base + base_literal, 12) == b"baseTexture\0",
        "baseTexture static Name source is the exact engine string")
 
-    filtered_begin = src.find(
-        'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
-    filtered_end = src.find("\n}\n\n// The material Name", filtered_begin)
+    filtered_begin = definition_start(src, 'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
+    filtered_end = block_end(src, filtered_begin)
     filtered = src[filtered_begin:filtered_end]
     ok(filtered_begin >= 0 and filtered_end > filtered_begin
        and "const bool overriddenBase = g_shadowDeferActive && inShadow"
@@ -2107,9 +2240,8 @@ def check_shadow_alpha_defer(engine):
        and "g_shadowMaterialTextureHooked = deferOk && filterOk;" in install
        and "restoreCall(g_shadowMeshParameterPatch)" in install,
        "base-override context patch is an atomic fix dependency")
-    context_begin = src.find(
-        'extern "C" void __cdecl shadowMeshSetShaderParametersContext(')
-    context_end = src.find("\n}\n\n// At this patched E8", context_begin)
+    context_begin = definition_start(src, 'extern "C" void __cdecl shadowMeshSetShaderParametersContext(')
+    context_end = block_end(src, context_begin)
     context_adapter = src[context_begin:context_end]
     ok(context_begin >= 0 and context_end > context_begin
        and "if (!onMainThread()" in context_adapter
@@ -2299,6 +2431,9 @@ def check_reflections(engine):
                prefix + "CallRelocs" if call_relocs else None)
         call = table(prefix + "CallWindowBytes")
         offset = const(prefix + "CallOffset")
+        if not ok(0 <= offset and offset + 5 <= len(call),
+                  label + ' call offset fits its verified E8 window'):
+            continue
         site = const(prefix + "CallWindowRva") + offset
         target = site + 5 + struct.unpack_from("<i", bytes(call), offset + 1)[0]
         ok(16 <= len(call) <= 24 and call[offset] == 0xe8
@@ -2314,11 +2449,10 @@ def check_reflections(engine):
         ok(16 <= len(tail) <= 24 and bytes(tail).endswith(cleanup),
            "%s tail proves %u explicit argument(s)" % (label, args))
 
-    install_begin = src.find(
-        "bool installReflections(HMODULE engine, bool trace,"
+    install_begin = definition_start(src, "bool installReflections(HMODULE engine, bool trace,"
         " bool deferAdmissionMesh,\n                        bool deferAdmissionAll,\n"
         "                        bool secondaryPassAdmission)")
-    install_end = src.find("\n}\n\nbool installTerrain", install_begin)
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     first_patch = install.find("tq::detour::patchCall(")
     ok(install_begin >= 0 and install_end > install_begin
@@ -2538,25 +2672,21 @@ def check_reflections(engine):
        and "//131072 the unique reflection-manager call" in engine_h,
        "reflection trace is group 131072 and shares the existing draw clock")
 
-    build_hook_begin = src.find("void __fastcall hookReflectionBuildScene(")
-    build_hook_end = src.find("\n}\n\nvoid __fastcall hookReflectionRenderLight",
-                              build_hook_begin)
+    build_hook_begin = definition_start(src, "void __fastcall hookReflectionBuildScene(")
+    build_hook_end = block_end(src, build_hook_begin)
     build_hook = src[build_hook_begin:build_hook_end]
     light_hook_begin = build_hook_end
     light_hook_end = src.find("\n}\n\nstruct DeferredOwnerScope", light_hook_begin)
     light_hook = src[light_hook_begin:light_hook_end]
-    mesh_hook_begin = src.find(
-        "void __fastcall hookGraphicsMeshInstanceRenderPass(")
-    mesh_hook_end = src.find("\n}\n\nvoid __fastcall hookTerrainPreload",
-                             mesh_hook_begin)
+    mesh_hook_begin = definition_start(src, "void __fastcall hookGraphicsMeshInstanceRenderPass(")
+    mesh_hook_end = block_end(src, mesh_hook_begin)
     mesh_hook = src[mesh_hook_begin:mesh_hook_end]
-    buffer_note_begin = src.find("void noteDeferredBufferCreated(")
-    buffer_note_end = src.find("\n}\n\nbool reflectionAdmissionBufferTrackingRequested",
-                               buffer_note_begin)
+    buffer_note_begin = definition_start(src, "void noteDeferredBufferCreated(")
+    buffer_note_end = block_end(src, buffer_note_begin)
     buffer_note = src[buffer_note_begin:buffer_note_end]
-    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
-    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
-    read_options = src[read_begin:read_end]
+    read_begin = definition_start(src, "void readOptions(const wchar_t* iniPath)")
+    read_end = block_end(src, read_begin)
+    read_options = src[read_begin:read_end] + "\n".join(cpp_body("void " + f + "(") for f in ("readShadowOptions", "readTerrainOptions", "readSecondaryOptions"))
     ok(const("kReflectionAdmissionBufferThreshold") == 32
        and "reflectionAdmissionThresholdReached(buffers)" in build_hook
        and "g_reflectionAdmissionBuildActive = true;" in build_hook
@@ -2622,10 +2752,9 @@ def check_reflections(engine):
        and "i < kAdmissionRenderableIdentityProbe" in src
        and "CounterEngineAdmissionIdentityOverflow" in src,
        "admission renderable identity lookup is bounded, power-of-two, and overflow-visible")
-    admission_consumer_begin = src.find("enum AdmissionConsumer {")
-    admission_consumer_end = src.find("const char* deferredPassName",
-                                      admission_consumer_begin)
-    admission_consumer = src[admission_consumer_begin:admission_consumer_end]
+    admission_consumer_begin = definition_start(src, "enum AdmissionConsumer {")
+    admission_consumer_end = block_end(src, admission_consumer_begin)
+    admission_consumer = cpp_body("AdmissionConsumer currentAdmissionConsumer(") + cpp_body("bool admissionRenderableFirst(")
     ok(admission_consumer_begin >= 0
        and "reflection.cell == ReflectionCellI2P1" in admission_consumer
        and "g_insideDirectional" in admission_consumer
@@ -2655,12 +2784,11 @@ def check_reflections(engine):
        and not any(name.endswith(("_us", "_ms"))
                    for name in secondary_names),
        "all six progressive secondary-admission columns are exact counts")
-    secondary_begin = src.find("enum SecondaryAdmissionState {")
-    secondary_end = src.find("AdmissionConsumer currentAdmissionConsumer",
-                             secondary_begin)
-    secondary = src[secondary_begin:secondary_end]
-    draw_begin = visual_src.find("void WINAPI hookDraw(")
-    draw_end = visual_src.find("void WINAPI hookDrawIndexed(", draw_begin)
+    secondary_begin = definition_start(src, "enum SecondaryAdmissionState {")
+    secondary_end = block_end(src, secondary_begin)
+    secondary = cpp_body("SecondaryAdmissionContext currentSecondaryAdmissionContext(") + cpp_body("bool shouldDeferSecondaryAdmission(") + cpp_body("void armSecondaryAdmission(") + cpp_body("enum SecondaryAdmissionState {")
+    draw_begin = definition_start(visual_src, "void WINAPI hookDraw(")
+    draw_end = definition_start(visual_src, "void WINAPI hookDrawIndexed(")
     draw_hook = visual_src[draw_begin:draw_end]
     indexed_begin = draw_end
     indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
@@ -2703,7 +2831,7 @@ def check_reflections(engine):
        and "CounterEngineSecondaryAdmissionTrigger" in secondary,
        "budget-plus-one unseen identity self-arms one coordinated population")
     ok("SecondaryAdmissionDrawScope secondaryAdmission(" in src
-       and src.count("SecondaryAdmissionDrawScope secondaryAdmission(") == 3
+       and src.count("SecondaryAdmissionDrawScope secondaryAdmission(") == 6
        and "g_terrainPlugRender(self, edx, a, b, c, d);" in src
        and "g_terrainBlockRender(self, edx, a, b, c, d);" in src
        and "g_graphicsMeshInstanceRenderPass(\n"
@@ -2715,14 +2843,14 @@ def check_reflections(engine):
        and "g_draw(context, count, start);" in draw_hook
        and "g_drawIndexed(context, count, start, base);" in indexed_hook,
        "deferred renderables keep resource/material setup while only their D3D draws are suppressed")
-    frame_boundary = src.find("void secondaryAdmissionFrameBoundary()")
+    frame_boundary = definition_start(src, "void secondaryAdmissionFrameBoundary()")
     ok(frame_boundary >= 0
        and "++g_secondaryAdmissionFrameSerial;" in
            src[frame_boundary:frame_boundary + 220]
-       and "tq::engineprobe::secondaryAdmissionFrameBoundary();"
+       and "tq::secondaryadmission::secondaryAdmissionFrameBoundary();"
            in visual_src
        and visual_src.find(
-           "tq::engineprobe::secondaryAdmissionFrameBoundary();")
+           "tq::secondaryadmission::secondaryAdmissionFrameBoundary();")
            < visual_src.find("tq::probe::beginFrame(g_context);")
        and "currentFrameIndex" not in secondary,
        "the fix has a frame serial even when performance_trace is off")
@@ -2741,7 +2869,7 @@ def check_reflections(engine):
        and "secondaryAdmissionDrawHooksReady = indexedOk && drawOk;"
            in visual_src
        and visual_src.find("setSecondaryAdmissionDrawHooksReady(")
-           < visual_src.find("tq::engineprobe::install(")
+           < visual_src.find("tq::engine::install(")
        and "return g_secondaryPassAdmissionBudget != 0;" in src
        and "bool reflectionAdmissionBufferTrackingRequested() {\n"
            "    return false;" in src
@@ -2837,8 +2965,8 @@ def check_cross_pass_identity():
        and "kCrossPassIndexTombstone = (const void*)(uintptr_t)1" in src
        and "kCrossPassIndexSlots - 1" in src,
        "cross-pass family bits, tombstone, and power-of-two index mask are exact")
-    note_begin = src.find("void noteCrossPassBufferCreated(")
-    note_end = src.find("\n}", note_begin)
+    note_begin = definition_start(src, "void noteCrossPassBufferCreated(")
+    note_end = block_end(src, note_begin)
     note_body = src[note_begin:note_end]
     ok("!g_crossPassTracing || !object || !onMainThread()" in note_body
        and "currentReflectionLocation()" in note_body
@@ -2846,8 +2974,8 @@ def check_cross_pass_identity():
        and "CounterEngineCrossPassRecentEviction" in note_body
        and "CounterEngineCrossPassIndexOverflow" in note_body,
        "only main-thread creations retain exact creation context and loss")
-    lookup_begin = src.find("CrossPassBufferRecord* findCrossPassBuffer(")
-    lookup_end = src.find("\n}\n\nvoid countCrossPassDraw", lookup_begin)
+    lookup_begin = definition_start(src, "CrossPassBufferRecord* findCrossPassBuffer(")
+    lookup_end = block_end(src, lookup_begin)
     lookup = src[lookup_begin:lookup_end]
     ok("i < kCrossPassIndexProbe" in lookup
        and "g_crossPassIndex[(start + i) & (kCrossPassIndexSlots - 1)]"
@@ -2855,8 +2983,8 @@ def check_cross_pass_identity():
        and "record.sequence != entry.sequence" in lookup
        and "for (unsigned back" not in lookup,
        "draw-time identity lookup is bounded hash probing, not a ring scan")
-    draw_begin = src.find("void countCrossPassDraw(")
-    draw_end = src.find("\n}\n\nvoid reportCrossPassBuffersAtMarker", draw_begin)
+    draw_begin = definition_start(src, "void countCrossPassDraw(")
+    draw_end = block_end(src, draw_begin)
     draw = src[draw_begin:draw_end]
     ok(draw.find("reflection.cell") < draw.find("else if (directional)")
        < draw.find("else if (deferred.invocation)")
@@ -2881,9 +3009,8 @@ def check_cross_pass_identity():
     ok("now()" not in draw and "gpuBegin" not in draw
        and "GetVertexBuffers" not in draw and "GetIndexBuffer" not in draw,
        "cross-pass draw classification adds no clock, GPU query, or state getter")
-    report_begin = src.find("void reportCrossPassBuffersAtMarker()")
-    report_end = src.find("\n}\n\nconst unsigned kDeferredSlowFrameSlots",
-                          report_begin)
+    report_begin = definition_start(src, "void reportCrossPassBuffersAtMarker()")
+    report_end = block_end(src, report_begin)
     report = src[report_begin:report_end]
     ok("marker - record.createdFrame > kCrossPassFreshFrames" in report
        and "emitted >= kCrossPassMarkerReportLimit" in report
@@ -2954,8 +3081,8 @@ def _check_gpu_draw_chunks_run76(engine):
     ok(gpu_enums == expected_enums,
        "the 33 unique sparse query IDs preserve exact enum order")
 
-    arm_begin = src.find("void armGpuChunks(")
-    arm_end = src.find("\n}\n\nvoid closeGpuChunks", arm_begin)
+    arm_begin = definition_start(src, "void armGpuChunks(")
+    arm_end = block_end(src, arm_begin)
     arm = src[arm_begin:arm_end]
     ok("g_gpuChunkEvents[g_gpuChunkEventSequence++"
            " % kGpuChunkEventSlots]" in arm
@@ -2965,9 +3092,7 @@ def _check_gpu_draw_chunks_run76(engine):
        and "GpuChunkShadowSetup" in arm,
        "one bounded event either records now or opens separate shadow setup")
 
-    reflection_hook = src[
-        src.find("void __fastcall hookReflectionRenderLight("):
-        src.find("\n}\n\nstruct DeferredOwnerScope")]
+    reflection_hook = cpp_body('void __fastcall hookReflectionRenderLight(')
     child_begin = src.find("struct ReflectionChildScope")
     child_end = src.find("\n};\n\nint __fastcall hookReflectionManager", child_begin)
     child = src[child_begin:child_end]
@@ -2978,11 +3103,11 @@ def _check_gpu_draw_chunks_run76(engine):
        and "armGpuChunks(GpuChunkReflection, 1, &location" in reflection_hook
        and reflection_hook.find("armGpuChunks(GpuChunkReflection")
            < reflection_hook.find("ReflectionChildScope scope(")
-           < reflection_hook.find("g_reflectionRenderLight(self"),
+           < reflection_hook.rfind("g_reflectionRenderLight(self"),
        "slow exact i2/p1 BuildScene sparsely arms the whole following RenderLightStyle")
 
-    shadow_begin = src.find("int __fastcall hookRenderDirectional(")
-    shadow_end = src.find("\n}\n\nvoid __fastcall hookShadowRecordExecutor", shadow_begin)
+    shadow_begin = definition_start(src, "int __fastcall hookRenderDirectional(")
+    shadow_end = block_end(src, shadow_begin)
     shadow = src[shadow_begin:shadow_end]
     reuse = shadow.find("reusePreviousShadow(")
     shadow_arm = shadow.find("armGpuChunks(GpuChunkShadow")
@@ -3014,8 +3139,7 @@ def _check_gpu_draw_chunks_run76(engine):
        and target == const("kShadowRecordExecutorRva")
        and 16 <= len(tail) <= 24 and tail.endswith(b"\xc2\x0c\x00"),
        "verified DX11 executor E8 resolves exactly and ABI pops three arguments")
-    executor = src[src.find("void __fastcall hookShadowRecordExecutor("):
-                   src.find("\n}\n\nvoid __fastcall hookUnloadLevel")]
+    executor = cpp_body('void __fastcall hookShadowRecordExecutor(')
     ok(executor.find("beginShadowRecordExecutorChunks();")
            < executor.find("g_shadowRecordExecutor(self")
            < executor.find("closeGpuChunks(GpuChunkShadow);")
@@ -3024,8 +3148,8 @@ def _check_gpu_draw_chunks_run76(engine):
            src.find("\n}\n\nvoid closeGpuChunks")],
        "DX11 executor ends setup, records only executor draws, and closes there")
 
-    before_begin = src.find("void beginGpuChunkDrawInternal(")
-    before_end = src.find("\n}\n\nvoid finishGpuChunkDrawInternal", before_begin)
+    before_begin = definition_start(src, "void beginGpuChunkDrawInternal(")
+    before_end = block_end(src, before_begin)
     before = src[before_begin:before_end]
     finish_begin = before_end + 3
     finish_end = src.find("\n}\n\nvoid reportGpuChunksAtMarker", finish_begin)
@@ -3043,10 +3167,10 @@ def _check_gpu_draw_chunks_run76(engine):
        and "bindings->vertexBuffers[0]" in finish,
        "chunk identity reuses setter snapshots and adds no D3D state getter")
 
-    draw_begin = visual_src.find("void WINAPI hookDraw(")
-    indexed_begin = visual_src.find("void WINAPI hookDrawIndexed(")
+    draw_begin = definition_start(visual_src, "void WINAPI hookDraw(")
+    indexed_begin = definition_start(visual_src, "void WINAPI hookDrawIndexed(")
     draw = visual_src[draw_begin:indexed_begin]
-    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed_end = block_end(visual_src, indexed_begin)
     indexed = visual_src[indexed_begin:indexed_end]
     ok(draw.find("beginGpuChunkDraw(context)") < draw.find("g_draw(context")
        < draw.find("finishGpuChunkDraw(")
@@ -3062,8 +3186,8 @@ def _check_gpu_draw_chunks_run76(engine):
        and "extern volatile LONG gpuChunkDrawActive" in engine_h,
        "ordinary draws inline-gate both helper calls before crossing modules")
 
-    install_begin = src.find("bool install(HMODULE engine)")
-    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install_begin = definition_start(src, "bool install(HMODULE engine)")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok("wants(kGroupShadow) && wants(kGroupReflections)" in install
        and "&& tq::probe::drawTimingEnabled()" in install
@@ -3072,8 +3196,7 @@ def _check_gpu_draw_chunks_run76(engine):
        and "&& g_shadowTracing && g_reflectionTracing" in install
        and "&& g_reflectionChildTracing" in install,
        "activation requires exact shadow executor, reflection, and draw dependencies")
-    shadow_install = src[src.find("bool installShadow("):
-                         src.find("\n}\n\nbool installWait", src.find("bool installShadow("))]
+    shadow_install = cpp_body('bool installShadow(')
     first_write = shadow_install.find("tq::detour::patchCall(")
     ok(first_write > shadow_install.find("kShadowRecordExecutorTailBytes")
        and "patchCall(\n            g_shadowRecordExecutorPatch" in shadow_install
@@ -3083,13 +3206,11 @@ def _check_gpu_draw_chunks_run76(engine):
        and "restoreCall(g_shadowRecordExecutorPatch)" in src[
            src.find("void shutdown()"):src.find("#ifdef TQ_SELFTEST")],
        "executor and outer E8 install atomically and restore on shutdown")
-    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
-                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    marker = cpp_body('BOOL __stdcall hookPeekMessage(')
     ok(marker.find("reportGpuChunksAtMarker();")
            < marker.find("tq::probe::markStutter();"),
        "F12 writes retained chunk metadata during the session before marking")
-    shutdown = src[src.find("void shutdown()"):
-                   src.find("#ifdef TQ_SELFTEST")]
+    shutdown = cpp_body('void shutdown()')
     ok("g_gpuChunkTracing = false;" in shutdown
        and "gpuChunkDrawActive, 0" in shutdown
        and "InterlockedExchange(&g_reflectionChild, 0);" in shutdown,
@@ -3132,12 +3253,7 @@ def check_gpu_draw_chunks(engine):
            == [(13, 0x36f000)]
        and len(mesh_tail) == 23 and mesh_tail.endswith(b"\xc2\x10\x00"),
        "mesh RenderPass verifies 24 shared-prologue bytes, steals six, and proves four arguments")
-    install_reflections = src[
-        src.find("bool installReflections(HMODULE engine, bool trace,"
-                 " bool deferAdmissionMesh,\n"
-                 "                        bool deferAdmissionAll,\n"
-                 "                        bool secondaryPassAdmission)"):
-        src.find("bool installTerrain(HMODULE engine")]
+    install_reflections = cpp_body('bool installReflections(HMODULE engine, bool trace, bool deferAdmissionMesh,\n                        bool deferAdmissionAll,\n                        bool secondaryPassAdmission)')
     ok("resolve(\n        engine, kGraphicsMeshInstanceRenderPassName,"
            in install_reflections
        and "const bool meshOk = lightOk && (!needMesh || tq::detour::attach("
@@ -3187,8 +3303,8 @@ def check_gpu_draw_chunks(engine):
     ok(gpu_enums == ["GpuChunkReflection%02d" % i for i in range(16)],
        "directional setup/chunk query IDs are removed, not merely left idle")
 
-    arm_begin = src.find("void armGpuChunks(")
-    arm_end = src.find("\n}\n\nvoid closeGpuChunks", arm_begin)
+    arm_begin = definition_start(src, "void armGpuChunks(")
+    arm_end = block_end(src, arm_begin)
     arm = src[arm_begin:arm_end]
     ok("event.startDraw = kGpuChunkStartDraw;" in arm
        and "g_gpuChunkEvents[g_gpuChunkEventSequence++"
@@ -3198,12 +3314,9 @@ def check_gpu_draw_chunks(engine):
        and "gpuBegin" not in arm,
        "one bounded reflection event starts at draw 1 without arming early")
 
-    reflection_hook = src[
-        src.find("void __fastcall hookReflectionRenderLight("):
-        src.find("\n}\n\nstruct DeferredOwnerScope")]
+    reflection_hook = cpp_body('void __fastcall hookReflectionRenderLight(')
     child_begin = src.find("struct ReflectionChildScope")
-    child_end = src.find("\n};\n\nint __fastcall hookReflectionManager",
-                         child_begin)
+    child_end = block_end(src, child_begin)
     child = src[child_begin:child_end]
     ok("child == ReflectionChildBuildScene" in child
        and "cell == ReflectionCellI2P1" in child
@@ -3213,7 +3326,7 @@ def check_gpu_draw_chunks(engine):
            in reflection_hook
        and reflection_hook.find("armGpuChunks(location")
            < reflection_hook.find("ReflectionChildScope scope(")
-           < reflection_hook.find("g_reflectionRenderLight(self"),
+           < reflection_hook.rfind("g_reflectionRenderLight(self"),
        "slow exact i2/p1 BuildScene sparsely arms the following RenderLightStyle")
     ok("closeGpuChunks();" in child
        and "InterlockedExchange(&g_reflectionChild, priorChild);" in child,
@@ -3240,18 +3353,16 @@ def check_gpu_draw_chunks(engine):
        and 16 <= len(tail) <= 24 and tail.endswith(b"\xc2\x0c\x00"),
        "dormant DX11 executor evidence still resolves and proves three arguments")
 
-    shadow_begin = src.find("int __fastcall hookRenderDirectional(")
-    shadow_end = src.find("\n}\n\nvoid __fastcall hookUnloadLevel",
-                          shadow_begin)
+    shadow_begin = definition_start(src, "int __fastcall hookRenderDirectional(")
+    shadow_end = block_end(src, shadow_begin)
     shadow = src[shadow_begin:shadow_end]
     ok("armGpuChunks" not in shadow and "closeGpuChunks" not in shadow
        and "GpuChunkShadow" not in src
        and "g_shadowRecordExecutorPatch" not in src,
        "directional shadow issues no sparse query and receives no executor patch")
 
-    before_begin = src.find("void beginGpuChunkDrawInternal(")
-    before_end = src.find("\n}\n\nvoid finishGpuChunkDrawInternal",
-                          before_begin)
+    before_begin = definition_start(src, "void beginGpuChunkDrawInternal(")
+    before_end = block_end(src, before_begin)
     before = src[before_begin:before_end]
     finish_begin = before_end + 3
     finish_end = src.find("\n}\n\nconst char* gpuChunkRenderableName",
@@ -3272,22 +3383,14 @@ def check_gpu_draw_chunks(engine):
        and "bindings->vertexBuffers[0]" in finish,
        "continuous identity reuses setter snapshots and adds no D3D getter")
 
-    renderable_struct = src[src.find("struct GpuChunkRenderableCall {"):
-                            src.find("struct ActiveGpuChunkEvent {")]
-    renderable_scope = src[src.find("struct GpuChunkRenderableCallScope {"):
-                           src.find("void reportGpuChunksAtMarker()")]
-    plug = src[src.find("void __fastcall hookTerrainPlugRender("):
-               src.find("void __fastcall hookTerrainBlockRender(")]
-    block = src[src.find("void __fastcall hookTerrainBlockRender("):
-                src.find("void __fastcall hookTerrainPreload(")]
-    mesh = src[src.find("void __fastcall hookGraphicsMeshInstanceRenderPass("):
-               src.find("void __fastcall hookTerrainPreload(")]
-    load = src[src.find("void __fastcall hookLoadResource("):
-               src.find("bool reusePreviousShadow(")]
-    creation = src[src.find("void countReflectionCreation("):
-                   src.find("void countReflectionDraw(")]
-    report = src[src.find("void reportGpuChunksAtMarker()"):
-                 src.find("void countReflectionResource(")]
+    renderable_struct = cpp_body("struct GpuChunkRenderableCall {") + cpp_body("struct GpuChunkEvent {")
+    renderable_scope = cpp_body('struct GpuChunkRenderableCallScope {')
+    plug = cpp_body('void __fastcall hookTerrainPlugRender(')
+    block = cpp_body('void __fastcall hookTerrainBlockRender(')
+    mesh = cpp_body('void __fastcall hookGraphicsMeshInstanceRenderPass(')
+    load = cpp_body('void __fastcall hookLoadResource(')
+    creation = cpp_body('void countReflectionCreation(')
+    report = cpp_body('void reportGpuChunksAtMarker()')
     ok("GpuChunkRenderableCall renderables[kGpuChunkRenderableCallSlots]"
            in renderable_struct
        and "event.renderableCalls >= kGpuChunkRenderableCallSlots"
@@ -3308,7 +3411,7 @@ def check_gpu_draw_chunks(engine):
     ok("GpuChunkRenderableCallScope renderableCall(GpuChunkMeshInstance, self);"
            in mesh
        and "g_graphicsMeshInstanceRenderPass(" in mesh
-       and mesh.count("g_graphicsMeshInstanceRenderPass(") == 2
+       and mesh.count("g_graphicsMeshInstanceRenderPass(") == 3
        and mesh.find("if (!renderableCall.call)")
            < mesh.find("const int64_t started")
        and "renderableCall.finish(" in mesh,
@@ -3329,10 +3432,10 @@ def check_gpu_draw_chunks(engine):
        and "GPU chunk classes frame %u, bin %u" in report,
        "F12 reports older reaction candidates first and maps every bin to classes")
 
-    draw_begin = visual_src.find("void WINAPI hookDraw(")
-    indexed_begin = visual_src.find("void WINAPI hookDrawIndexed(")
+    draw_begin = definition_start(visual_src, "void WINAPI hookDraw(")
+    indexed_begin = definition_start(visual_src, "void WINAPI hookDrawIndexed(")
     draw = visual_src[draw_begin:indexed_begin]
-    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed_end = block_end(visual_src, indexed_begin)
     indexed = visual_src[indexed_begin:indexed_end]
     ok(draw.find("beginGpuChunkDraw(context)") < draw.find("g_draw(context")
        < draw.find("finishGpuChunkDraw(")
@@ -3348,8 +3451,8 @@ def check_gpu_draw_chunks(engine):
        and "extern volatile LONG gpuChunkDrawActive" in engine_h,
        "ordinary draws inline-gate the reflection helper calls")
 
-    install_begin = src.find("bool install(HMODULE engine)")
-    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install_begin = definition_start(src, "bool install(HMODULE engine)")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     ok("wants(kGroupReflections) && wants(kGroupTerrain)" in install
        and "&& tq::probe::drawTimingEnabled()" in install
@@ -3359,13 +3462,11 @@ def check_gpu_draw_chunks(engine):
        and "&& g_graphicsMeshInstanceRenderPass" in install
        and "installShadow(engine, traceShadow);" in install,
        "activation requires exact reflection/terrain/mesh/draw dependencies, not shadow chunks")
-    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
-                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    marker = cpp_body('BOOL __stdcall hookPeekMessage(')
     ok(marker.find("reportGpuChunksAtMarker();")
            < marker.find("tq::probe::markStutter();"),
        "F12 writes continuous reflection metadata before marking")
-    shutdown = src[src.find("void shutdown()"):
-                   src.find("#ifdef TQ_SELFTEST")]
+    shutdown = cpp_body('void shutdown()')
     ok("g_gpuChunkTracing = false;" in shutdown
        and "gpuChunkDrawActive, 0" in shutdown
        and "g_activeGpuChunkRenderableCall = nullptr;" in shutdown
@@ -3390,14 +3491,10 @@ def check_off_main_texture_trace():
        and const("kOffMainTextureMarkerFrames") == 120
        and const("kOffMainTextureReportLimit") == 192,
        "off-main texture ring, reaction horizon, and output bound are exact")
-    record = src[src.find("struct OffMainTextureRecord {"):
-                 src.find("void reportOffMainTexturesAtMarker()")]
-    note = src[src.find("void noteOffMainTextureCreated("):
-               src.find("void noteDeferredBufferCreated(")]
-    report = src[src.find("void reportOffMainTexturesAtMarker()"):
-                 src.find("void noteDeferredCreationInternal(")]
-    hook = visual_src[visual_src.find("HRESULT WINAPI hookCreateTexture2D("):
-                      visual_src.find("HRESULT WINAPI hookCreatePixelShader(")]
+    record = cpp_body('struct OffMainTextureRecord {')
+    note = cpp_body('void noteOffMainTextureCreated(')
+    report = cpp_body('void reportOffMainTexturesAtMarker()')
+    hook = cpp_body('HRESULT WINAPI hookCreateTexture2D(', visual_src)
     ok("volatile LONG publishedSequence" in record
        and "unsigned startFrame;" in record
        and "unsigned finishFrame;" in record
@@ -3422,8 +3519,7 @@ def check_off_main_texture_trace():
        and "emitted >= kOffMainTextureReportLimit" in report
        and "omitted %u" in report,
        "F12 emits loader records oldest-first with an explicit bounded omission count")
-    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
-                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    marker = cpp_body('BOOL __stdcall hookPeekMessage(')
     ok(0 <= marker.find("reportOffMainTexturesAtMarker();")
            < marker.find("reportGpuChunksAtMarker();")
            < marker.find("tq::probe::markStutter();"),
@@ -3565,8 +3661,8 @@ def check_deferred_passes(engine):
         ok(row in abi_table_flat,
            "%s source ABI row binds target, tail, bytes, and count" % name)
 
-    install_begin = src.find("bool installDeferredPasses(HMODULE engine)")
-    install_end = src.find("\n}\n\nbool installTerrain", install_begin)
+    install_begin = definition_start(src, "bool installDeferredPasses(HMODULE engine)")
+    install_end = block_end(src, install_begin)
     install = src[install_begin:install_end]
     owner_check = install.find("bool verified = owner")
     wide_check = install.find("Validate every overlapping original window")
@@ -3737,8 +3833,8 @@ def check_deferred_passes(engine):
        and "kDeferredGeometryDurationCounters[cell]" in scope
        and "InterlockedExchange(&g_deferredPass, prior);" in scope,
        "pass scopes require an owner and keep exact geometry GPU pairs nested")
-    draw_begin = src.find("void countDeferredDrawInternal(")
-    draw_end = src.find("\n}", draw_begin)
+    draw_begin = definition_start(src, "void countDeferredDrawInternal(")
+    draw_end = block_end(src, draw_begin)
     draw = src[draw_begin:draw_end]
     ok("!g_deferredPassTracing || !elapsedUs" in draw
        and "kDeferredPassDrawCounters[pass]" in draw
@@ -3769,15 +3865,15 @@ def check_deferred_passes(engine):
         ("hookDeferredPostDebug", "DeferredPassPost", "g_deferredPostDebug"),
     ]
     for wrapper, pass_name, original in wrapper_map:
-        begin = src.find(" __fastcall %s(" % wrapper)
-        end = src.find("\n}", begin)
+        begin = definition_start(src, " __fastcall %s(" % wrapper)
+        end = block_end(src, begin)
         body = src[begin:end]
         expected_scope = "DeferredPassScope scope(%s" % pass_name
         ok(begin >= 0 and expected_scope in body
            and original in body,
            "%s preserves its original and exact pass class" % wrapper)
-    owner_begin = src.find(" __fastcall hookDeferredRender(")
-    owner_end = src.find("\n}", owner_begin)
+    owner_begin = definition_start(src, " __fastcall hookDeferredRender(")
+    owner_end = block_end(src, owner_begin)
     owner_wrapper = src[owner_begin:owner_end]
     ok(owner_begin >= 0 and "DeferredOwnerScope scope;" in owner_wrapper
        and "g_deferredRender(self, edx, a, b, c, d, e, f, g)" in owner_wrapper,
@@ -3805,8 +3901,8 @@ def check_deferred_passes(engine):
            "        g_deferredSlowFrames[frame % kDeferredSlowFrameSlots]"
            in src,
        "creation and slow-draw writes wrap within their verified rings")
-    marker_begin = src.find("void reportDeferredSlowDrawsAtMarker()")
-    marker_end = src.find("\n}\n\nstruct DeferredOwnerScope", marker_begin)
+    marker_begin = definition_start(src, "void reportDeferredSlowDrawsAtMarker()")
+    marker_end = block_end(src, marker_begin)
     marker = src[marker_begin:marker_end]
     ok(marker_begin >= 0 and marker_end > marker_begin
        and "back <= kDeferredSlowMarkerFrames" in marker
@@ -3818,9 +3914,7 @@ def check_deferred_passes(engine):
        and src.find("reportDeferredSlowDrawsAtMarker();")
            < src.find("tq::probe::markStutter();"),
        "F12 writes retained geometry identity before recording its marker")
-    binding_hooks = visual_src[
-        visual_src.find("void WINAPI hookPSSetShaderResources("):
-        visual_src.find("const ShadowTexture* dsvShadowTexture(")]
+    binding_hooks = cpp_body('void WINAPI hookPSSetShaderResources(', visual_src)
     ok(all(name in visual_src for name in [
            "hookVSSetShader", "hookIASetVertexBuffers", "hookIASetIndexBuffer",
            "hookPSSetShaderResources", "hookPSSetShader"])
@@ -3835,27 +3929,22 @@ def check_deferred_passes(engine):
         r"DeferredTracePixelResourceSlots = (\d+)\s*\};", engine_h, re.S)
     ok(slot_decl and slot_decl.groups() == ("4", "8"),
        "binding snapshots retain exactly four vertex buffers and eight SRVs")
-    texture_hook = visual_src[
-        visual_src.find("HRESULT WINAPI hookCreateTexture2D("):
-        visual_src.find("HRESULT WINAPI hookCreatePixelShader(")]
-    buffer_hook = visual_src[
-        visual_src.find("HRESULT WINAPI hookCreateBuffer("):
-        visual_src.find("HRESULT WINAPI hookMap(")]
+    texture_hook = cpp_body('HRESULT WINAPI hookCreateTexture2D(', visual_src)
+    buffer_hook = cpp_body('HRESULT WINAPI hookCreateBuffer(', visual_src)
     ok(texture_hook.count("finishPhase(") == 1
        and "noteDeferredTextureCreated(" in texture_hook
        and buffer_hook.count("finishPhase(") == 1
        and "noteDeferredBufferCreated(" in buffer_hook,
        "D3D creation attribution reuses each existing timing sample")
-    finish_begin = probe_src.find(
-        "uint32_t finishPhaseInternal(Phase phase, int64_t startTicks)")
-    finish_end = probe_src.find("\n}", finish_begin)
+    finish_begin = definition_start(probe_src, "uint32_t finishPhaseInternal(Phase phase, int64_t startTicks)")
+    finish_end = block_end(probe_src, finish_begin)
     finish = probe_src[finish_begin:finish_end]
     ok(finish_begin >= 0 and finish.count("now()") == 1
        and "g_current.phaseMs[phase] +=" in finish
        and "1000000.0" in finish,
        "finishPhase records precise phase time and returns microseconds from one clock read")
-    shutdown_begin = src.find("void shutdown()")
-    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown_begin = definition_start(src, "void shutdown()")
+    shutdown_end = block_end(src, shutdown_begin)
     shutdown = src[shutdown_begin:shutdown_end]
     ok("g_deferredPassTracing = false;" in shutdown
        and "restoreCall(g_deferredCallPatches[i]);" in shutdown
@@ -3870,6 +3959,7 @@ def main():
 
     print("Image identity")
     ok(engine.imagesize == const("kEngineImageSize"), "Engine.dll SizeOfImage %#x" % engine.imagesize)
+    check_legacy_scalar_contract(engine)
     ok(game.imagesize == const("kGameImageSize"), "Game.dll SizeOfImage %#x" % game.imagesize)
     ok(exe.imagesize == const("kExecutableImageSize"), "TQ.exe SizeOfImage %#x" % exe.imagesize)
 
@@ -4097,6 +4187,7 @@ def main():
 
     check_archive_cache(engine)
     check_configuration_contract()
+    check_trace_off_isolation()
     check_async_level_load(engine, sites)
     check_directional_shadow(engine)
     check_resource_lifecycle(engine)

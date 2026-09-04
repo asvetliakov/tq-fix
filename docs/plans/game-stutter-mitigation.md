@@ -14,6 +14,13 @@ on" and no code change followed from it.
 
 # Status, and where the plan was wrong
 
+Current implementation ownership is recorded in findings §111. Performance
+behavior has moved from `engine_probe.cpp` into the shadow, terrain, secondary
+admission and archive modules, coordinated by `engine_hooks.cpp`. Trace-off
+shared hooks bypass the observer; this is an architectural/runtime-overhead
+correction, not a newly measured game result. Historical file paths below
+describe the implementation at the time of each stage.
+
 Stages 0 and 1 landed as written. Two stages that are **not** in this plan
 landed after them, because measurement redirected the work; and two of the five
 "established beyond doubt" findings below turned out to be false for the

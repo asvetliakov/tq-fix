@@ -2,12 +2,47 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current after the **post-Run-85
-trace-off performance-path audit** on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current after the **performance
+module / trace-off refactor**, with Run 87 prepared, on `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**READ FINDINGS §111 BEFORE §110.** The post-checkpoint refactor moves
+performance behavior and installation into `shadow_defer.cpp`,
+`terrain_preload.cpp`, `secondary_admission.cpp`, and `archive_hooks.cpp`;
+`engine_hooks.cpp` coordinates shared sites. `engine_probe.cpp` is the
+optional Engine observer. Shared ABI/byte contracts are in
+`engine_internal.h`, and the verifier reads every implementation.
+
+§110 proved the fixes execute without tracing, but missed real disabled-path
+overhead: `probe::now()` always called QPC, several shared wrappers entered
+observer helpers, and admission still installed the obsolete reflection
+`BuildScene` observer. §111 removes these paths, gates recorder helpers
+inline, and adds a test that executes real preload, cold-root and admission
+wrappers without entering either recorder. Accepted behavior/settings and
+every pre-existing Engine constant initializer are unchanged. No new game
+result is claimed; Run 85 remains the latest measured result.
+
+Run 87 is installed as `cache/runs/run87-performance-modules-trace-off.ini`.
+It differs from `live-config.ini` only in its explanatory header; both traces
+are off, so no F12 or CSV record is expected. Doctor/build/selftest pass,
+including GPU retirement and the real-wrapper trace-off exercise. Verification
+passes **865/865** checks, rejects **362/362** scalar/window perturbations,
+and rejects **22/22** disabled-gate regressions. The broader perturbation
+audit exposed and corrected 28 previously unchecked scalar contracts plus an
+out-of-bounds call-offset error path in the verifier.
+
+Build and installed DLL SHA-256:
+`1ec22a61d7687bd5c97c5f69c2adf2835371783525ab75c1db8a2b6ce109edf4`.
+Run-87 source/installed INI SHA-256:
+`384c95d3ae868cee052113315371cdd3c249cf3408c6b8273dad9850117bb569`.
+No stale live CSV/debug log existed. The game was not launched.
+
+The old Run-86 DLL hash and validation count below describe checkpoint
+`9b1cf2a`, not the refactored build. See §111 for the current implementation
+and validation. Historical briefs follow unchanged.
 
 **READ FINDINGS §110 BEFORE §109.** This audit is not another game run; Run
 85 remains the latest measured and subjective result. The proven Run-85 state

@@ -25,7 +25,7 @@ namespace arccache {
 // default is `[performance] archive_cache_mb = 8`; `0` disables it.
 
 // What a slot holds one of. Every field is read out of the block routine's own
-// operands rather than out of a document -- src/engine_probe.cpp names the
+// operands rather than out of a document -- src/archive_hooks.cpp names the
 // instruction each one comes from, and verify-sites.py compares those
 // instructions to the installed Engine.dll.
 //
@@ -94,8 +94,13 @@ void store(const Key& key, const void* source);
 
 // One log line, on its own cadence. Titan Quest exits without unloading, so a
 // summary written at teardown is a summary nobody ever reads; this is called
-// once per request and prints every 1,024th.
-void report();
+// once per request and prints every 1,024th. Explicit debug trace enables it;
+// otherwise the inline gate avoids even entering the reporting lock.
+namespace detail { extern bool reporting; }
+void reportInternal();
+inline void report() {
+    if (detail::reporting) reportInternal();
+}
 
 #ifdef TQ_SELFTEST
 void configureForTest(unsigned megabytes, bool verify);

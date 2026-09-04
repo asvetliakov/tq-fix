@@ -9105,6 +9105,85 @@ The already installed Run-86 INI is unchanged and remains trace-off. No game
 process was launched.
 
 
+## 111. Separate performance behavior from the observers and bypass tracing at runtime
+
+This is a refactor and off-game validation, not a new game run. §108 remains
+the latest measured/subjective result. It corrects a limitation of §110:
+proving that fixes run with the probe off did **not** prove that all observer
+overhead was absent.
+
+`probe::now()` was declared to return zero while disabled, but its definition
+unconditionally called `QueryPerformanceCounter`. The shared archive,
+terrain-renderable, loose-file and unmap wrappers could therefore read the
+clock even when their counters were no-ops. Shared secondary wrappers also
+entered observer helpers/scopes, and the reflection installer still patched
+`BuildScene` despite the identity budget no longer needing its buffer count.
+These are source-audited costs; no frame-time improvement is inferred from
+their removal.
+
+Behavior and installation now live in `shadow_defer.cpp`,
+`terrain_preload.cpp`, `secondary_admission.cpp`, and `archive_hooks.cpp`.
+`engine_hooks.cpp` coordinates shared patch ownership and complete activation
+dependencies. `engine_probe.cpp` holds optional Engine observers; `probe.cpp`
+holds the recorder. `engine_internal.h` contains shared ABI declarations,
+audited constants and contracts. All 473 pre-existing Engine constant
+initializers are unchanged, including byte arrays and relocation tables.
+The disassembly target index records the new owners; no new game address or
+code patch is introduced.
+
+With `performance_trace=0`, the directional, reflection and three renderable
+wrappers take explicit behavior-only paths. Shadow material filtering returns
+before diagnostic context retention. Cold-root/pose counters are called only
+with their trace group enabled. Public clock, elapsed-time, thread/frame and
+GPU recorder helpers now gate inline before entering the recorder. The visual
+texture and buffer wrappers bypass Engine creation observers. Large Engine
+history rings are initialized only for an enabled trace. Reflection
+`BuildScene` is hooked only for tracing. The archive cache still serves and
+stores blocks; its reporting is separate from gameplay work.
+
+Small cached-flag branches remain, as do the hooks/identity tracking required
+by the fixes. This is not a claim of literally zero extra machine
+instructions or a measured CPU/GPU improvement. A second compile-time DLL
+variant is not needed to turn off recording, and full tracing remains
+available in the same build.
+
+The new off-game exercise invokes the actual shared wrappers with mock stock
+callees: terrain textures are created before their semantic preload; a
+two-identity budget is shared across reflection and directional shadow and
+admits its pending identity next frame; cold mesh/Actor roots queue and defer,
+then return to the stock callees at state 2. Entry counters in both recorders
+must remain unchanged throughout. The full self-test passes, including GPU
+timestamp retirement. The verifier now locates balanced function bodies
+instead of depending on the next function's old file position.
+
+Final validation is doctor/build/selftest green and **865/865** verifier
+checks. All **362/362** individual scalar/window perturbations and **22/22**
+trace-off gate regressions are rejected. This wider audit found 28 previously
+unchecked scalar contracts (including masks, diagnostic bounds, a main-thread
+RVA and call offsets), and one call-offset mutation that previously raised an
+exception instead of a useful failed assertion. Named relocation operands now
+come from the actual source constants rather than a second hardcoded map.
+The main-thread RVA is independently checked against the pinned
+`CMP EAX,[0x1041a5dc]` bytes at Engine RVA `0x14476b`.
+
+Archive verification logging still works with `trace=1` and the performance
+recorder off. Its explicit reporting flag bypasses the reporting lock on a
+normal `trace=0` boot; the existing lookup/store and verification behavior is
+unchanged.
+
+Run 87 is installed from
+`cache/runs/run87-performance-modules-trace-off.ini`, which differs from
+`live-config.ini` only in comments. Build/installed DLL SHA-256 is
+`1ec22a61d7687bd5c97c5f69c2adf2835371783525ab75c1db8a2b6ce109edf4`;
+source/installed INI SHA-256 is
+`384c95d3ae868cee052113315371cdd3c249cf3408c6b8273dad9850117bb569`.
+There was no stale live CSV/debug log, and the game was not launched.
+
+The next normal-route confirmation uses the same live configuration with
+both traces off. It is a subjective regression check of the refactored hooks;
+no CSV or F12 record is expected. Report the menu, load-game frame, loading
+screen, first world frame and play separately if any regression is observed.
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to
