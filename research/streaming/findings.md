@@ -4599,6 +4599,1106 @@ preloading those resources earlier and omitting only state-0 casters until
 resident. No whole-map reuse, longer skip, `shadow_split` reduction, message
 pump change, or general resource-loader rewrite follows from this result.
 
+## 53. Run 49 design: identify the resource class and exact caster boundary
+
+A fresh export from the pinned `Engine.dll` resolves the indirect part of the
+directional-shadow path that §52 left open. During **play**, each
+`RenderDirectional` call obtains entities from `Region::GetEntitiesInFrustum`
+or `World::GetEntitiesInFrustum`, calls each entity's virtual `AddToScene`, and
+builds a temporary `GraphicsShadowMapRenderer`. `Actor::AddToScene` hands its
+`GraphicsMeshInstance` to `GraphicsSceneRenderer::AddRenderable`. The shadow
+renderer then walks those renderables in `FUN_1018c870`; its first virtual call
+asks for the number of shadow render passes, before shader selection and before
+the 0x88-byte draw record is constructed.
+
+For `GraphicsMeshInstance`, that virtual target is the exported
+`GetNumShadowRenderPasses` at RVA `0x173440`. Its complete 24 bytes say: load
+`this+4`, null-check it, put it in ECX, call exported
+`Resource::EnsureAvailable` at RVA `0x2130f0`, then return `[mesh+0x7c]` as the
+pass count. A null mesh returns zero. The later `RenderPass` starts with
+`GraphicsMesh::GetMeshRenderInfo`, which calls `EnsureAvailable` again, but a
+mesh loaded at the pass-count query is resident by then. This makes the
+pass-count query an exact per-mesh eligibility boundary: an option-3 fix could
+return zero only for a state-0 mesh, before that caster has a shader or draw
+record. It would omit that individual caster's shadow temporarily, not reuse,
+skip, or invalidate the whole directional map.
+
+That static ordering does not yet prove that run 48's measured population is
+mesh resources. Run 49 therefore makes two non-behavioural partitions:
+
+- `engine_shadow_res_mesh` / `_us`, `shader`, `texture`, and `type_other`
+  partition every main-thread `LoadResource` nested in the directional build
+  by the suffix returned from the engine's own `Resource::GetFileName`;
+- `engine_shadow_mesh_cold` / `_us` counts state-0 `EnsureAvailable` calls at
+  the exact `GraphicsMeshInstance::GetNumShadowRenderPasses` call site. It
+  overlaps the mesh-load duration and must not be added to it.
+
+The filename getter is an exported 16-byte function at RVA `0x2130e0`; its
+instructions select the MSVC small-string storage at `Resource+0xc`. No name
+is retained or written. The mesh-boundary instrument uses `detour::patchCall`
+on the one `E8` inside the verified complete 24-byte function, changing only
+its displacement. Resident mesh calls pay one state load and branch; only a
+cold mesh pays a timer pair. This is materially narrower than detouring every
+`EnsureAvailable` in the process.
+
+If, on the marked collision-active full-scene **play** transition,
+`engine_shadow_mesh_cold`, `engine_shadow_res_mesh`, and
+`engine_shadow_res_load` agree in count and duration, option 3 is fully scoped.
+Option 2 would have to discover the same off-camera shadow caster before this
+shadow-frustum traversal; enqueueing at the pass-count query is already too
+late. A shader, texture, other, or unmatched interval means the omission is
+incomplete and that class has to be followed before changing behaviour.
+
+`verify-sites.py` now performs 176 checks. It re-derives the patched call's
+destination, the mesh pointer and pass-count operands, both exact exports, and
+the filename getter. Perturbing either new RVA, either export name, either byte
+table, the `EnsureAvailable` RVA/name, or the call offset makes it fail. The
+required `doctor`, build, and off-game self-test pass; the GPU timestamp
+retirement passed on the first completed self-test.
+
+`cache/runs/run49-shadow-caster-boundary.ini` is built from the normal live
+configuration and differs only by `performance_trace=full` and the passive F12
+marker. It changes no game behaviour and leaves `shadow_split` untouched.
+
+## 54. Run 49 result: DX11 reaches the boundary, but textures dominate later
+
+The archived CSV is `tqflicker-frames.run49.csv`, SHA-256
+`69e07412d10c77ad123b236763f1c8c34c38f93bf112c8179ab1c39e7628d76c`.
+It contains 7,116 contiguous frames. The five session parts are: **menu**
+frames 0--1735 (16.107 s), **load-game frame** 1736 (1.576 s), **loading
+screen** 1737--2806 (9.525 s), **first world frame** 2807 (0.774 s), and
+**play** 2808--7115 (64.653 s).
+
+The concern that `GetNumShadowRenderPasses` might be stale DX9-only machinery
+is resolved in the other direction by both the binary and the measurement.
+`RenderDevice::activeAPI==0` selects `GraphicsForwardRenderer`, while value 1
+selects `GraphicsDeferredRendererX`. Inside the shared
+`GraphicsShadowMapRenderer::Render`, API 0 bypasses `FUN_1018c870`; API 1 calls
+it. That function makes the virtual shadow-pass-count call. Run 49 then counted
+ten state-0 mesh `EnsureAvailable` calls at the patched
+`GraphicsMeshInstance::GetNumShadowRenderPasses` call site during **play**.
+The path is therefore live in this DX11 session, not merely present in the
+binary.
+
+The important correction is that this is not the complete resource-readiness
+boundary assumed by §53. Across **play**, all 218 directional-shadow resource
+loads are still state 0 and none has a queue link, totaling 447.434 ms. Their
+engine filename classes partition exactly as follows: 87 meshes take 83.858
+ms, 5 shaders take 4.025 ms, 126 textures take 359.551 ms, and `other` is zero.
+Only 10 cold meshes totaling 15.315 ms are encountered at the pass-count call.
+The pass-count counter and load counters overlap, but their large mismatch
+shows that later resource gates dominate.
+
+The one F12 marker is frame 6552 in **play**. Its reaction window contains two
+consecutive collision-active full-scene **play** candidates. Frame 6520 lasts
+331.841 ms, including 315.203 ms in `Engine::Render` and 142.782 ms in
+`GraphicsShadowMapDx11::RenderDirectional`; it is also a shadow-region change.
+All 67 nested resource loads and all 142.026 ms enter in state 0. Textures are
+37 loads / 104.701 ms, meshes 28 / 34.762 ms, and shaders 2 / 2.563 ms. The
+exact pass-count site sees only 4 cold meshes / 9.093 ms. The same call has a
+262.601 ms directional GPU interval. CPU load, enclosing shadow CPU, and GPU
+intervals overlap and must not be added. Frame 6521 then lasts 156.865 ms with
+142.500 ms in `Engine::Render`, but has no resource load and only 1.801 ms of
+shadow CPU; its residual render time is not attributed by this run.
+
+This rejects only the proposed **mesh-state-only** option 3. Returning zero
+passes when the root mesh is state 0 would cover 9.093 ms of the marked load
+interval, not the later 133 ms, and run 49 gives no evidence that it would
+remove the texture-dominated burst. Per-caster omission may still be viable if
+all required shader and texture dependencies can be checked without forcing
+them available, but that safe predicate has not been found. Option 2 also
+remains unscoped: preloading only the root mesh would miss the dominant texture
+work. The next discriminating trace is cold `EnsureAvailable` caller
+attribution within the directional build, especially the list-building shader
+selection and `RenderPass`/shader-parameter paths. No behaviour A/B is
+supported yet.
+
+## 55. Run 50 prepared: required versus gratuitous shadow material textures
+
+The first later texture boundary is now exact. In
+`GraphicsMesh::SetShaderParameters` (`Engine.dll` RVA `0x169c40`), each type-7
+material entry calls `GraphicsTexture::GetTexture` at RVA `0x169cab`. Only
+after that potentially synchronous load does the code call the texture
+parameter setter at RVA `0x169cc1`. The setter searches the active shader's
+parameter table and returns without binding anything when the material Name is
+absent. Thus the generic loop can load a texture before discovering that this
+particular shadow shader cannot use it.
+
+Run 50 wraps those two adjacent calls with `patchCall`; it does not detour the
+shared functions. Only on the main thread, inside
+`GraphicsShadowMapDx11::RenderDirectional`, and for a texture whose raw
+resource state is 0, the getter wrapper times the complete call. The following
+setter wrapper calls the verified exported
+`GraphicsShader2::HasParameter`—only after verifying that shader state is 2—
+and partitions the load into `engine_shadow_material_tex_used`, `unused`, or
+`unknown`. Their `_us` columns are engine durations and the three buckets must
+equal the material-texture total. They overlap the broader
+`engine_shadow_res_texture` interval and must not be added to it.
+
+This is the discriminating measurement for “load only the mesh.” A dominant
+`unused` bucket supports a narrow fix that tests the active shadow shader
+before calling `GetTexture`, avoiding only loads whose values the existing
+setter discards. A dominant `used` bucket means texture-free shadow submission
+would change behaviour: alpha-tested foliage and similar casters need a base
+or opacity texture to decide which texels cast. It would then require an
+explicit fallback representation or earlier residency, not a blind omission.
+
+“Load the lowest mip and defer the rest” is already partly active on this
+installation. On run 49's marked full-scene **play** frame 6520, 26 loose
+textures started the progressive uploader and held 32 MiB of source mappings;
+37 shadow texture resources were loaded in total. The uploader creates an
+eligible large block-compressed texture from its small mips and sends the
+withheld high mips over later frames. The burst nevertheless retained 104.701
+ms of texture resource loading and 41.378 ms across 52 texture creates. That
+does not reject a more invasive placeholder/streaming design, but it shows
+that deferring high-mip upload alone is not the missing fix: synchronous file
+access, container parsing, base texture/SRV creation, and ineligible textures
+remain.
+
+The new sites verify 16, 21, and 24 bytes respectively. `verify-sites.py` now
+performs 198 checks: both call destinations, both call offsets, all three byte
+windows, the owning mesh export, the texture getter export, the shader
+parameter export, and the relevant operands are independently re-derived from
+the pinned image. Fourteen one-constant perturbations were all rejected. The
+required doctor, build, and off-game self-test pass, including GPU timestamp
+retirement on its first completed run. `cache/runs/run50-shadow-material-textures.ini`
+differs from the normal configuration only by full performance tracing and the
+passive F12 marker. It changes no game behaviour and leaves `shadow_split`
+untouched.
+
+## 56. Run 50 result: half the material texture work is unnecessary to shadows
+
+Run 50 is archived as `tqflicker-frames.run50.csv`, SHA-256
+`86c1e6d6b26a42b9a69bf2bedf3096cf3dfec3011525c44c94b4baa7ddf37bd1`.
+It contains 7,398 contiguous rows. The five session parts are: **menu** frames
+0--1953 (17.712 s), **load-game frame** 1954 (1.577 s), **loading screen**
+1955--3114 (10.097 s), **first world frame** 3115 (1.191 s), and **play**
+3116--7397 (63.629 s).
+
+The new partition is exact on every row and `unknown` is zero. Across
+**play**, 105 directional-shadow texture loads cost 298.901 ms. The generic
+material path accounts for 77 / 225.958 ms of them: 40 textures / 113.009 ms
+have a matching parameter in the active shadow shader, while 37 / 112.949 ms
+do not. The near one-for-one population is consistent with the audited caster
+package: its transparent styles have the one alpha-test pixel shader that
+samples base alpha, while lighting-only material maps have no shadow use.
+
+The F12 marker is frame 6835 in **play**. Its reaction window is not unique:
+frame 6834, only 17 ms before the marker, lasts 64.536 ms with 47.361 ms in
+`Engine::Update` and no shadow resource load; the earlier collision-active
+full-scene **play** transition begins at frame 6809, 850 ms onset-to-marker.
+Frame 6809 lasts 228.246 ms with 220.043 ms in `Engine::Render`, 90.009 ms in
+the directional-shadow call, and 43 nested resource loads / 87.313 ms. Its 26
+textures / 68.174 ms include 17 material textures / 47.705 ms: 9 shader-used /
+25.328 ms and 8 shader-unused / 22.377 ms. The call also has a 151.354 ms
+directional GPU interval. CPU load, enclosing shadow CPU, and GPU intervals
+overlap and must not be added. The next **play** frame, 6810, lasts 86.783 ms
+with no resource load and only 1.786 ms of shadow CPU.
+
+This supports a behavior-preserving optimization, but bounds it: test the
+active shader for the material Name before `GetTexture` and omit the 8 unused
+loads / 22.377 ms on the transition frame. That removes about half the cold
+material interval, not the whole burst; 9 shader-used material textures /
+25.328 ms, 9 other texture loads / 20.469 ms, and 17 meshes / 19.139 ms remain.
+
+Temporarily omitting the shader-used class is a defensible performance/quality
+trade rather than a correctness-preserving optimization. The caster package
+proves what it means visually: transparent shadow styles use their sole pixel
+shader to sample base alpha and discard below 0.5. Omitting such a caster until
+its texture is resident removes only that caster's shadow; it does not remove
+the scene object or require a shadow-system rewrite. It may produce local
+foliage/fence shadow pop-in or a short change in shadow density, but is much
+narrower than run 47's visible whole-map reuse.
+
+The word “until” needs an active guarantee. If the shadow getter merely avoids
+`GetTexture`, a shadow-only/off-camera resource can remain state 0 indefinitely;
+if the color pass later needs it, that pass can pay the same synchronous load.
+A valid experiment must explicitly enqueue a state-0 texture, continue omitting
+that one caster while its texture is state 0 or 1, and restore the normal path
+only at state 2. Before building it, re-verify the exported
+`Resource::GetResourceLoader` and `ResourceLoader::EnqueueResource` path, its
+priority/ownership contract, and the exact per-caster suppression boundary.
+The experiment should report enqueue-to-state-2 latency so “a few frames” is
+measured rather than assumed.
+
+## 57. Run 51 installed: opaque shadows avoid unused textures; cold alpha casters defer
+
+The first implementation pass was too narrow. It omitted cold alpha-tested
+`GraphicsMeshInstance` caster/pass records but left opaque casters completely
+unchanged. That would preserve their geometry, but it would also preserve the
+run-50 bug: the generic material loop would still synchronously load texture
+entries before discovering that the opaque shadow shader has no matching
+parameter. Run 51 therefore combines the two parts that the evidence supports:
+
+- an opaque caster still renders its shadow normally, but a material texture
+  whose `Name` is absent from the active shadow shader returns null before
+  `GraphicsTexture::GetTexture`; the adjacent original parameter setter then
+  makes the same absent-parameter decision and binds nothing;
+- an alpha-tested caster whose base `GraphicsTexture` Resource is in state 0
+  is explicitly enqueued and its one caster/pass record is omitted; state 1
+  stays omitted, and state 2 goes through the original path.
+
+The normal colour pass is intentionally unchanged. A visible object needs its
+material to render correctly; the shadow traversal instead supplies earlier
+notice for off-camera casters, which are exactly the objects that can cast into
+the map without entering the colour list. If the colour pass reaches the same
+resource before the loader finishes, that residual synchronous load remains
+visible in the trace rather than being hidden by this experiment. A colour-pass
+fallback or small-mip representation would be a broader resource-streaming
+change, not this A/B.
+
+The suppression boundary is a direct `E8` at Engine RVA `0x18c8fe`, inside a
+22-byte verified window beginning at `0x18c8f5`. Its arguments are the pass,
+renderable entry, temporary output record, and renderer. The original target at
+`0x18c650` returns a boolean that the caller immediately tests; false branches
+around appending the 0x88-byte caster/pass record. The wrapper decides before
+calling that helper, so it never constructs a temporary record that the caller
+will not own. It repeats the helper's first virtual eligibility test only for a
+cold-alpha candidate before enqueueing, avoiding loader work for a caster the
+engine would reject anyway.
+
+The class and style test is equally narrow. Virtual slot 2 must equal the
+exported `GraphicsMeshInstance::GetShadowRenderStyle` at RVA `0x1733b0`.
+Verified return blocks establish styles 0/1/2 as opaque static/skinned/foliage
+and 3/4/5 as their alpha-tested counterparts. The exported
+`GraphicsMeshInstance::GetTexture` at `0x1731a0` obtains the material's
+`GraphicsTexture` Resource; its verified dependency call ensures the already
+accepted owning mesh, while its verified return block reads the texture pointer from
+the material entry at `+0x14`. It does not make that returned texture resident.
+
+For state 0, exported `Resource::GetResourceLoader` at RVA `0x212dc0` returns
+`Resource+0x24`, and the fix calls exported
+`ResourceLoader::EnqueueResource` with `(resource, 1, true, false)`. Those are
+not guessed arguments: the 20-byte window in
+`BaseResourceManager::PreLoadResource` at RVA `0x120110` pushes the same tuple
+and calls the same export. State and queue fields remain guarded by the
+previously verified accessors at Resource `+0x30` and `+0x60`. No Resource
+pointer is retained across calls or frames.
+
+The unused-parameter filter stays at run 50's adjacent material getter call
+site. A 32-bit naked adapter forwards the material `Name` already in ESI and
+the active `GraphicsShader2*` at verified getter-entry `ESP+0x20`; its emitted
+body is a push of `[esp+0x20]`, ESI, and ECX, one helper call, stack restore,
+and return. The helper queries only an already-resident shader. If the Name is
+absent it returns null without loading the material texture; otherwise it calls
+the original getter unchanged. This keeps opaque shadow geometry while making
+its texture-free status real rather than rhetorical.
+
+`[performance] shadow_defer_cold_alpha=1` is off by default, reaches
+`install()` with the performance probe off, and enables no trace group. The
+combined change is atomic: failure to verify or patch either the record
+decision or the material getter restores both. With tracing, run 51 adds
+`engine_shadow_alpha_omitted`, state-0/state-1, enqueue/enqueue-failed, and
+material skipped/skipped-cold counters. `enqueue_failed` must be zero;
+state-1 occurrences in following frames measure persistence without unsafe
+pointer tracking.
+
+`research/streaming/tools/verify-sites.py` now performs 243 checks against the
+installed binaries. Every new code window is 16--24 bytes, including the
+original helper, all style-return paths, the mesh texture lookup/return, loader
+accessor, and stock preload call. All eighteen newly introduced address,
+offset, and stack constants were independently set to zero and every mutation
+was rejected. The off-game self-test covers the default/off/no-trace contract,
+the style/state predicate, counter/header alignment, and the audited-module
+gate. `cache/runs/run51-shadow-defer-cold-alpha.ini` differs from
+`live-config.ini` only by this behavior switch, full performance tracing, and
+the passive F12 marker. `npm run doctor && npm run build && npm run selftest`
+passes; GPU timestamp retirement passed on the first completed run. The
+installed DLL is byte-identical to the release
+build, SHA-256 `e3f21518f9229a4cf7b6fcad1ed9b14577968604adcd00357178b148c0951e12`;
+the installed INI is byte-identical to the cache copy, SHA-256
+`869e8e6b174a2cc5d3b6094eab19b263ebd21c5c94c6271db27584499232bc70`.
+The stale live CSV was removed after run 50 had already been archived.
+`shadow_split` remains untouched, and the game was not launched.
+
+## 58. Run 51 result: visually safe, but base-texture deferral does not remove the burst
+
+Run 51 is archived as `tqflicker-frames.run51.csv`, SHA-256
+`cbf4f4e8feecfb6f7ce4b2d62058adaa66a99aa6cccea871f28673fbef3c4494`.
+It contains 7,512 contiguous rows. The five session parts are: **menu** frames
+0--1872 (17.531 s), **load-game frame** 1873 (1.517 s), **loading screen**
+1874--3023 (9.962 s), **first world frame** 3024 (785.342 ms), and **play**
+3025--7511 (68.607 s).
+
+The visual-safety result is positive for this class and this session. The
+reporter noticed no flicker and no shadow popping. During **play**, the switch
+omitted 71 alpha-tested `GraphicsMeshInstance` caster/pass records: 68 while
+the checked base `GraphicsTexture` Resource was state 0 and 3 while it was
+state 1. Fifty-five state-0 calls made a new queue/state transition and
+`engine_shadow_alpha_enqueue_failed` remained exactly zero. The remaining
+state-0 occurrences already had a queue link; more than one caster/pass
+attempt can name the same resource, so these are attempt counts, not unique
+textures. The three state-1 attempts cannot establish residency latency
+without resource identity.
+
+The behavior-preserving opaque/material half also worked exactly as designed.
+Across **play**, the active shadow shader rejected 980,873 material getter
+attempts before `GetTexture`, including 7,121 attempts made while the named
+texture was state 0. Those large numbers are repeated shader-parameter tests
+on every directional build, not 980,873 resources or loads. Only 13 cold
+material textures were actually loaded, taking 30.155 ms; all 13 and all
+30.155 ms were shader-used, while the shader-unused and unknown buckets were
+both exactly zero. For comparison, run 50 observed 37 shader-unused cold
+material loads / 112.949 ms across **play**. Route composition varies, so that
+cross-session total is not a magnitude A/B, but run 51's zero unused bucket
+does prove that the discarded-value load path was removed.
+
+The one F12 marker is frame 6742 in **play**, 387.614 ms after the end of frame
+6723 and 540.244 ms after the end of frame 6722. These are consecutive,
+collision-active, full-scene **play** frames, lasting 193.597 and 152.630 ms;
+there is no competing 40 ms candidate in that reaction window. This therefore
+ties the felt event to the two-frame transition rather than selecting a CSV
+maximum after the fact.
+
+The switch engaged at the transition but did not remove it. Frame 6722 spends
+38.271 ms in `GraphicsShadowMapDx11::RenderDirectional`, including 28 cold
+shadow resource loads / 37.111 ms. It omits 24 state-0 alpha records, makes 16
+new enqueue transitions, and has a 111.856 ms directional GPU interval. Frame
+6723 has no alpha omission, yet spends another 36.551 ms in the directional
+build: 12 cold shadow textures take 34.388 ms, including 5 shader-used material
+textures / 14.510 ms, beside a 41.871 ms directional GPU interval. CPU load,
+the enclosing shadow call, and GPU intervals overlap and must not be added.
+
+The corresponding run-50 transition frames 6809--6810 lasted 315.029 ms in
+total; run 51's two frames total 346.227 ms. Their scene work differs, so this
+does not prove a 31.198 ms regression. It does rule out claiming that run 51
+fixed the felt burst. The narrower intended work did shrink: the two-frame
+material interval is 18.337 ms versus 47.705 ms in run 50, and total nested
+shadow-load time is 71.499 versus 87.313 ms. But after 24 omissions on the
+first run-51 frame, the next frame has no omission and again has a large
+shadow CPU/GPU interval plus new synchronous texture work. This is consistent
+with the checked base texture becoming resident before other dependencies are
+ready. The counters do not prove that those 12 textures belong to the same
+returned casters, so “the load moved” remains a strong pattern, not an identity
+claim.
+
+The per-material parameter check has no visible millisecond-scale steady-play
+penalty in this run. Restricting both runs to collision-active, full-scene
+**play** frames below 60 ms, with no shadow resource load or region change,
+mean directional-shadow CPU differs by -0.029, -0.148, +0.130, and +0.078 ms
+in indexed-draw bands 500--999, 1000--1499, 1500--1999, and 2000-plus. The
+mixed signs and different scene populations prevent a finer overhead claim,
+but exclude a gross regression from the hundreds of `HasParameter` calls.
+
+Run 51 therefore supports keeping the shader-unused texture filter and says
+that temporary alpha-caster omission is visually acceptable; it does not yet
+support shipping the base-texture-only deferral as the loading-burst fix. The
+next discriminating run should be passive. For every remaining cold
+shader-used material texture, it must identify the `GraphicsMeshInstance`
+shadow style/pass and whether the loaded texture is the same base Resource
+checked by the record gate; the remaining non-material shadow texture call
+sites need their own partition. That distinguishes an incomplete dependency
+list on a returning alpha caster from used textures on opaque or non-mesh
+casters before any omission rule is widened. `shadow_split` remains untouched.
+
+
+## 59. Run 52 prepared: identify the complete shadow-texture dependency before widening
+
+**WITHDRAWN by §60.** The direct-caller stack partition is non-mutating, but
+the material-context adapter mistook EBP for the pass after the original code
+had converted it to a `MeshRenderInfo*`. Both run-52 attempts froze when the
+first cold texture passed that pointer back as an index. Do not run this
+implementation again.
+
+Run 51 established that temporarily omitting this alpha-tested
+`GraphicsMeshInstance` caster class caused no noticed flicker or shadow pop,
+but it did not remove the marked loading burst. Collision-active full-scene
+**play** frames 6722 and 6723 lasted 193.597 and 152.630 ms. The first omitted
+24 state-0 alpha records and newly queued 16; the second omitted none but still
+loaded 12 cold shadow textures / 34.388 ms, including 5 shader-used material
+textures / 14.510 ms. That is evidence that checking only the record's base
+texture is incomplete, not evidence that every remaining texture belongs to
+the same alpha caster.
+
+Run 52 is therefore passive attribution with the run-51 behavior held fixed.
+At the verified `GraphicsMeshInstance::SetShaderParameters` call into
+`GraphicsMesh::SetShaderParameters`, a call wrapper records the instance and
+render-pass argument for the duration of the original call. Only when a cold
+material texture is actually encountered does it resolve and cache that
+call's shadow style and base `GraphicsTexture` Resource; ordinary material
+setups pay neither lookup. Each cold shader-used material texture is then
+classified independently by style 0--5, base-resource match/other, and pass
+0/other. `context_unknown` is explicit rather than guessed. For every frame
+the invariants are:
+
+`used = sum(style0..style5) + context_unknown`
+
+`used = base_match + base_other + context_unknown`
+
+`used = pass0 + pass_other + context_unknown`
+
+This context is call-scoped; no engine pointer survives the original call.
+Separately, a bounded stack scan made only during an actual main-thread `.tex`
+load inside `GraphicsShadowMapDx11::RenderDirectional` partitions every such
+load by the nearest exact return address from a direct
+`GraphicsTexture::GetTexture` call. The buckets distinguish mesh material,
+billboard, forward renderer, line effect, PieOmatic, water, state-parameter,
+three unnamed functions, and unresolved/indirect callers. Their counts and
+durations must exactly sum to `engine_shadow_res_texture` and `_us`.
+
+The caller set was not copied from a prior note. An exhaustive scan of the
+pinned Engine.dll `.text` found ten direct calls to the exported getter: the
+material site plus the nine attribution entries. The source verifier now has
+268 checks: it proves the three new 17--22-byte windows, export identity, each
+E8 target, exact source-table coverage of all ten direct calls, and the x86
+adapter's argument contract. One-at-a-time perturbation of the five new
+RVA/offset constants, nine caller RVAs, export name, and one byte in each new
+window rejected all 18 changes. The emitted adapter was also independently
+assembled and matched its intended stack transformation.
+
+Run 52 keeps `shadow_defer_cold_alpha=1`, `loose_texture_max=4096`, full trace,
+and F12 marking. It changes no behavior relative to run 51: the color pass,
+opaque caster behavior, `shadow_split`, map size, culling, and resource policy
+are unchanged. The useful outcomes are identity statements: whether the
+remaining used loads are base matches or other dependencies of returning
+alpha casters, another mesh style/pass, or a non-material caller. Only then is
+there evidence for either expanding the dependency gate or choosing a
+different class-specific boundary.
+
+
+## 60. Run 52 froze twice; remove the re-entrant material lookup
+
+Both attempts with run 52 froze where the prior loading transition/burst had
+occurred. Only the second attempt's CSV survives because a new session creates
+the live CSV afresh; it is archived as `tqflicker-frames.run52.csv`, SHA-256
+`5f6e68493efd3c1bf2a2f4ea6ba785ccc624f99b9e8afa9797b344838c62916f`.
+It contains 6,599 contiguous presented frames, 0--6598: menu frames 0--1809
+(17.130 s), load-game frame 1810 (1.545 s), loading-screen frames 1811--3069
+(10.752 s), first-world frame 3070 (895.7 ms), and play frames 3071--6598
+(51.557 s). The final written play frame is ordinary, 8.248 ms; the freezing
+frame never completed Present and therefore has no CSV row. No F12 marker was
+written.
+
+More importantly, every new texture-caller and material-context counter is
+zero over the entire captured session. Thus the trace does not identify the
+offending texture or caster. Together with two freezes precisely when the
+first cold transition was expected, it localizes the regression to code first
+exercised by that cold event, but it does not by itself distinguish a deadlock
+from another non-returning engine path.
+
+The exact adapter error is visible in the bytes. EBP receives arg3/pass at
+function RVA `0x173494`, but immediately before the patched call the original
+code executes `imul ebp,ebp,0x34; add ebp,[edi+0x1c]`. EBP is therefore a
+`MeshRenderInfo*`, not the pass. Run 52 pushed EBP as the pass and, on the first
+cold material texture, supplied that pointer as an index to
+`GraphicsMeshInstance::GetShadowRenderStyle` and `GetTexture`. The freeze is
+fully explained without a Wine-only hypothesis or an inferred lock cycle.
+
+Run 53 removes both nested engine calls from the material path. The already
+exercised run-51 `BuildShadowRecord` boundary records the exact
+`GraphicsMeshInstance`, pass,
+and style it has just queried, but only after the original helper accepts the
+record. For alpha-tested styles 3--5 it also records the base texture pointer
+that the run-51 gate already obtained; opaque styles 0--2 use an explicit
+`base_unknown` bucket rather than performing a new lookup. A fixed 4,096-slot
+generation-keyed table relates that identity to the later
+`GraphicsMeshInstance::SetShaderParameters` call during the same
+`GraphicsShadowMapDx11::RenderDirectional` invocation. A generation change
+expires every entry in O(1), and stored pointers are compared only during that
+same directional call; none is dereferenced from the material path. The
+correct original pass is read from adapter stack offset `0xbc`, derived from
+the 0x8c-byte local frame, four saved registers, two original call arguments,
+the E8 return address, and the adapter's first two pushes. A new verified
+16-byte argument window explicitly proves the instruction that destroys EBP's
+pass value.
+
+`verify-sites.py` now performs 275 checks. It includes the new 19-byte frame
+and 16-byte argument windows, derives `0xbc` from the verified 0x8c local
+allocation and stack layout, and requires the adapter immediate to match.
+All 24 one-at-a-time perturbations of the context RVAs/offsets, direct-caller
+table, export name, window bytes, and emitted adapter immediate were rejected.
+The release DLL contains exactly one emitted adapter sequence, and its bytes
+decode as the two original-argument pushes, `push [esp+0xbc]`, instance/mesh
+pushes, helper call, `add esp,20`, and `ret 8`.
+
+The corrected invariants are:
+
+`used = sum(style0..style5) + context_unknown`
+
+`used = base_match + base_other + base_unknown + context_unknown`
+
+`used = pass0 + pass_other + context_unknown`
+
+The independent bounded stack partition remains, because it performs one
+`VirtualQuery` and read-only comparisons against exact return addresses only
+after a texture load has already entered. Run 53 still makes no behavior
+change relative to run 51. This correction is about the alpha-tested and
+opaque `GraphicsMeshInstance` shadow-caster classes and other direct texture
+callers inside the directional-shadow build; it says nothing new about the
+color pass or the game's original loading burst. `shadow_split` remains
+untouched.
+
+
+## 61. Run 53 completed safely; the marked play window contains two different stalls
+
+Run 53 is archived as `tqflicker-frames.run53.csv`, SHA-256
+`5203a1c247deda8c59d8605c386d695930103df2d1d7f25cb99fbe04f68140b5`.
+It contains 7,662 contiguous presented frames, 0--7661: menu 0--2110
+(19.767 s), load-game frame 2111 (1.302 s), loading screen 2112--3358
+(10.641 s), first-world frame 3359 (1.250 s), and play 3360--7661
+(64.939 s). Unlike run 52, it completed through the transition; the invalid
+EBP/pass adapter was the run-52 freeze regression.
+
+The one F12 marker is play frame 7075. Its nearest collision-active,
+full-scene **play** candidate is frame 7074: 59.411 ms, ending 16 ms before the
+marker and beginning 75 ms before it. It has 41.787 ms in `Engine::Update`,
+16.664 ms in `Engine::Render`, 0.108 ms in the message pump, and no resource
+load. Its resolved GPU-frame interval is 54.653 ms, while directional shadow
+GPU is only 5.833 ms. CPU and GPU intervals overlap. This is the strongest
+reaction-time candidate, but it is not the loading transition.
+
+The earlier loading burst is also inside the two-second reaction window.
+Full-scene **play** frames 7041 and 7042 last 254.638 and 87.588 ms; they end
+772 and 685 ms before the marker. Frame 7041 changes shadow region and spends
+45.639 ms in the directional build. Its 24 nested loads / 40.828 ms are 23
+meshes / 40.094 ms plus one shader / 0.734 ms; six meshes at the exact
+`GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost 25.067 ms. Its
+directional GPU interval is 103.536 ms. Frame 7042 then spends 29.405 ms in
+the directional build and loads 12 textures / 27.086 ms: five direct mesh
+material textures / 11.291 ms and seven indirect/unresolved textures /
+15.795 ms. The material getter measures the same five shader-used loads as
+11.314 ms. Again, nested load, enclosing CPU, and GPU intervals overlap.
+
+Across all **play**, the new caller partition balances exactly: 27 shadow
+textures / 82.381 ms are 12 direct mesh-material calls / 32.756 ms and 15
+unresolved calls / 49.625 ms. All 12 cold material textures / 32.791 ms are
+shader-used. The style/base/pass partitions also balance mathematically, but
+all 12 are `context_unknown`, so run 53 does **not** identify their caster
+class. The honest unknown result overturns §59's expectation that an accepted
+record keyed only for the exact base-class vtable would necessarily match the
+later base `GraphicsMeshInstance::SetShaderParameters` call.
+
+The run-51 behavior remains visually and mechanically separate: during
+**play**, 77 alpha-tested exact-class caster/pass attempts were omitted (76
+state 0, one state 1), 58 newly enqueued, and enqueue failure was zero. No
+visual observation was supplied with this run, so run 51 remains the visual
+safety evidence. Comparing only collision-active full-scene **play** frames
+below 60 ms with no shadow load or region change, run-53 minus run-51 mean
+directional CPU is +0.056, +0.376, -0.022, and -0.024 ms in indexed-draw bands
+500--999, 1000--1499, 1500--1999, and 2000-plus. The small and mixed values,
+especially 43 samples in run 53's 1000--1499 band, exclude a gross table
+overhead but do not support a fine effect estimate.
+
+The marker therefore does not uniquely decide which event was felt. The
+nearest candidate is the non-loading `Engine::Update` frame 7074; the large
+mesh-then-texture transition ended about 0.7 seconds earlier. Do not relabel
+one from the other without the reporter's timing recollection.
+
+## 62. Run 54 prepared: explain the material-context miss without new engine calls
+
+Run 54 keeps run 53's behavior and sites, but broadens only the in-memory
+record identity table. Every accepted renderable is stored for the current
+directional call. The exact base-class `GraphicsMeshInstance` entry retains
+verified style and alpha-base identity; an accepted renderable whose virtual
+style method differs is stored as `class_other`, without invoking it or
+assuming its layout. On the rare cold shader-used material event, a failed
+exact key lookup scans the fixed table once to distinguish `pass_mismatch`
+from `instance_missing`. The scan is not performed on ordinary material work.
+Table overflow has its own counter.
+
+The four lookup categories -- exact base-class `GraphicsMeshInstance`, derived
+or overriding class, same instance with a different pass, and no accepted
+record -- exactly partition the used material count/time. Style, base, and
+pass retain separate unknown buckets, so no dimension borrows another's
+unknown value merely to balance. The verified adapter supplies the actual
+material-call pass even if the accepted-record lookup misses; `pass_unknown`
+therefore means the adapter context itself was absent. No stored pointer is
+dereferenced, no engine method is added, and the table is generation-expired
+at the next directional call. This is still passive attribution, not another
+omission experiment. It is the minimum next measurement because run 53's
+all-unknown result cannot support widening the alpha-tested exact-class
+omission to opaque or derived casters. `shadow_split` remains untouched.
+
+The verifier now performs 279 checks, adding source invariants for the
+4,096-slot power-of-two table, engine-call-free miss scan, accepted-record
+gate, and cold-miss-only fallback. The 24 prior one-at-a-time perturbations
+remain covered; independently changing the new table-size constant is also
+rejected, making the relevant mutation audit 25/25. The self-test additionally
+fills all 4,096 slots and requires the next insertion to report exactly one
+overflow rather than silently losing the join.
+
+Doctor, the release build, and the full off-game self-test pass, including GPU
+timestamp retirement on this attempt. The installed DLL is byte-identical to
+the release build at SHA-256
+`0c7da90d9aa7e35090c8832b102093e957461281b8e1907e9517bdf072116d8f`.
+The installed INI is byte-identical to
+`cache/runs/run54-shadow-context-miss.ini`, and the archived run-53 live CSV
+was removed before run 54. The game was not launched.
+
+## 63. Run 54: the marked event is the loading transition; the context patch was absent
+
+Run 54 is archived as `tqflicker-frames.run54.csv`, SHA-256
+`fbdd2e2a8ac9bd12e5d6bedb2f5d708b4fe534dd3a8524e1e3513991defd6c8e`.
+It has 7,596 contiguous presented frames, 0--7595: menu 0--2067
+(18.976 s), load-game frame 2068 (1.472 s), loading screen 2069--3191
+(9.654 s), first-world frame 3192 (649.889 ms), and play 3193--7595
+(66.495 s).
+
+The reporter confirms that F12 at **play** frame 6913 followed the large
+loading transition, not the smaller frames immediately beside the keypress.
+The transition is full-scene, collision-active **play** frames 6897 and 6898,
+251.589 and 147.926 ms (399.515 ms together), ending 508 and 361 ms before
+the marker. This also resolves run 53: its roughly 0.7-second marker delay was
+ordinary reaction time and identified that run's large loading pair, not its
+later 59.411 ms `Engine::Update` frame.
+
+Run 54 reproduces the same two-stage class. Frame 6897 changes shadow region
+and spends 36.672 ms in `GraphicsShadowMapDx11::RenderDirectional`. It loads
+27 meshes / 32.099 ms and one shader / 2.584 ms; five meshes at the exact
+`GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost 11.745 ms. Its
+resolved directional GPU interval is 140.789 ms. Frame 6898 then spends
+34.260 ms in the directional build and loads 13 textures / 31.988 ms: six
+direct mesh-material loads / 11.517 ms and seven unresolved loads / 20.471 ms.
+The material getter measures the same six shader-used calls as 11.528 ms, and
+the resolved directional GPU interval is 40.878 ms. CPU nested loads,
+enclosing directional work, and GPU intervals overlap; they must not be added.
+
+Across **play**, 127 shadow-nested resource loads / 186.523 ms partition into
+89 meshes / 85.617 ms, six shaders / 5.217 ms, and 32 textures / 95.689 ms.
+The texture-caller partition balances exactly: 14 direct mesh-material calls /
+31.800 ms and 18 unresolved / 63.889 ms. All 14 cold material getters /
+31.824 ms are shader-used. The retained alpha-tested exact-class mitigation
+omits 83 caster/pass attempts (82 state 0, one state 1), newly queues 61, and
+reports no enqueue failure. Context-table overflow is zero.
+
+Run 54's intended join result needs a forward correction. All 14 used material
+calls report `style/context_unknown`, `base_unknown`, and `pass_unknown`.
+Because the corrected adapter supplies a pass before any table lookup,
+`pass_unknown` proves that the base
+`GraphicsMeshInstance::SetShaderParameters` adapter context was absent. The
+simultaneous `lookup_exact=14` is impossible and is **withdrawn**: the lookup
+enum's zero value was `Exact`, and `explainShadowRecordMiss` returned early
+when the zero-initialized context had no instance. Thus run 54 does not show 14
+successful joins; it shows 14 calls that never acquired adapter context and a
+bad label on that missing-context state.
+
+Run 55 corrects the zero-instance state to `instance_missing` and explains why
+the adapter was absent without another behavior experiment. One of seven
+status counters is emitted for every actual directional build: active,
+dependency missing, frame/entry/context signature mismatch, call-patch
+failure, or rollback after the material hook failed. Independently, each cold
+shader-used material load is classified by whether the enclosing
+`GraphicsMesh::SetShaderParameters` call returns to the one verified direct
+base-`GraphicsMeshInstance` site or another site. The outer return address is
+at getter-entry ESP+0x1c, derived from the verified eight local bytes, four
+saved registers, and the inner E8 return. No retained pointer is dereferenced
+and no engine method is called.
+
+Two new 23/24-byte windows verify that stack contract. `verify-sites.py` now
+performs 285 checks. All eight new one-at-a-time RVA, byte, offset, and adapter
+mutations are rejected; together with the prior 25 this is 33/33 relevant
+mutations. Doctor, release build, and the full off-game self-test pass,
+including explicit tests for zero-instance relabeling, all seven patch-status
+outcomes, caller partitioning, and GPU timestamp retirement. Run 55 remains
+behavior-identical to run 51: it retains only
+`shadow_defer_cold_alpha=1`, full tracing, and F12 marking. It does not change
+the color pass, opaque-caster behavior, `shadow_split`, map size, culling, or
+resource policy.
+
+The run-55 DLL and INI are installed, and the archived run-54 live CSV was
+removed. The installed DLL is byte-identical to the release build at SHA-256
+`502ff9d2044196d94d104c995e8cca613dddea79134c2e43c2840dc805074a48`.
+The game was not launched.
+
+## 64. Run 55: the expected mesh-instance caller is live; one unrelocated operand disabled its context patch
+
+Run 55 is archived as `tqflicker-frames.run55.csv`, SHA-256
+`490297012fbddaa4ac5d7c36659c7395d18c77e107e589c5692df503a19d9ee0`.
+It has 7,257 contiguous presented frames, 0--7256: menu 0--1932
+(17.968 s), load-game frame 1933 (1.429 s), loading screen 1934--3053
+(9.892 s), first world frame 3054 (672.733 ms), and play 3055--7256
+(63.210 s).
+
+F12 at **play** frame 6698 follows full-scene, collision-active **play** frames
+6679 and 6680, 225.310 and 195.514 ms (420.824 ms together). They ended 553
+and 357 ms before the marker; onset to marker is 778/553 ms. This is the same
+felt loading-transition class the reporter identified in runs 53 and 54, not a
+maximum selected without visual confirmation.
+
+Frame 6679 changes shadow region and spends 33.337 ms in
+`GraphicsShadowMapDx11::RenderDirectional`. Its 29 nested cold loads /
+32.973 ms are 27 meshes / 31.177 ms and two shaders / 1.796 ms; eight meshes
+at the exact `GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost
+13.809 ms. Its resolved directional GPU interval is 128.058 ms. Frame 6680
+then spends 51.954 ms in the directional call and loads 19 textures /
+49.604 ms: eight direct mesh-material loads / 22.157 ms and eleven
+indirect/unresolved loads / 27.447 ms. The material getter measures the same
+eight shader-used loads as 22.179 ms, and the resolved directional GPU
+interval is 59.598 ms. CPU nested loads, enclosing directional work, and GPU
+intervals overlap and are not additive.
+
+Across **play**, all 14 cold shader-used material calls return through the one
+verified direct base `GraphicsMeshInstance::SetShaderParameters` site;
+`outer_other_site` is zero. Thus the data do not support an alternate caller
+or caster-class explanation for the absent adapter context. Instead, every one
+of the 2,958 actual directional builds reports
+`context_patch_frame_mismatch`; the other six patch-status buckets are zero.
+All 14 material calls consequently remain `instance_missing` and
+`pass_unknown`, as run 55 correctly labels them.
+
+The mismatch has an exact byte-level cause. The verified 19-byte function
+entry starts with `81 ec 8c 00 00 00`, followed by opcode `A1` at byte 6 and
+the absolute preferred-base VA `44 b0 41 10` at bytes 7--10. That operand
+targets Engine.dll RVA `0x41b044`. The runtime loader rebases it, but
+`kShadowMeshParameterFrameBytes` previously had no relocation descriptor.
+The file verifier sees the image at preferred base `0x10000000`, so the
+literal happened to pass there; runtime `detour::matches` compared it against
+the rebased module and necessarily rejected it. This reconciles the on-disk
+verification with the run-55 status without invoking patch order or another
+module.
+
+Run 56 adds only `kShadowMeshParameterFrameRelocs = {{7, 0x41b044}}` to the
+passive context signature. The existing `patchCall` remains the mutation; no
+new engine method or rendering/resource behavior is introduced. The color
+pass, opaque-caster behavior, run-51 alpha-tested `GraphicsMeshInstance`
+deferral, `shadow_split`, shadow-map size, culling, and resource policy remain
+unchanged. The exact first check is that `context_patch_active` equals
+`engine_shadow_render` per frame and every other status is zero. Only then may
+the joined style/pass/base result scope another behavior change.
+
+`verify-sites.py` now performs 286 checks. Independently changing the new
+relocation offset, target RVA, or preferred-base operand is rejected, bringing
+the relevant one-at-a-time mutation audit to 36/36. Doctor, release build, and
+the full off-game self-test pass, including GPU timestamp retirement. Run 56
+is installed from `cache/runs/run56-shadow-context-relocation.ini`; its DLL is
+byte-identical to the release build at SHA-256
+`650e8dd5b69a9e397d7d21aa14de44a78e86db6f7e325e98fc30618ec21f8d9c`.
+The installed INI is byte-identical to the cache copy, the archived run-55
+live CSV was removed, and the game was not launched.
+
+## 65. Run 56: exact style-3 context works; the base-only gate misses a second material dependency
+
+Run 56 is archived as `tqflicker-frames.run56.csv`, SHA-256
+`f287e5c90c897a18b801dd9d0d3accf779bcf668e9d2ef0b0fa1fa53581612b5`.
+It has 7,436 contiguous presented frames, 0--7435: menu 0--2007
+(18.606 s), load-game frame 2008 (1.543 s), loading screen 2009--3128
+(9.760 s), first world frame 3129 (1.442 s), and play 3130--7435
+(65.053 s).
+
+The reporter warns that F12 at **play** frame 6860 may be late, so two
+candidate classes remain. Full-scene, collision-active **play** frames 6831
+and 6832 last 222.567 and 61.223 ms (283.790 ms together), ending 652 and
+591 ms before the marker; onset to marker is 875/652 ms. A separate
+full-scene, collision-active **play** frame 6857 lasts 60.787 ms, ends 56 ms
+before the marker, and spends 42.866 ms in `Engine::Update`. It has no cold
+resource load and only 1.703 ms of directional-shadow CPU. Proximity alone is
+not evidence that the later frame is what the reporter felt; preserve both.
+
+The run-55 relocation diagnosis is confirmed exactly. Across the whole
+session, `engine_shadow_context_patch_active=4,245` equals
+`engine_shadow_render=4,245`; in **play**, both equal 3,039. Every other patch
+status is zero on every row. Style, base, pass, miss-reason, outer-caller, and
+texture-caller partitions balance on every row, and the context table never
+overflows.
+
+All eight cold shader-used material textures / 15.176 ms in **play** join an
+exact accepted record. Every record is pass 0, style 3, and the exact base
+`GraphicsMeshInstance` implementation; there are no unknown, derived-class,
+or pass-mismatch events. Critically, all eight are `base_other`: none is the
+base texture whose residency the run-51 omission gate checks. The mechanism
+is therefore exact. An alpha-tested `GraphicsMeshInstance` is omitted while
+its base is in state 0/1, but returns to the directional list once that base
+reaches state 2 even when another material texture required by the active
+shadow shader remains cold.
+
+This does not yet support a wider behavior change. In candidate frame 6831,
+`GraphicsShadowMapDx11::RenderDirectional` takes 26.353 ms and loads fifteen
+meshes / 23.934 ms; only two meshes / 10.162 ms are at
+`GraphicsMeshInstance::GetNumShadowRenderPasses`. Its directional GPU interval
+is 44.662 ms and full GPU frame is 227.531 ms. Frame 6832 then spends
+17.007 ms in the directional call and loads five textures / 14.458 ms: two
+direct material textures / 3.604 ms and three unresolved textures / 10.854 ms.
+The material getter independently measures the two as 3.614 ms. Its
+directional GPU interval is 21.761 ms. These nested CPU and GPU intervals
+overlap and are not additive.
+
+Across **play**, 95 directional-shadow loads / 135.581 ms divide into 73
+meshes / 73.703 ms, three shaders / 1.467 ms, and 19 textures / 60.411 ms.
+The textures divide into eight direct material calls / 15.157 ms and eleven
+unresolved calls / 45.254 ms. Thus waiting for or omitting the newly proved
+secondary material dependency addresses only one quarter of the observed
+shadow texture time in this session and only 3.604 ms of the candidate second
+frame. The larger unresolved class must be named first.
+
+Run 56's outer-caller partition needs a forward semantic correction. All
+eight events say `outer_other_site`, whereas run 55 placed all fourteen at the
+verified direct `GraphicsMeshInstance` site. That does not describe a caller
+change: in run 55 the context patch was absent, so the original E8 return was
+on the material getter's stack. In run 56 the active context wrapper calls
+`GraphicsMesh::SetShaderParameters` itself, necessarily replacing that return
+address. The exact joined instance/pass is stronger evidence and proves why
+the label flipped. Run 57 treats a live wrapper context as the same verified
+site.
+
+Run 57 remains behavior-identical to run 56 and adds no CSV columns. With
+`trace=1`, it logs at most eight cold used material dependencies as a verified
+`Name::Hash`, resource filename, exact `GraphicsMeshInstance` style/pass/base
+relationship, and join result. It separately logs at most eight unresolved
+directional-shadow texture filenames and their call-shaped stack candidates
+across the audited Engine.dll, Game.dll, and TQ.exe images. Both paths use the
+existing fixed eight-slot bound, and the logger flushes each event during the
+session rather than relying on unload.
+
+The new `Name::Hash` layout is re-derived from its 16-byte exported window;
+its three meaningful bytes are `mov eax,[ecx]; ret`. `verify-sites.py` now
+performs 293 checks. Seven one-at-a-time changes to the RVA, byte, export,
+report bound, used-only gate, wrapper classification, and unresolved-only gate
+are all rejected, making 43/43 cumulative relevant mutations. Doctor, release
+build, and the full off-game self-test pass, including GPU timestamp
+retirement. Run 57 is installed from
+`cache/runs/run57-shadow-texture-identities.ini`; its DLL is byte-identical to
+the release build at SHA-256
+`d84aea5579e093fe4daad2b610af702870b7bd1ec1c98bcc0dc90ecd6bf27427`.
+The installed INI is byte-identical to the cache copy, the archived run-56
+live CSV and stale debug log were removed, and the game was not launched.
+
+
+## 66. Run 57: the unresolved texture class is an unused instance bump override
+
+Run 57 is archived as `tqflicker-frames.run57.csv`, SHA-256
+`a23a7f5a2745fe0d82102a8bf1c1a7a6f0cb7daebe4df9ad0dbedcc9c3fcba05`;
+its live-written debug log has SHA-256
+`d41b9e9dee108e65d4b1b880755d4775feb7fd7a0fcca5a2fe0d2d30e03559a7`.
+It has 7,780 contiguous presented frames, 0--7779. The five session parts are
+**menu** 0--1782 (16.609 s), **load-game frame** 1783 (1.522 s), **loading
+screen** 1784--3538 (15.000 s), **first world frame** 3539 (2.278 s), and
+**play** 3540--7779 (64.538 s).
+
+F12 is a reaction anchor at **play** frame 7213, not the event frame. The
+loading pair is the full-scene, collision-active **play** frames 7196/7197 at
+167.872/60.953 ms, ending 411/350 ms before the press (onset 579/411 ms before
+it). Frame 7196 loads twenty directional-shadow meshes / 21.927 ms and one
+shader / 0.648 ms inside a 23.896 ms directional CPU call, beside a 36.546 ms
+directional GPU interval and 160.465 ms whole-frame GPU interval. Frame 7197
+loads twelve shadow textures / 27.345 ms: six direct mesh-material loads /
+13.058 ms and six previously unresolved loads / 14.287 ms, inside a 29.753 ms
+directional CPU call and beside a 35.429 ms directional GPU interval. These
+nested and GPU intervals overlap; they are not additive.
+
+There is also a separate full-scene, collision-active **play** frame 7212 /
+46.730 ms, ending 23 ms before F12. It spends 29.065 ms in `Engine::Update`,
+has no resource load, and only 1.664 ms in the directional-shadow CPU call.
+Preserve it as a separate near-marker candidate. Proximity alone does not turn
+it into the reported loading transition.
+
+The passive partitions remain exact. In **play**, all 3,051 directional builds
+report the context patch active, every failure status and table overflow is
+zero, and all material dimensions balance. Fourteen cold shader-used material
+textures / 26.017 ms are exact `GraphicsMeshInstance` joins: ten style 3 and
+four style 4; thirteen pass 0 and one other pass; all fourteen are
+`base_other`. All eight bounded identity reports carry Name hash
+`0xf5a35fef`. Recomputing the engine digest from the literal proves that this
+is the little-endian first dword of `Name("baseTexture")`, not a generic
+"secondary alpha texture" label.
+
+The unresolved class is independently byte-named. Every one of its eight
+bounded stack reports returns first through Engine.dll+`0x173b4d`. The exact
+stock path at `GraphicsMeshInstance::SetShaderParameters` is:
+
+1. read the optional texture Resource from instance+`0x18`;
+2. call `Resource::EnsureAvailable` at Engine.dll+`0x173b48`;
+3. select a resident render-texture value;
+4. call the texture-parameter setter with the static
+   `Name("bumpTexture")`.
+
+The eight filenames independently agree: each is a `...BMP.tex`/`...bmp.tex`
+bump map corresponding to the nearby base texture. More importantly, the
+setter at Engine.dll+`0x35ea0` searches the active shader's parameter table
+*after* the Resource was ensured. Its two verified missing-parameter branches
+return success without reading the supplied texture value. The synchronous
+load is therefore an engine ordering bug whenever the directional-shadow
+shader has no `bumpTexture` input; it is not a requirement of alpha-tested
+shadowing and not a Wine/CrossOver explanation. The same x86 path exists on
+native Windows.
+
+Across **play**, sixteen unresolved shadow textures / 54.775 ms exceed the
+fourteen direct material textures / 25.968 ms. The eight-report bound proves
+the first half of that unresolved population is the bump path, not necessarily
+all sixteen. Run 58 therefore makes the narrow behavior-preserving change and
+measures it directly: at only the verified bump `EnsureAvailable` E8, while
+inside the directional-shadow build, ask the already verified active shader
+whether it has `bumpTexture`. If absent, skip the ensure and count both all
+skips and the state-0 subset; otherwise forward the original call unchanged.
+The following verified setter discards the empty value on exactly that absent
+path. The normal colour pass, any shadow shader that declares `bumpTexture`,
+opaque geometry, alpha-caster base deferral, culling, map size, and
+`shadow_split` remain unchanged.
+
+This is incorporated into the existing
+`[performance] shadow_defer_cold_alpha=1` fix rather than creating a second
+knob for one ordering defect. It remains default-off, reaches `install()` with
+the performance probe off, and brings no trace group. The new trace-only
+columns are `engine_shadow_bump_tex_skipped` and
+`engine_shadow_bump_tex_skipped_cold`; both are counts, not mod-duration
+columns. Run 58 keeps full tracing and F12 only to validate the mechanism and
+relate it to the reported **play** transition.
+
+Five independently verified windows cover 22 bytes around the bump ensure,
+24 around its setter, 20 around construction of the exact static Name, 23
+around the setter's missing-parameter decisions, and 16 at their common return
+target. Only the five-byte E8 displacement is changed. `verify-sites.py`
+passes 312 checks. All eight new named RVA/offset constants, all four new
+relocation descriptors, one byte in each of the five tables, and the
+directional gate, `HasParameter` polarity, forwarding call, and atomic install
+dependency were perturbed one at a time; all 21 are rejected (64/64 cumulative
+relevant mutations). Doctor, release build, and the full off-game self-test
+pass, including GPU timestamp retirement.
+
+Run 58 is installed from `cache/runs/run58-shadow-bump-unused.ini`. The
+installed DLL is byte-identical to the release build at SHA-256
+`96a1fce0fb2b67fc50e8056a7536d8bf8125b1eb7e7a55755ea9e241f9459e46`;
+the installed INI is byte-identical to the run file at SHA-256
+`663c9b8a5665303f69add0e1f3cc1333012eba2cc2b8f354b6c0652122fc20eb`.
+The archived run-57 CSV and debug log were byte-identical to their live names
+before those two stale live files were removed. The game was not launched.
+
+
+## 67. Run 58: the bump omission removes the unresolved class; only overridden base textures remain
+
+Run 58 is archived as `tqflicker-frames.run58.csv`, SHA-256
+`2a35a84d14cdb1ead167b50e73c87e82dd9b4b547c2f11685b546adcb8687bc7`;
+its live-written debug log has SHA-256
+`1e67d9c46d363113b6325e15a5920a293eec1fceac6757501d44b254d08b2e5f`.
+It has 7,286 contiguous presented frames, 0--7285. The five session parts are
+**menu** 0--2011 (18.673 s), **load-game frame** 2012 (1.566 s), **loading
+screen** 2013--3111 (9.405 s), **first world frame** 3112 (864.484 ms), and
+**play** 3113--7285 (62.946 s).
+
+F12 at **play** frame 6705 is a reaction anchor. The full-scene,
+collision-active **play** loading pair is frames 6687/6688 at 269.817/57.089
+ms, ending 401/344 ms before the press (onset 671/401 ms before it). Frame
+6687 loads 23 directional-shadow meshes / 30.392 ms and one shader / 0.882 ms
+inside a 33.569 ms directional CPU call. Its directional GPU interval is
+87.737 ms and whole-frame GPU interval is 275.310 ms. Frame 6688 loads seven
+directional textures / 10.868 ms inside a 13.128 ms directional CPU call; its
+directional GPU interval is 18.102 ms. These nested CPU and GPU intervals
+overlap and are not additive.
+
+The run-58 omission worked exactly. In **play**,
+`engine_shadow_bump_tex_skipped=561,588`, including 2,958 state-0 Resources
+that the stock path would have synchronously ensured. There is no unresolved
+directional-shadow texture load anywhere in **play**. The marked second frame
+has 456 skipped bump bindings, ten state-0, and likewise no unresolved load.
+This confirms that the complete formerly unresolved load population in this
+session was the `GraphicsMeshInstance+0x18` bump-override path; it did not move
+to another shadow caller.
+
+The remaining texture population is also exact. Across **play**, all fourteen
+cold direct material textures / 26.215 ms are shader-used
+`Name("baseTexture")` entries, exact accepted `GraphicsMeshInstance` joins,
+and `base_other`: nine style 3 and five style 4; thirteen pass 0 and one other.
+The marked frame contains seven / 10.899 ms: three style 3 and four style 4;
+six pass 0 and one other. All context patch failures, unknown partitions, and
+table overflow remain zero.
+
+The reason `base_other` is safe to act on is now verified independently rather
+than assumed. In `GraphicsMeshInstance::SetShaderParameters`, the generic
+`GraphicsMesh::SetShaderParameters` call occurs first. The same live method
+then reads instance+`0x14`; if non-null it ensures that Resource and binds it
+to the exact static `Name("baseTexture")` before any draw. Run 59 carries the
+enclosing instance through the already verified call adapter and omits a
+generic getter only when all of these are true:
+
+1. execution is on the main thread inside `RenderDirectional`;
+2. the material's complete 16-byte Name equals `baseTexture`;
+3. the live instance+`0x14` override is non-null; and
+4. that override Resource pointer differs from the generic material Resource.
+
+Returning null at that getter produces only a temporary null shader binding;
+the verified stock instance block immediately replaces it with the override.
+Every other getter forwards unchanged. The adapter exposes its global context
+only on the main directional path, so a concurrent colour/worker invocation
+cannot overwrite the live instance pointer. The normal colour pass, instances
+without an override, identical Resource pointers, required bump inputs, alpha
+base deferral, opaque geometry, culling, map size, and `shadow_split` remain
+unchanged.
+
+This is a narrow cleanup of the remaining texture half, not an explanation of
+frame 6687's much larger mesh/GPU work. Run 59 measures the two new count
+columns `engine_shadow_base_override_skipped` and
+`engine_shadow_base_override_skipped_cold`; neither is a duration or charged
+to the mod. The change stays within the existing default-off
+`shadow_defer_cold_alpha=1` fix, reaches `install()` with the performance probe
+off, and brings no trace group.
+
+The complete verifier passes 328 checks. Twenty-five one-at-a-time mutations
+of the new RVAs, offsets, verified bytes, relocations, Name identity, pointer
+polarity, directional/main-thread scope, forwarding, status, rollback, and
+atomic-install dependencies are all rejected: 25/25 for run 59 and 89/89
+cumulative relevant mutations. `npm run doctor`, the release build, and the
+full off-game self-test pass, including GPU timestamp retirement. Run 59 is
+installed from `cache/runs/run59-shadow-base-override.ini`; installed and
+source DLLs match at SHA-256
+`2d1af22215fd48c5781603a77637cc59b645d9975385630456fb77add3823c20`,
+and installed and source INIs match at SHA-256
+`1511b3c95d46fdfdd3d1016b55f5d6bde64148e566e2ebbfef1ce21d511a619c`.
+The run-58 live CSV and debug log were byte-identical to their archives before
+the stale live names were removed. The game was not launched.
+
+
+## 68. Run 59: all shadow texture loads are gone; cold meshes and GPU queueing remain
+
+Run 59 is archived as `tqflicker-frames.run59.csv`, SHA-256
+`e74d2a84ba1c27688b0c0f5e6e3f7d71ae1b99eb532238de530f0385d211807c`;
+its live-written debug log has SHA-256
+`1f4b413788a4a1de0399bd9bcb60f2d3dc999a7c138d3f965bbacfbde8bbbe01`.
+Both archives are byte-identical to the current live names. The CSV contains
+7,547 contiguous presented frames, 0--7546. The five session parts are
+**menu** 0--1816 (16.947 s), **load-game frame** 1817 (1.485 s), **loading
+screen** 1818--3077 (10.781 s), **first world frame** 3078 (934.609 ms), and
+**play** 3079--7546 (69.075 s).
+
+F12 at **play** frame 6710 is a reaction anchor. The full-scene,
+collision-active **play** burst is frames 6692/6693 at 218.733/149.357 ms,
+ending 488/339 ms before the press (onset 707/488 ms before it). Frame 6692
+changes shadow region and spends 41.139 ms in
+`GraphicsShadowMapDx11::RenderDirectional`. Its 30 nested state-0 loads /
+41.062 ms are 29 meshes / 38.219 ms and one shader / 2.843 ms. Five cold root
+meshes at the exact `GraphicsMeshInstance::GetNumShadowRenderPasses` boundary
+cost 11.111 ms. Its directional GPU interval is 137.047 ms and whole-frame GPU
+interval is 329.861 ms. CPU loads, enclosing shadow CPU, and GPU intervals
+overlap and must not be added.
+
+Frame 6693 has no resource load and only 1.928 ms of directional-shadow CPU,
+yet spends 133.489 ms in `Engine::Render`; its own GPU-frame interval is only
+19.067 ms. This is not a newly exposed loader cost. Frame 6692 completed on
+the CPU in 218.733 ms while submitting 329.861 ms of GPU work, leaving about
+111 ms queued. That remainder plus an ordinary following render accounts for
+the 133 ms frame-6693 render interval and has the exact two-frame shape that
+§37 directly localized to `DrawIndexed` backpressure. Enabling the existing
+per-draw clocks again would remeasure a closed mechanism rather than choose a
+new fix.
+
+The run-59 omission itself is decisive. Across **play**,
+`engine_shadow_base_override_skipped=737,873`, including 3,535 cold generic
+base Resources. Directional-shadow texture loads are zero: direct material,
+unresolved, and every other caller bucket are all zero. The existing unused
+material and bump filters respectively skip 1,024,644 / 10,875 cold and
+700,948 / 5,326 cold bindings. Thus the previous shadow texture classes did
+not move elsewhere; all of them are absent from the measured load population.
+All 3,321 directional builds report the context patch active, and every
+context failure, enqueue failure, and table-overflow counter is zero.
+
+There is no gross steady-scene overhead. Restricting runs 58 and 59 to
+collision-active full-scene **play** frames under 60 ms, with no shadow load
+or region change, run-59 minus run-58 mean directional CPU is -0.065, +0.049,
++0.183, and -0.004 ms in indexed-draw bands 500--999, 1000--1499,
+1500--1999, and 2000-plus. The signs and route populations are mixed; this is
+only an exclusion of a large regression, not a fine performance claim.
+
+The remaining directional resource population in **play** is now 100 meshes /
+100.932 ms and five shaders / 4.990 ms. The marked onset also retains the
+large directional GPU interval that creates the following frame's queue
+drain. The next supported behavior boundary is the root-mesh pass-count method
+already verified in §53: when the exact `GraphicsMeshInstance` root mesh is in
+state 0/1, explicitly enqueue state 0 and return zero passes until state 2.
+This would omit one cold caster before its record, dependent resources, and
+draws exist, rather than reusing or dropping the entire map. It can therefore
+test both the 11.111 ms direct root wait and any downstream mesh/GPU work owned
+by those casters. The normal colour pass, resident casters, map size, culling,
+and `shadow_split` must remain unchanged. No visual observation accompanied
+the completion message, so run 59 supplies no new artifact-safety claim.
+
 
 ## Cross-references worth acting on
 

@@ -155,6 +155,437 @@ const BYTE kResourceInQueueBytes[] = {
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
 };
 
+// Resource::GetFileName is the engine's own type discriminator for this
+// trace. It returns the c_str() of Resource+0xc, using the MSVC small-string
+// capacity at +0x20 to choose inline storage or the heap pointer. We call the
+// verified export only for the small population already entering
+// ResourceLoader::LoadResource inside the directional-shadow bracket, then
+// partition its .msh/.ssh/.tex suffix. No filename is retained or written.
+const DWORD kResourceFileNameRva = 0x2130e0;
+const char kResourceFileNameName[] =
+    "?GetFileName@Resource@GAME@@QBEPBDXZ";
+const BYTE kResourceFileNameBytes[] = {
+    0x83, 0x79, 0x20, 0x10,                    // cmp dword [ecx+0x20],0x10
+    0x8d, 0x41, 0x0c,                          // lea eax,[ecx+0xc]
+    0x72, 0x02,                                // jb inline
+    0x8b, 0x00,                                // mov eax,[eax]
+    0xc3,
+    0xcc, 0xcc, 0xcc, 0xcc
+};
+
+// GraphicsShadowMapRenderer asks each GraphicsRenderable for its number of
+// shadow passes before shader selection and before the draw-list record is
+// constructed. For GraphicsMeshInstance, the first operation is
+// EnsureAvailable(this+4), where this+4 is its GraphicsMesh resource. The
+// complete 24-byte function is verified and only its E8 displacement is
+// changed. This is both the earliest exact cold-mesh boundary for a per-caster
+// omission and the point option 2 would have to make resident earlier.
+const DWORD kShadowMeshPassCountRva = 0x173440;
+const char kShadowMeshPassCountName[] =
+    "?GetNumShadowRenderPasses@GraphicsMeshInstance@GAME@@UBEHXZ";
+const DWORD kEnsureAvailableRva = 0x2130f0;
+const char kEnsureAvailableName[] =
+    "?EnsureAvailable@Resource@GAME@@QBEXXZ";
+const unsigned kShadowMeshEnsureCallOffset = 10;
+const BYTE kShadowMeshPassCountBytes[] = {
+    0x56,                                      // push esi
+    0x8b, 0x71, 0x04,                          // mov esi,[ecx+4] mesh
+    0x85, 0xf6,                                // test esi,esi
+    0x74, 0x0c,                                // jz no mesh
+    0x8b, 0xce,                                // mov ecx,esi
+    0xe8, 0xa1, 0xfc, 0x09, 0x00,              // call EnsureAvailable
+    0x8b, 0x46, 0x7c,                          // mov eax,[esi+0x7c] pass count
+    0x5e, 0xc3,                                // pop esi; ret
+    0x33, 0xc0,                                // xor eax,eax
+    0x5e, 0xc3                                 // pop esi; ret
+};
+
+// The DX11 shadow RenderPass reaches the mesh's generic material-parameter
+// loop. For every type-7 (texture) entry that loop calls
+// GraphicsTexture::GetTexture *before* asking FUN_10035ea0 to bind the value;
+// the latter is where a missing parameter in the active shadow shader is
+// finally discovered. Run 50 wraps both adjacent calls. The first measures a
+// cold material texture, and the second asks the verified public
+// GraphicsShader2::HasParameter about the same Name before forwarding to the
+// original setter. The windows do not overlap, so each remains independently
+// verifiable after the other is patched.
+const DWORD kGraphicsMeshSetShaderParametersRva = 0x169c40;
+const char kGraphicsMeshSetShaderParametersName[] =
+    "?SetShaderParameters@GraphicsMesh@GAME@@QBEX"
+    "PBVGraphicsShader2@2@H@Z";
+// The material getter runs after 8 bytes of locals and four saved registers
+// (EBX/EBP/ESI in the prologue, EDI at the loop entry). Its E8 adds one more
+// word, so the return address of the enclosing GraphicsMesh call is at the
+// getter adapter's ESP+0x1c. These two windows prove that stack shape without
+// relying on the decompiler's variable recovery.
+const DWORD kGraphicsMeshSetShaderParametersFrameRva = 0x169c40;
+const BYTE kGraphicsMeshSetShaderParametersFrameBytes[] = {
+    0x83, 0xec, 0x08,                          // sub esp,8
+    0x53, 0x55, 0x56,                          // save ebx/ebp/esi
+    0x8b, 0xf1,                                // esi = this mesh
+    0xe8, 0xa3, 0x94, 0x0a, 0x00,              // EnsureAvailable
+    0x8b, 0x44, 0x24, 0x1c,                    // material-index argument
+    0x8b, 0xae, 0xe0, 0x00, 0x00, 0x00         // ebp = material table
+};
+const DWORD kShadowMaterialLoopFrameRva = 0x169c78;
+const BYTE kShadowMaterialLoopFrameBytes[] = {
+    0x1f, 0x03, 0xc2,                          // finish quotient
+    0x0f, 0x84, 0xbf, 0x00, 0x00, 0x00,       // skip empty material
+    0x8b, 0x4c, 0x24, 0x18,                    // shader before EDI save
+    0x57,                                      // fourth saved register
+    0x33, 0xff, 0xeb, 0x06,
+    0x8d, 0x9b, 0x00, 0x00, 0x00, 0x00
+};
+const DWORD kShadowMaterialTextureWindowRva = 0x169ca8;
+const unsigned kShadowMaterialTextureCallOffset = 3;
+// At the patched getter's entry, the caller's active GraphicsShader2* is this
+// far above ESP: it was at caller ESP+0x1c and E8 pushed one return address.
+const unsigned kShadowMaterialShaderStackOffset = 0x20;
+const unsigned kShadowMaterialOuterCallerStackOffset = 0x1c;
+const BYTE kShadowMaterialTextureWindowBytes[] = {
+    0x8b, 0x4e, 0x14,                          // mov ecx,[esi+0x14] texture
+    0xe8, 0x00, 0xac, 0x02, 0x00,              // call GetTexture()
+    0x89, 0x44, 0x24, 0x10,                    // mov [esp+0x10],eax
+    0x8d, 0x44, 0x24, 0x10                     // lea eax,[esp+0x10]
+};
+const DWORD kGraphicsTextureGetTextureRva = 0x1948b0;
+const char kGraphicsTextureGetTextureName[] =
+    "?GetTexture@GraphicsTexture@GAME@@QBEPBVRenderTexture@2@XZ";
+
+// Run 51 proved that a base-texture-only record gate leaves cold, shader-used
+// texture work on the following directional build. This direct call inside
+// GraphicsMeshInstance::SetShaderParameters is where the exact instance and
+// pass still coexist with GraphicsMesh::SetShaderParameters. A wrapper around
+// only this E8 supplies that context while the existing material getter runs.
+// All windows are 16-24 bytes. They prove ESI=this and EBX=shader. EBP starts
+// as arg3/pass but is multiplied by the 0x34 MeshRenderInfo stride before the
+// call, so it is emphatically not a pass there. The original arg3 remains at
+// adapter ESP+0xbc after the adapter's first two pushes; that offset includes
+// the 0x8c local frame, four saved registers, two original call arguments,
+// the E8 return address, and those two pushes.
+const DWORD kGraphicsMeshInstanceSetShaderParametersRva = 0x173480;
+const char kGraphicsMeshInstanceSetShaderParametersName[] =
+    "?SetShaderParameters@GraphicsMeshInstance@GAME@@UBEX"
+    "PBVGraphicsShader2@2@HHABVMeshRenderInfo@2@@Z";
+const DWORD kShadowMeshParameterFrameRva = 0x173480;
+const BYTE kShadowMeshParameterFrameBytes[] = {
+    0x81, 0xec, 0x8c, 0x00, 0x00, 0x00,       // sub esp,0x8c
+    0xa1, 0x44, 0xb0, 0x41, 0x10,             // load static guard
+    0x53,                                      // save ebx
+    0x8b, 0x9c, 0x24, 0x94, 0x00, 0x00, 0x00 // ebx = arg1 shader
+};
+const Relocation kShadowMeshParameterFrameRelocs[] = {
+    {7, 0x41b044}                             // A1 absolute static guard
+};
+const DWORD kShadowMeshParameterEntryRva = 0x17348b;
+const BYTE kShadowMeshParameterEntryBytes[] = {
+    0x53,                                      // push ebx
+    0x8b, 0x9c, 0x24, 0x94, 0x00, 0x00, 0x00, // ebx = arg1 shader
+    0x55,                                      // push ebp
+    0x8b, 0xac, 0x24, 0xa0, 0x00, 0x00, 0x00, // ebp = arg3 pass
+    0x56                                       // push esi
+};
+const DWORD kShadowMeshParameterContextRva = 0x173494;
+const BYTE kShadowMeshParameterContextBytes[] = {
+    0x8b, 0xac, 0x24, 0xa0, 0x00, 0x00, 0x00, // ebp = arg3 pass
+    0x56, 0x57,                                // preserve esi/edi
+    0x8b, 0xbc, 0x24, 0xac, 0x00, 0x00, 0x00, // edi = arg4 render info
+    0x8b, 0xf1,                                // esi = this instance
+    0x89, 0x7c, 0x24, 0x14                     // preserve render-info pointer
+};
+const DWORD kShadowMeshParameterArgsRva = 0x173857;
+const BYTE kShadowMeshParameterArgsBytes[] = {
+    0xff, 0xb4, 0x24, 0xa4, 0x00, 0x00, 0x00, // push arg2 material index
+    0x6b, 0xed, 0x34,                          // pass * 0x34
+    0x03, 0x6f, 0x1c,                          // + MeshRenderInfo base
+    0x8b, 0x4e, 0x04                           // ecx = instance+4 mesh
+};
+const DWORD kShadowMeshParameterCallRva = 0x17385e;
+const unsigned kShadowMeshParameterCallOffset = 14;
+const unsigned kShadowMeshParameterAdapterPassOffset = 0xbc;
+const BYTE kShadowMeshParameterCallBytes[] = {
+    0x6b, 0xed, 0x34,                          // pass * mesh-info stride
+    0x03, 0x6f, 0x1c,
+    0x8b, 0x4e, 0x04,                          // ecx = instance+4 mesh
+    0x53,                                      // push ebx shader
+    0x89, 0x6c, 0x24, 0x20,
+    0xe8, 0xcf, 0x63, 0xff, 0xff               // GraphicsMesh setter
+};
+
+// GraphicsMeshInstance applies two optional texture overrides after the base
+// mesh material. The +0x18 override is named bumpTexture. Stock code ensures
+// that Resource before its setter asks whether the active shader has such a
+// parameter, so a directional-shadow shader that does not use bump mapping
+// can synchronously load it for no rendered result. Patch only the E8: EBX is
+// the already verified shader from the enclosing function, and ECX is the
+// bump texture Resource. The wrapper forwards every non-directional or used
+// case unchanged.
+const DWORD kShadowInstanceBumpEnsureWindowRva = 0x173b3f;
+const unsigned kShadowInstanceBumpEnsureCallOffset = 9;
+const BYTE kShadowInstanceBumpEnsureWindowBytes[] = {
+    0x8b, 0x7e, 0x18,                          // edi = instance+0x18 texture
+    0x85, 0xff,                                // test edi,edi
+    0x74, 0x6b,                                // null: skip the whole block
+    0x8b, 0xcf,                                // ecx = texture Resource
+    0xe8, 0xa3, 0xf5, 0x09, 0x00,              // EnsureAvailable
+    0x8b, 0x47, 0x74,                          // render-texture vector begin
+    0x8b, 0x4f, 0x78,                          // render-texture vector end
+    0x2b, 0xc8                                 // end - begin
+};
+const DWORD kShadowInstanceBumpSetterWindowRva = 0x173b99;
+const DWORD kBumpTextureNameRva = 0x41b078;
+const DWORD kBumpTextureLiteralRva = 0x2d6644;
+const BYTE kShadowInstanceBumpSetterWindowBytes[] = {
+    0x89, 0x44, 0x24, 0x20,                    // store chosen texture
+    0x8d, 0x44, 0x24, 0x20,
+    0x50, 0x51, 0x6a, 0x00,
+    0x68, 0x78, 0xb0, 0x41, 0x10,              // Name("bumpTexture")
+    0x8b, 0xcb,
+    0xe8, 0xef, 0x22, 0xec, 0xff               // texture-param setter
+};
+const Relocation kShadowInstanceBumpSetterWindowRelocs[] = {
+    {13, kBumpTextureNameRva}
+};
+const DWORD kBumpTextureNameInitWindowRva = 0x173595;
+const BYTE kBumpTextureNameInitWindowBytes[] = {
+    0x68, 0x78, 0xb0, 0x41, 0x10,              // destination Name object
+    0x83, 0xc8, 0x08,
+    0x6a, 0x0b,                                // strlen("bumpTexture")
+    0x68, 0x44, 0x66, 0x2d, 0x10,              // source string
+    0xa3, 0x44, 0xb0, 0x41, 0x10               // initialized-bit guard
+};
+const Relocation kBumpTextureNameInitWindowRelocs[] = {
+    {1, kBumpTextureNameRva}, {11, kBumpTextureLiteralRva}, {16, 0x41b044}
+};
+const DWORD kSetTextureParameterMissingWindowRva = 0x35eb8;
+const BYTE kSetTextureParameterMissingWindowBytes[] = {
+    0x8b, 0x44, 0x24, 0x0c,                    // Name lookup result
+    0x3b, 0x87, 0xa0, 0x00, 0x00, 0x00,       // compare end/sentinel
+    0x74, 0x76,                                // absent: return success
+    0x8b, 0x40, 0x18,
+    0x83, 0xf8, 0xff,
+    0x74, 0x6e,
+    0x8d, 0x0c, 0xc0
+};
+const DWORD kSetTextureParameterMissingReturnRva = 0x35f3a;
+const BYTE kSetTextureParameterMissingReturnBytes[] = {
+    0x5f, 0xb0, 0x01, 0x5e, 0xc2, 0x10, 0x00,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+};
+
+// The base GraphicsMesh material is applied first, then an instance+0x14
+// override is ensured and bound to the same baseTexture Name before any draw.
+// A material getter inside the base call can therefore omit only a different
+// baseTexture Resource when this exact enclosing instance has a non-null
+// override. These windows independently prove the field, ensure, Name, and
+// ordering; the existing context E8 proves the base material call came first.
+const DWORD kShadowInstanceBaseEnsureWindowRva = 0x173acd;
+const unsigned kShadowInstanceBaseEnsureCallOffset = 9;
+const BYTE kShadowInstanceBaseEnsureWindowBytes[] = {
+    0x8b, 0x7e, 0x14,                          // instance+0x14 override
+    0x85, 0xff,
+    0x74, 0x6b,
+    0x8b, 0xcf,
+    0xe8, 0x15, 0xf6, 0x09, 0x00,              // EnsureAvailable
+    0x8b, 0x47, 0x74,
+    0x8b, 0x4f, 0x78,
+    0x2b, 0xc8
+};
+const DWORD kShadowInstanceBaseSetterWindowRva = 0x173b27;
+const DWORD kBaseTextureNameRva = 0x41b068;
+const DWORD kBaseTextureLiteralRva = 0x2d6638;
+const BYTE kShadowInstanceBaseSetterWindowBytes[] = {
+    0x89, 0x44, 0x24, 0x28,
+    0x8d, 0x44, 0x24, 0x28,
+    0x50, 0x51, 0x6a, 0x00,
+    0x68, 0x68, 0xb0, 0x41, 0x10,              // Name("baseTexture")
+    0x8b, 0xcb,
+    0xe8, 0x61, 0x23, 0xec, 0xff
+};
+const Relocation kShadowInstanceBaseSetterWindowRelocs[] = {
+    {13, kBaseTextureNameRva}
+};
+const DWORD kBaseTextureNameInitWindowRva = 0x173548;
+const BYTE kBaseTextureNameInitWindowBytes[] = {
+    0x68, 0x68, 0xb0, 0x41, 0x10,
+    0x83, 0xc8, 0x04,
+    0x6a, 0x0b,                                // strlen("baseTexture")
+    0x68, 0x38, 0x66, 0x2d, 0x10,
+    0xa3, 0x44, 0xb0, 0x41, 0x10
+};
+const Relocation kBaseTextureNameInitWindowRelocs[] = {
+    {1, kBaseTextureNameRva}, {11, kBaseTextureLiteralRva}, {16, 0x41b044}
+};
+
+// Every other direct Engine.dll caller of GraphicsTexture::GetTexture. At a
+// nested texture ResourceLoader::LoadResource call the original caller's E8
+// return address is still on the stack. Run 52 scans only that committed stack
+// region and compares exact return RVAs; indirect or unrecognized paths remain
+// in an explicit bucket. The existing material E8 at 0x169cab is represented
+// by a dynamic bracket because shadow_defer_cold_alpha has already retargeted
+// it before the load occurs.
+const DWORD kShadowTextureDirectCallerRvas[] = {
+    0x1159ed, // FUN_101155b0
+    0x120f37, // GraphicsBillboard::RenderPass
+    0x130027, // FUN_1012fa30
+    0x17c5c2, // GraphicsForwardRenderer::Render
+    0x18a90e, // FUN_1018a610, render-state parameter application
+    0x1b8d3e, // LineEffect::RenderPass
+    0x2049a0, // PieOmatic::Render
+    0x23e7cb, // FUN_1023e1e0
+    0x26ae2b  // WaterRenderInterface::RenderWaveElements
+};
+
+const DWORD kShadowTextureParameterWindowRva = 0x169cb8;
+const unsigned kShadowTextureParameterCallOffset = 9;
+const DWORD kSetTextureParameterRva = 0x35ea0;
+const BYTE kShadowTextureParameterWindowBytes[] = {
+    0x50,                                      // push eax (texture output)
+    0x51,                                      // push ecx (reserved)
+    0x8b, 0x4c, 0x24, 0x24,                    // mov ecx,[esp+0x24] shader
+    0x6a, 0x00,                                // push 0
+    0x56,                                      // push esi (material Name)
+    0xe8, 0xda, 0xc1, 0xec, 0xff,              // call texture-param setter
+    0xeb, 0x46,                                // jmp next material entry
+    0xf3, 0x0f, 0x10, 0x46, 0x14               // movss xmm0,[esi+0x14]
+};
+
+const DWORD kShaderHasParameterRva = 0x18ba70;
+const char kShaderHasParameterName[] =
+    "?HasParameter@GraphicsShader2@GAME@@QBE_NABVName@2@@Z";
+const BYTE kShaderHasParameterBytes[] = {
+    0x51, 0x56, 0x8b, 0xf1,
+    0xe8, 0x77, 0x76, 0x08, 0x00,              // call EnsureAvailable
+    0xff, 0x74, 0x24, 0x0c,
+    0x8d, 0x44, 0x24, 0x10,
+    0x50,
+    0x8d, 0x8e, 0xa0, 0x00, 0x00, 0x00
+};
+
+// A material parameter Name is a 16-byte digest, but this diagnostic only
+// needs its stable first dword. Prove that Name::Hash reads exactly that field
+// before copying it out of the verified material entry; no engine call is
+// added to the hot material path.
+const DWORD kNameHashRva = 0x13f0;
+const char kNameHashName[] = "?Hash@Name@GAME@@QBEIXZ";
+const BYTE kNameHashBytes[] = {
+    0x8b, 0x01, 0xc3,                         // mov eax,[ecx]; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+};
+
+// The shadow renderer builds one 0x88-byte record per accepted caster/pass.
+// This direct call is the last decision point before it appends that record:
+// EDI is the pass, ESI is the renderable entry, and EAX is the output record.
+// Returning false therefore omits only this caster/pass from the shadow map;
+// the normal colour render path never sees the decision.
+const DWORD kShadowRecordCallWindowRva = 0x18c8f5;
+const unsigned kShadowRecordCallOffset = 9;
+const DWORD kBuildShadowRecordRva = 0x18c650;
+const BYTE kShadowRecordCallWindowBytes[] = {
+    0x57,                                      // push edi (pass)
+    0x56,                                      // push esi (renderable entry)
+    0x8d, 0x44, 0x24, 0x30,                    // lea eax,[esp+0x30] output
+    0x50,                                      // push eax
+    0x8b, 0xcd,                                // mov ecx,ebp (renderer)
+    0xe8, 0x4d, 0xfd, 0xff, 0xff,              // call build-record helper
+    0x84, 0xc0,                                // test al,al
+    0x0f, 0x84, 0x8c, 0x00, 0x00, 0x00         // false: skip append
+};
+const BYTE kBuildShadowRecordBytes[] = {
+    0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x8b, 0xe9,
+    0x8b, 0x0b, 0x56, 0x8b, 0x01, 0x57, 0x8b, 0x40,
+    0x24, 0xff, 0xd0, 0x84, 0xc0
+};
+
+// GraphicsMeshInstance is identified by the exact virtual function in slot 2
+// that the build-record helper calls. Its shadow style partitions opaque
+// (0-2) from alpha-tested (3-5). The function obtains the base GraphicsTexture
+// resource through virtual GetTexture; that getter ensures only the already
+// accepted mesh, not the returned texture resource.
+const DWORD kMeshShadowStyleRva = 0x1733b0;
+const char kMeshShadowStyleName[] =
+    "?GetShadowRenderStyle@GraphicsMeshInstance@GAME@@UBE?AW4"
+    "RenderShadowStyle@2@H@Z";
+const DWORD kNameNoNameRva = 0x41a55c;
+const BYTE kMeshShadowStyleBytes[] = {
+    0x53, 0x56, 0x8b, 0xf1,
+    0x68, 0x5c, 0xa5, 0x41, 0x10,              // push Name::noName
+    0x8b, 0x06, 0xff, 0x74, 0x24, 0x10,
+    0x32, 0xdb, 0xff, 0x50, 0x1c,
+    0x85, 0xc0, 0x74, 0x11
+};
+const Relocation kMeshShadowStyleRelocs[] = {{5, kNameNoNameRva}};
+const DWORD kMeshShadowStyleAlphaRva = 0x1733c8;
+const BYTE kMeshShadowStyleAlphaBytes[] = {
+    0x80, 0xb8, 0x81, 0x00, 0x00, 0x00, 0x02,
+    0xb3, 0x01, 0x7c, 0x06,
+    0x8a, 0x98, 0x80, 0x00, 0x00, 0x00
+};
+const DWORD kMeshShadowStyleSkinnedRva = 0x1733f3;
+const BYTE kMeshShadowStyleSkinnedBytes[] = {
+    0xd1, 0xe9, 0xf6, 0xc1, 0x01, 0x74, 0x14, 0x84, 0xdb,
+    0xb8, 0x01, 0x00, 0x00, 0x00,              // opaque skinned
+    0xb9, 0x04, 0x00, 0x00, 0x00,              // alpha skinned
+    0x5e, 0x0f, 0x45, 0xc1
+};
+const DWORD kMeshShadowStyleFoliageRva = 0x173415;
+const BYTE kMeshShadowStyleFoliageBytes[] = {
+    0x74, 0x14, 0x84, 0xdb,
+    0xb8, 0x02, 0x00, 0x00, 0x00,              // opaque foliage
+    0xb9, 0x05, 0x00, 0x00, 0x00,              // alpha foliage
+    0x5e, 0x0f, 0x45, 0xc1, 0x5b, 0xc2, 0x04, 0x00
+};
+const DWORD kMeshShadowStyleStaticRva = 0x17342b;
+const BYTE kMeshShadowStyleStaticBytes[] = {
+    0x33, 0xc0,                                // opaque static = 0
+    0x84, 0xdb,
+    0xb9, 0x03, 0x00, 0x00, 0x00,              // alpha static = 3
+    0x5e, 0x0f, 0x45, 0xc1, 0x5b, 0xc2, 0x04, 0x00,
+    0xcc, 0xcc, 0xcc
+};
+
+const DWORD kMeshGetTextureRva = 0x1731a0;
+const char kMeshGetTextureName[] =
+    "?GetTexture@GraphicsMeshInstance@GAME@@UBEPBVGraphicsTexture@2@"
+    "HABVName@2@@Z";
+const BYTE kMeshGetTextureBytes[] = {
+    0x51,
+    0xa1, 0x08, 0xb1, 0x41, 0x10,
+    0x57, 0x8b, 0xf9, 0xa8, 0x01, 0x75, 0x44,
+    0x68, 0x0c, 0xb1, 0x41, 0x10,
+    0x83, 0xc8, 0x01, 0x6a, 0x0b
+};
+const Relocation kMeshGetTextureRelocs[] = {
+    {2, 0x41b108}, {14, 0x41b10c}
+};
+const DWORD kMeshGetTextureMeshRva = 0x173204;
+const unsigned kMeshGetTextureEnsureCallOffset = 8;
+const BYTE kMeshGetTextureMeshBytes[] = {
+    0x0f, 0x84, 0x8b, 0x00, 0x00, 0x00,
+    0x8b, 0xce,
+    0xe8, 0xdf, 0xfe, 0x09, 0x00,              // ensure mesh
+    0x8b, 0x4c, 0x24, 0x18,
+    0x8b, 0x86, 0x80, 0x00, 0x00, 0x00
+};
+const DWORD kMeshGetTextureReturnRva = 0x17329f;
+const BYTE kMeshGetTextureReturnBytes[] = {
+    0x8b, 0x44, 0x24, 0x10,
+    0x6b, 0xc9, 0x54,
+    0x8b, 0x44, 0x01, 0x14,                    // return entry+0x14 resource
+    0x5e, 0x5d, 0x5b, 0x5f, 0x59,
+    0xc2, 0x08, 0x00
+};
+
+const DWORD kResourceLoaderAccessorRva = 0x212dc0;
+const char kResourceLoaderAccessorName[] =
+    "?GetResourceLoader@Resource@GAME@@QAEPAVResourceLoader@2@XZ";
+const BYTE kResourceLoaderAccessorBytes[] = {
+    0x8b, 0x41, 0x24, 0xc3,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc
+};
+
 // --- The deferred renderer's one call to the DX11 directional-shadow build.
 // This is a call-site patch, not another entry detour: only this orchestration
 // path is timed, and the four-byte E8 displacement is the only code changed.
@@ -244,6 +675,24 @@ const BYTE kEnqueueBytes[] = {
     0xa1
 };
 const Relocation kEnqueueRelocs[] = {{3, 0x2a2e86}};
+
+// BaseResourceManager's stock preload path supplies the exact tuple reused by
+// the cold-alpha fix: priority 1, notify=true, immediate=false. This window is
+// verified as behaviour, not patched.
+const DWORD kPreloadResourceRva = 0x1200e0;
+const char kPreloadResourceName[] =
+    "?PreLoadResource@BaseResourceManager@GAME@@QAEXPBVResource@2@@Z";
+const DWORD kPreloadEnqueueWindowRva = 0x120110;
+const unsigned kPreloadEnqueueCallOffset = 10;
+const BYTE kPreloadEnqueueWindowBytes[] = {
+    0x8b, 0x4f, 0x10,                          // loader
+    0x6a, 0x00,                                // immediate=false
+    0x6a, 0x01,                                // notify=true
+    0x6a, 0x01,                                // priority=1
+    0x56,                                      // resource
+    0xe8, 0xa1, 0x44, 0x0f, 0x00,              // EnqueueResource
+    0x5e, 0x5f, 0xc2, 0x04, 0x00
+};
 
 // --- Archive::ReadFromFile. `?ReadFromFile@Archive@GAME@@QBE_NHPAEIIPAU
 // BlockBuffer@12@@Z` and the disassembly agree on the argument layout, which
@@ -909,6 +1358,13 @@ bool g_asyncLevelLoad;
 // matching matrix for one frame. A fix rather than an instrument: defaults
 // off, reaches install() with the probe off, and does no timing in that mode.
 bool g_shadowTransitionReuse;
+// [performance] shadow_defer_cold_alpha. Alpha-tested shadow casters whose
+// base texture is not resident are omitted from this directional build and
+// explicitly handed to the engine's loader. They return on the first later
+// build after the texture reaches loaded state 2. Opaque casters and colour
+// rendering are untouched.
+bool g_shadowDeferColdAlpha;
+bool g_shadowDeferActive;
 // Whether this install() is installing the trace at all. archive_cache_mb can
 // reach install() with the performance probe off, and without this every
 // wants() below would read the trace mask -- which defaults to 1 -- and put
@@ -938,6 +1394,23 @@ typedef void (__fastcall* BackgroundLoadLevelFn)(void* self, void* edx,
 typedef void* (__fastcall* GuaranteedGetLevelFn)(void* self, void* edx,
                                                 int flag);
 typedef void (__fastcall* LoadResourceFn)(void* self, void* edx, void* resource);
+typedef void (__fastcall* EnsureAvailableFn)(void* self, void* edx);
+typedef const char* (__fastcall* ResourceFileNameFn)(void* self, void* edx);
+typedef void* (__fastcall* GraphicsTextureGetTextureFn)(void* self, void* edx);
+typedef void (__fastcall* GraphicsMeshSetShaderParametersFn)(
+    void* self, void* edx, const void* shader, int materialIndex);
+typedef int (__fastcall* SetTextureParameterFn)(
+    void* shader, void* edx, const void* name, unsigned index,
+    void* reserved, void* textureValue);
+typedef bool (__fastcall* ShaderHasParameterFn)(
+    void* shader, void* edx, const void* name);
+typedef int (__fastcall* BuildShadowRecordFn)(
+    void* renderer, void* edx, void* output, void* renderableEntry, int pass);
+typedef int (__fastcall* ShadowEligibleFn)(void* self, void* edx);
+typedef int (__fastcall* MeshShadowStyleFn)(void* self, void* edx, int pass);
+typedef const void* (__fastcall* MeshGetTextureFn)(
+    void* self, void* edx, int pass, const void* name);
+typedef void* (__fastcall* ResourceLoaderAccessorFn)(void* self, void* edx);
 typedef int (__fastcall* RenderDirectionalFn)(
     void* self, void* edx, void* canvas, const void* camera,
     const void* frustum, int algorithm, void* surface, void* matrix);
@@ -974,6 +1447,17 @@ LoadLevelFn g_regionLoadLevel;
 BackgroundLoadLevelFn g_backgroundLoadLevel;
 GuaranteedGetLevelFn g_guaranteedGetLevel;
 LoadResourceFn g_loadResource;
+EnsureAvailableFn g_ensureAvailable;
+ResourceFileNameFn g_resourceFileName;
+GraphicsTextureGetTextureFn g_graphicsTextureGetTexture;
+GraphicsMeshSetShaderParametersFn g_graphicsMeshSetShaderParameters;
+SetTextureParameterFn g_setTextureParameter;
+ShaderHasParameterFn g_shaderHasParameter;
+BuildShadowRecordFn g_buildShadowRecord;
+MeshShadowStyleFn g_meshShadowStyle;
+MeshGetTextureFn g_meshGetTexture;
+ResourceLoaderAccessorFn g_resourceLoaderAccessor;
+EnqueueFn g_shadowEnqueue;
 RenderDirectionalFn g_renderDirectional;
 UnloadLevelFn g_unloadLevel;
 EnqueueFn g_enqueue;
@@ -1016,6 +1500,12 @@ CallPatch g_forceLoadPatches[kForceLoadSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
 CallPatch g_shadowDirectionalPatch;
+CallPatch g_shadowMeshEnsurePatch;
+CallPatch g_shadowMaterialTexturePatch;
+CallPatch g_shadowTextureParameterPatch;
+CallPatch g_shadowMeshParameterPatch;
+CallPatch g_shadowInstanceBumpEnsurePatch;
+CallPatch g_shadowRecordPatch;
 LONG g_insideDirectional;
 void* g_lastShadowRegion;
 void* g_cachedShadowSurface;
@@ -1025,6 +1515,158 @@ bool g_cachedShadowValid;
 bool g_reusedLastShadow;
 bool g_shadowTracing;
 bool g_resourceStateVerified;
+bool g_resourceFileNameVerified;
+bool g_shaderHasParameterVerified;
+bool g_nameHashLayoutVerified;
+bool g_shadowMaterialTexturePending;
+bool g_shadowMaterialTextureHooked;
+bool g_shadowTextureParameterHooked;
+bool g_shadowMeshParameterHooked;
+bool g_shadowTextureCallerSitesVerified;
+bool g_insideShadowMaterialTexture;
+uint32_t g_shadowMaterialTexturePendingUs;
+uint32_t g_shadowMaterialPendingNameHash;
+LONG g_shadowMaterialReports;
+LONG g_shadowTextureChainReports;
+
+enum ShadowContextMatch {
+    ShadowContextExact,
+    ShadowContextClassOther,
+    ShadowContextPassMismatch,
+    ShadowContextInstanceMissing
+};
+
+enum ShadowMeshContextPatchStatus {
+    ShadowMeshContextPatchActive,
+    ShadowMeshContextPatchDependencyMissing,
+    ShadowMeshContextPatchFrameMismatch,
+    ShadowMeshContextPatchEntryMismatch,
+    ShadowMeshContextPatchContextMismatch,
+    ShadowMeshContextPatchCallFailed,
+    ShadowMeshContextPatchReverted,
+    ShadowMeshContextPatchStatusCount
+};
+
+struct ShadowMeshParameterContext {
+    bool active;
+    bool styleKnown;
+    ShadowContextMatch match;
+    void* instance;
+    unsigned style;
+    int pass;
+    bool baseKnown;
+    const void* baseTexture;
+    bool outerInstanceSite;
+};
+ShadowMeshParameterContext g_shadowMeshParameterContext;
+ShadowMeshParameterContext g_shadowMaterialPendingContext;
+const void* g_shadowMaterialPendingTexture;
+
+// The builder already obtains the exact mesh-instance class/style for the
+// run-51 omission decision. Keep that result only for this directional call,
+// keyed by the instance and pass that the later parameter call exposes. This
+// avoids calling back into the engine's mesh/resource path from inside
+// GraphicsMesh::SetShaderParameters -- run 52 froze on the first cold event
+// when it did that. The generation makes each reset O(1), and values are used
+// only for identity comparison while RenderDirectional is still on stack.
+const unsigned kShadowRecordContextSlots = 4096;
+static_assert((kShadowRecordContextSlots & (kShadowRecordContextSlots - 1)) == 0,
+              "shadow record context table must be a power of two");
+struct ShadowRecordContextEntry {
+    unsigned generation;
+    void* instance;
+    int pass;
+    unsigned style;
+    bool styleKnown;
+    bool baseKnown;
+    const void* baseTexture;
+};
+ShadowRecordContextEntry g_shadowRecordContexts[kShadowRecordContextSlots];
+unsigned g_shadowRecordContextGeneration;
+ShadowMeshContextPatchStatus g_shadowMeshContextPatchStatus =
+    ShadowMeshContextPatchDependencyMissing;
+
+void resetShadowRecordContexts() {
+    if (++g_shadowRecordContextGeneration) return;
+    memset(g_shadowRecordContexts, 0, sizeof(g_shadowRecordContexts));
+    g_shadowRecordContextGeneration = 1;
+}
+
+unsigned shadowRecordContextHash(const void* instance, int pass) {
+    return (unsigned)(((uintptr_t)instance >> 4)
+        ^ ((unsigned)pass * 0x9e3779b9u));
+}
+
+bool rememberShadowRecordContext(void* instance, int pass, unsigned style,
+                                 bool styleKnown, bool baseKnown,
+                                 const void* baseTexture) {
+    if (!instance || !g_shadowRecordContextGeneration) return false;
+    unsigned slot = shadowRecordContextHash(instance, pass)
+        & (kShadowRecordContextSlots - 1);
+    for (unsigned probe = 0; probe < kShadowRecordContextSlots; ++probe) {
+        ShadowRecordContextEntry& entry = g_shadowRecordContexts[slot];
+        if (entry.generation != g_shadowRecordContextGeneration
+            || (entry.instance == instance && entry.pass == pass)) {
+            entry.generation = g_shadowRecordContextGeneration;
+            entry.instance = instance;
+            entry.pass = pass;
+            entry.style = style;
+            entry.styleKnown = styleKnown;
+            entry.baseKnown = baseKnown;
+            entry.baseTexture = baseTexture;
+            return true;
+        }
+        slot = (slot + 1) & (kShadowRecordContextSlots - 1);
+    }
+    tq::probe::engineCount(tq::probe::CounterEngineShadowContextTableOverflow);
+    return false;
+}
+
+bool findShadowRecordContext(void* instance, int pass,
+                             ShadowMeshParameterContext* out) {
+    if (!instance || !out || !g_shadowRecordContextGeneration) return false;
+    unsigned slot = shadowRecordContextHash(instance, pass)
+        & (kShadowRecordContextSlots - 1);
+    for (unsigned probe = 0; probe < kShadowRecordContextSlots; ++probe) {
+        const ShadowRecordContextEntry& entry = g_shadowRecordContexts[slot];
+        if (entry.generation != g_shadowRecordContextGeneration) return false;
+        if (entry.instance == instance && entry.pass == pass) {
+            out->active = true;
+            out->styleKnown = entry.styleKnown;
+            out->match = entry.styleKnown
+                ? ShadowContextExact : ShadowContextClassOther;
+            out->instance = instance;
+            out->style = entry.style;
+            out->pass = pass;
+            out->baseKnown = entry.baseKnown;
+            out->baseTexture = entry.baseTexture;
+            return true;
+        }
+        slot = (slot + 1) & (kShadowRecordContextSlots - 1);
+    }
+    return false;
+}
+
+void explainShadowRecordMiss(ShadowMeshParameterContext* context) {
+    if (!context || context->active) return;
+    // A zero-initialized enum used to spell Exact here even though no adapter
+    // had supplied an instance. Run 54 exposed that impossible combination:
+    // lookup_exact beside pass_unknown. Missing call context is an explicit
+    // instance-missing result, not a successful join.
+    if (!context->instance) {
+        context->match = ShadowContextInstanceMissing;
+        return;
+    }
+    for (unsigned slot = 0; slot < kShadowRecordContextSlots; ++slot) {
+        const ShadowRecordContextEntry& entry = g_shadowRecordContexts[slot];
+        if (entry.generation == g_shadowRecordContextGeneration
+            && entry.instance == context->instance) {
+            context->match = ShadowContextPassMismatch;
+            return;
+        }
+    }
+    context->match = ShadowContextInstanceMissing;
+}
 
 // Which call site the expensive forced loads actually come from -- the one
 // fact runs 27 and 28 left missing, and the reason Stage 5.1 was aimed wrong.
@@ -1254,6 +1896,50 @@ char* appendFrame(char* at, char* const end, const ChainFrame& frame) {
     return at;
 }
 
+// The direct-call table cannot name a texture load reached through a function
+// pointer or through a stack frame deeper than its deliberately short scan.
+// For the first few such loads, write the exact call-shaped stack candidates
+// immediately. The HDR logger flushes while the session is alive; Titan Quest
+// does not unload this DLL on exit. This path is trace-only and bounded to the
+// existing eight chain slots.
+void reportUnresolvedShadowTextureChain(const void* from, const char* resource,
+                                        uint32_t us) {
+    if (!tq::hdr::readSettings().trace || !from || !g_chainModuleCount) return;
+    const LONG report = InterlockedIncrement(&g_shadowTextureChainReports) - 1;
+    if (report < 0 || report >= (LONG)kChainSlots) return;
+
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!VirtualQuery(from, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return;
+    const uintptr_t* const stack = (const uintptr_t*)from;
+    const uintptr_t* const limit =
+        (const uintptr_t*)((const BYTE*)info.BaseAddress + info.RegionSize);
+    ChainFrame frames[kChainDepth];
+    unsigned depth = 0;
+    for (unsigned i = 0;
+         i < kStackWords && stack + i < limit && depth < kChainDepth; ++i) {
+        const BYTE* const value = (const BYTE*)stack[i];
+        const ChainModule* const module = moduleOf(value);
+        if (!module || !precededByCall(value, *module)) continue;
+        const DWORD rva = (DWORD)(value - module->base);
+        if (depth && frames[depth - 1].rva == rva
+            && frames[depth - 1].tag == module->tag)
+            continue;
+        frames[depth].rva = rva;
+        frames[depth].tag = module->tag;
+        ++depth;
+    }
+
+    char line[kChainDepth * 14 + 1];
+    char* at = line;
+    for (unsigned i = 0; i < depth; ++i)
+        at = appendFrame(at, line + sizeof(line) - 1, frames[i]);
+    *at = 0;
+    tq::hdr::log("Engine trace: unresolved shadow texture %ld, %u us,"
+                 " resource %.160s, %u frames:%s\r\n",
+                 report, us, resource ? resource : "(unknown)", depth, line);
+}
+
 void reportChains() {
     for (unsigned s = 0; s < kChainSlots; ++s) {
         if (!g_chains[s].ready) continue;
@@ -1404,6 +2090,667 @@ void countShadowResourceState(unsigned state, bool inQueue,
     }
 }
 
+enum ShadowResourceType {
+    ShadowResourceMesh,
+    ShadowResourceShader,
+    ShadowResourceTexture,
+    ShadowResourceOther,
+};
+
+char asciiLower(char value) {
+    return value >= 'A' && value <= 'Z' ? (char)(value - 'A' + 'a') : value;
+}
+
+ShadowResourceType shadowResourceType(const char* name) {
+    if (!name) return ShadowResourceOther;
+    unsigned length = 0;
+    // Resource::GetFileName returns a NUL-terminated engine-owned string.
+    // Bound the read anyway: a corrupt resource should land in `other`, not
+    // turn a diagnostic partition into an unbounded scan.
+    while (length < 512 && name[length]) ++length;
+    if (length < 4 || length == 512 || name[length - 4] != '.')
+        return ShadowResourceOther;
+    const char a = asciiLower(name[length - 3]);
+    const char b = asciiLower(name[length - 2]);
+    const char c = asciiLower(name[length - 1]);
+    if (a == 'm' && b == 's' && c == 'h') return ShadowResourceMesh;
+    if (a == 's' && b == 's' && c == 'h') return ShadowResourceShader;
+    if (a == 't' && b == 'e' && c == 'x') return ShadowResourceTexture;
+    return ShadowResourceOther;
+}
+
+void countShadowResourceType(ShadowResourceType type, uint32_t elapsed) {
+    tq::probe::Counter count = tq::probe::CounterEngineShadowResTypeOther;
+    tq::probe::Counter duration =
+        tq::probe::CounterEngineShadowResTypeOtherUs;
+    switch (type) {
+    case ShadowResourceMesh:
+        count = tq::probe::CounterEngineShadowResMesh;
+        duration = tq::probe::CounterEngineShadowResMeshUs;
+        break;
+    case ShadowResourceShader:
+        count = tq::probe::CounterEngineShadowResShader;
+        duration = tq::probe::CounterEngineShadowResShaderUs;
+        break;
+    case ShadowResourceTexture:
+        count = tq::probe::CounterEngineShadowResTexture;
+        duration = tq::probe::CounterEngineShadowResTextureUs;
+        break;
+    case ShadowResourceOther:
+        break;
+    }
+    tq::probe::engineCount(count);
+    tq::probe::engineCount(duration, elapsed);
+}
+
+enum ShadowTextureCaller {
+    ShadowTextureMeshMaterial,
+    ShadowTextureFun1155b0,
+    ShadowTextureBillboard,
+    ShadowTextureFun12fa30,
+    ShadowTextureForwardRenderer,
+    ShadowTextureStateParameter,
+    ShadowTextureLineEffect,
+    ShadowTexturePieOmatic,
+    ShadowTextureFun23e1e0,
+    ShadowTextureWater,
+    ShadowTextureUnresolved,
+    ShadowTextureCallerCount
+};
+
+const ShadowTextureCaller kShadowTextureDirectCallers[] = {
+    ShadowTextureFun1155b0,
+    ShadowTextureBillboard,
+    ShadowTextureFun12fa30,
+    ShadowTextureForwardRenderer,
+    ShadowTextureStateParameter,
+    ShadowTextureLineEffect,
+    ShadowTexturePieOmatic,
+    ShadowTextureFun23e1e0,
+    ShadowTextureWater
+};
+static_assert(sizeof(kShadowTextureDirectCallerRvas)
+                  / sizeof(*kShadowTextureDirectCallerRvas)
+              == sizeof(kShadowTextureDirectCallers)
+                  / sizeof(*kShadowTextureDirectCallers),
+              "every direct texture caller needs a semantic bucket");
+
+const tq::probe::Counter kShadowTextureCallerCounters[] = {
+    tq::probe::CounterEngineShadowTexFromMeshMaterial,
+    tq::probe::CounterEngineShadowTexFromFun1155b0,
+    tq::probe::CounterEngineShadowTexFromBillboard,
+    tq::probe::CounterEngineShadowTexFromFun12fa30,
+    tq::probe::CounterEngineShadowTexFromForwardRenderer,
+    tq::probe::CounterEngineShadowTexFromStateParameter,
+    tq::probe::CounterEngineShadowTexFromLineEffect,
+    tq::probe::CounterEngineShadowTexFromPieOmatic,
+    tq::probe::CounterEngineShadowTexFromFun23e1e0,
+    tq::probe::CounterEngineShadowTexFromWater,
+    tq::probe::CounterEngineShadowTexFromUnresolved
+};
+const tq::probe::Counter kShadowTextureCallerDurationCounters[] = {
+    tq::probe::CounterEngineShadowTexFromMeshMaterialUs,
+    tq::probe::CounterEngineShadowTexFromFun1155b0Us,
+    tq::probe::CounterEngineShadowTexFromBillboardUs,
+    tq::probe::CounterEngineShadowTexFromFun12fa30Us,
+    tq::probe::CounterEngineShadowTexFromForwardRendererUs,
+    tq::probe::CounterEngineShadowTexFromStateParameterUs,
+    tq::probe::CounterEngineShadowTexFromLineEffectUs,
+    tq::probe::CounterEngineShadowTexFromPieOmaticUs,
+    tq::probe::CounterEngineShadowTexFromFun23e1e0Us,
+    tq::probe::CounterEngineShadowTexFromWaterUs,
+    tq::probe::CounterEngineShadowTexFromUnresolvedUs
+};
+static_assert(sizeof(kShadowTextureCallerCounters)
+                  / sizeof(*kShadowTextureCallerCounters)
+              == ShadowTextureCallerCount,
+              "every texture caller needs a count column");
+static_assert(sizeof(kShadowTextureCallerDurationCounters)
+                  / sizeof(*kShadowTextureCallerDurationCounters)
+              == ShadowTextureCallerCount,
+              "every texture caller needs a duration column");
+
+ShadowTextureCaller shadowTextureCallerFromWords(
+    const uintptr_t* words, unsigned count) {
+    if (!g_engineBase || !words) return ShadowTextureUnresolved;
+    for (unsigned word = 0; word < count; ++word) {
+        const BYTE* const value = (const BYTE*)words[word];
+        for (unsigned site = 0;
+             site < sizeof(kShadowTextureDirectCallerRvas)
+                        / sizeof(*kShadowTextureDirectCallerRvas);
+             ++site) {
+            if (value == g_engineBase + kShadowTextureDirectCallerRvas[site] + 5)
+                return kShadowTextureDirectCallers[site];
+        }
+    }
+    return ShadowTextureUnresolved;
+}
+
+ShadowTextureCaller shadowTextureCallerFromStack(const void* from) {
+    if (g_insideShadowMaterialTexture) return ShadowTextureMeshMaterial;
+    if (!g_shadowTextureCallerSitesVerified || !from)
+        return ShadowTextureUnresolved;
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!VirtualQuery(from, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return ShadowTextureUnresolved;
+    const uintptr_t* const words = (const uintptr_t*)from;
+    const uintptr_t* const limit = (const uintptr_t*)(
+        (const BYTE*)info.BaseAddress + info.RegionSize);
+    const SIZE_T available = limit > words ? (SIZE_T)(limit - words) : 0;
+    const unsigned scan = (unsigned)(available < 128 ? available : 128);
+    return shadowTextureCallerFromWords(words, scan);
+}
+
+void countShadowTextureCaller(ShadowTextureCaller caller, uint32_t elapsed) {
+    if ((unsigned)caller >= ShadowTextureCallerCount)
+        caller = ShadowTextureUnresolved;
+    tq::probe::engineCount(kShadowTextureCallerCounters[caller]);
+    tq::probe::engineCount(kShadowTextureCallerDurationCounters[caller],
+                           elapsed);
+}
+
+void countShadowMaterialUsedContext(
+    const ShadowMeshParameterContext& context, const void* texture,
+    uint32_t elapsed) {
+    static const tq::probe::Counter lookupCounts[] = {
+        tq::probe::CounterEngineShadowMaterialLookupExact,
+        tq::probe::CounterEngineShadowMaterialLookupClassOther,
+        tq::probe::CounterEngineShadowMaterialLookupPassMismatch,
+        tq::probe::CounterEngineShadowMaterialLookupInstanceMissing
+    };
+    static const tq::probe::Counter lookupDurations[] = {
+        tq::probe::CounterEngineShadowMaterialLookupExactUs,
+        tq::probe::CounterEngineShadowMaterialLookupClassOtherUs,
+        tq::probe::CounterEngineShadowMaterialLookupPassMismatchUs,
+        tq::probe::CounterEngineShadowMaterialLookupInstanceMissingUs
+    };
+    const unsigned match = (unsigned)context.match < 4
+        ? (unsigned)context.match : (unsigned)ShadowContextInstanceMissing;
+    tq::probe::engineCount(lookupCounts[match]);
+    tq::probe::engineCount(lookupDurations[match], elapsed);
+
+    static const tq::probe::Counter styleCounts[] = {
+        tq::probe::CounterEngineShadowMaterialUsedStyle0,
+        tq::probe::CounterEngineShadowMaterialUsedStyle1,
+        tq::probe::CounterEngineShadowMaterialUsedStyle2,
+        tq::probe::CounterEngineShadowMaterialUsedStyle3,
+        tq::probe::CounterEngineShadowMaterialUsedStyle4,
+        tq::probe::CounterEngineShadowMaterialUsedStyle5
+    };
+    static const tq::probe::Counter styleDurations[] = {
+        tq::probe::CounterEngineShadowMaterialUsedStyle0Us,
+        tq::probe::CounterEngineShadowMaterialUsedStyle1Us,
+        tq::probe::CounterEngineShadowMaterialUsedStyle2Us,
+        tq::probe::CounterEngineShadowMaterialUsedStyle3Us,
+        tq::probe::CounterEngineShadowMaterialUsedStyle4Us,
+        tq::probe::CounterEngineShadowMaterialUsedStyle5Us
+    };
+    if (!context.active || !context.styleKnown || context.style > 5) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowMaterialUsedContextUnknown);
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowMaterialUsedContextUnknownUs,
+            elapsed);
+    } else {
+        tq::probe::engineCount(styleCounts[context.style]);
+        tq::probe::engineCount(styleDurations[context.style], elapsed);
+    }
+
+    tq::probe::Counter baseCount =
+        tq::probe::CounterEngineShadowMaterialUsedBaseUnknown;
+    tq::probe::Counter baseDuration =
+        tq::probe::CounterEngineShadowMaterialUsedBaseUnknownUs;
+    if (context.active && context.baseKnown) {
+        const bool base = texture && texture == context.baseTexture;
+        baseCount = base
+            ? tq::probe::CounterEngineShadowMaterialUsedBaseMatch
+            : tq::probe::CounterEngineShadowMaterialUsedBaseOther;
+        baseDuration = base
+            ? tq::probe::CounterEngineShadowMaterialUsedBaseMatchUs
+            : tq::probe::CounterEngineShadowMaterialUsedBaseOtherUs;
+    }
+    tq::probe::engineCount(baseCount);
+    tq::probe::engineCount(baseDuration, elapsed);
+
+    tq::probe::Counter passCount =
+        tq::probe::CounterEngineShadowMaterialUsedPassUnknown;
+    tq::probe::Counter passDuration =
+        tq::probe::CounterEngineShadowMaterialUsedPassUnknownUs;
+    // The adapter supplies the material call's pass even when no accepted
+    // record matches it. `active` means a table match; instance means the
+    // call context itself is known. Keep those facts independent.
+    if (context.instance) {
+        passCount = context.pass == 0
+            ? tq::probe::CounterEngineShadowMaterialUsedPass0
+            : tq::probe::CounterEngineShadowMaterialUsedPassOther;
+        passDuration = context.pass == 0
+            ? tq::probe::CounterEngineShadowMaterialUsedPass0Us
+            : tq::probe::CounterEngineShadowMaterialUsedPassOtherUs;
+    }
+    tq::probe::engineCount(passCount);
+    tq::probe::engineCount(passDuration, elapsed);
+
+    const tq::probe::Counter outerCount = context.outerInstanceSite
+        ? tq::probe::CounterEngineShadowMaterialOuterInstanceSite
+        : tq::probe::CounterEngineShadowMaterialOuterOtherSite;
+    const tq::probe::Counter outerDuration = context.outerInstanceSite
+        ? tq::probe::CounterEngineShadowMaterialOuterInstanceSiteUs
+        : tq::probe::CounterEngineShadowMaterialOuterOtherSiteUs;
+    tq::probe::engineCount(outerCount);
+    tq::probe::engineCount(outerDuration, elapsed);
+}
+
+void countShadowMeshContextPatchStatus() {
+    static const tq::probe::Counter counters[] = {
+        tq::probe::CounterEngineShadowContextPatchActive,
+        tq::probe::CounterEngineShadowContextPatchDependencyMissing,
+        tq::probe::CounterEngineShadowContextPatchFrameMismatch,
+        tq::probe::CounterEngineShadowContextPatchEntryMismatch,
+        tq::probe::CounterEngineShadowContextPatchContextMismatch,
+        tq::probe::CounterEngineShadowContextPatchCallFailed,
+        tq::probe::CounterEngineShadowContextPatchReverted
+    };
+    static_assert(sizeof(counters) / sizeof(*counters)
+                      == ShadowMeshContextPatchStatusCount,
+                  "every mesh-context patch result needs a counter");
+    const unsigned status = (unsigned)g_shadowMeshContextPatchStatus
+                                < ShadowMeshContextPatchStatusCount
+        ? (unsigned)g_shadowMeshContextPatchStatus
+        : (unsigned)ShadowMeshContextPatchDependencyMissing;
+    tq::probe::engineCount(counters[status]);
+}
+
+void countShadowMaterialTexture(bool known, bool used, uint32_t elapsed) {
+    tq::probe::engineCount(tq::probe::CounterEngineShadowMaterialTex);
+    tq::probe::engineCount(tq::probe::CounterEngineShadowMaterialTexUs,
+                           elapsed);
+    tq::probe::Counter count = known
+        ? (used ? tq::probe::CounterEngineShadowMaterialTexUsed
+                : tq::probe::CounterEngineShadowMaterialTexUnused)
+        : tq::probe::CounterEngineShadowMaterialTexUnknown;
+    tq::probe::Counter duration = known
+        ? (used ? tq::probe::CounterEngineShadowMaterialTexUsedUs
+                : tq::probe::CounterEngineShadowMaterialTexUnusedUs)
+        : tq::probe::CounterEngineShadowMaterialTexUnknownUs;
+    tq::probe::engineCount(count);
+    tq::probe::engineCount(duration, elapsed);
+}
+
+void reportShadowMaterialDependency(const ShadowMeshParameterContext& context,
+                                    const void* texture, uint32_t nameHash,
+                                    uint32_t elapsed) {
+    if (!tq::hdr::readSettings().trace) return;
+    const LONG report = InterlockedIncrement(&g_shadowMaterialReports) - 1;
+    if (report < 0 || report >= (LONG)kChainSlots) return;
+    const char* const resource = g_resourceFileNameVerified
+        && g_resourceFileName && texture
+        ? g_resourceFileName(const_cast<void*>(texture), nullptr) : nullptr;
+    const char* base = "unknown";
+    if (context.active && context.baseKnown)
+        base = texture == context.baseTexture ? "match" : "other";
+    tq::hdr::log("Engine trace: cold used shadow material %ld, %u us,"
+                 " Name::Hash=%#lx resource %.160s style=%d pass=%d"
+                 " base=%s match=%u\r\n",
+                 report, elapsed, (unsigned long)nameHash,
+                 resource ? resource : "(unknown)",
+                 context.active && context.styleKnown
+                     ? (int)context.style : -1,
+                 context.instance ? context.pass : -1, base,
+                 (unsigned)context.match);
+}
+
+void flushPendingShadowMaterialTexture(bool known, bool used) {
+    if (!g_shadowMaterialTexturePending) return;
+    const uint32_t elapsed = g_shadowMaterialTexturePendingUs;
+    const uint32_t nameHash = g_shadowMaterialPendingNameHash;
+    const ShadowMeshParameterContext context =
+        g_shadowMaterialPendingContext;
+    const void* const texture = g_shadowMaterialPendingTexture;
+    g_shadowMaterialTexturePending = false;
+    g_shadowMaterialTexturePendingUs = 0;
+    g_shadowMaterialPendingNameHash = 0;
+    g_shadowMaterialPendingContext = {};
+    g_shadowMaterialPendingTexture = nullptr;
+    countShadowMaterialTexture(known, used, elapsed);
+    if (known && used) {
+        countShadowMaterialUsedContext(context, texture, elapsed);
+        reportShadowMaterialDependency(context, texture, nameHash, elapsed);
+    }
+}
+
+extern "C" void* __cdecl shadowMaterialTextureFiltered(
+    void* texture, const void* name, void* shader, const void* outerCaller) {
+    if (!g_graphicsTextureGetTexture) return nullptr;
+    const bool inShadow = onMainThread()
+        && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0
+        && g_resourceStateVerified;
+    const bool cold = inShadow && texture
+        && *(const unsigned*)((const BYTE*)texture
+                             + kResourceLoadedStateOffset) == 0;
+    ShadowMeshParameterContext context = g_shadowMeshParameterContext;
+    const void* const baseOverride = context.instance
+        ? *(const void* const*)((const BYTE*)context.instance + 0x14)
+        : nullptr;
+    const bool overriddenBase = g_shadowDeferActive && inShadow && texture
+        && name && g_engineBase && baseOverride
+        && texture != baseOverride
+        && memcmp(name, g_engineBase + kBaseTextureNameRva, 16) == 0;
+    if (overriddenBase) {
+        if (g_shadowTracing) {
+            tq::probe::engineCount(
+                tq::probe::CounterEngineShadowBaseOverrideSkipped);
+            if (cold)
+                tq::probe::engineCount(
+                    tq::probe::CounterEngineShadowBaseOverrideSkippedCold);
+        }
+        // The verified enclosing GraphicsMeshInstance method ensures and
+        // binds this exact non-null +0x14 override to baseTexture immediately
+        // after the base material call returns, before any draw can observe
+        // the temporary null binding.
+        return nullptr;
+    }
+    const bool canFilter = g_shadowDeferActive && inShadow && texture
+        && shader && name && g_shaderHasParameterVerified
+        && g_shaderHasParameter
+        && *(const unsigned*)((const BYTE*)shader
+                             + kResourceLoadedStateOffset) == 2;
+    if (canFilter && !g_shaderHasParameter(shader, nullptr, name)) {
+        if (g_shadowTracing) {
+            tq::probe::engineCount(
+                tq::probe::CounterEngineShadowMaterialTexSkipped);
+            if (cold)
+                tq::probe::engineCount(
+                    tq::probe::CounterEngineShadowMaterialTexSkippedCold);
+        }
+        // The adjacent original setter receives null, then makes the same
+        // HasParameter decision and discards it. No declared shader input and
+        // therefore no rendered value changes.
+        return nullptr;
+    }
+    const int64_t started = cold ? tq::probe::now() : 0;
+    // With the context patch active, the C wrapper is necessarily the
+    // enclosing caller visible from GraphicsMesh::SetShaderParameters. The
+    // original return address remains directly visible only when that patch
+    // is absent, which was run 55. Either condition names the same verified
+    // base GraphicsMeshInstance site.
+    context.outerInstanceSite = context.instance
+        || outerCaller == (const void*)(
+            g_engineBase + kShadowMeshParameterCallRva
+            + kShadowMeshParameterCallOffset + 5);
+    if (cold && !context.active) explainShadowRecordMiss(&context);
+    const bool priorMaterial = g_insideShadowMaterialTexture;
+    if (inShadow) g_insideShadowMaterialTexture = true;
+    void* const result = g_graphicsTextureGetTexture(texture, nullptr);
+    g_insideShadowMaterialTexture = priorMaterial;
+    if (cold && g_shadowTextureParameterHooked) {
+        // The patched code has exactly one setter after each getter. Preserve
+        // a complete partition even if an unexpected control flow violates
+        // that relationship.
+        flushPendingShadowMaterialTexture(false, false);
+        g_shadowMaterialTexturePending = true;
+        g_shadowMaterialTexturePendingUs =
+            tq::probe::microsecondsSince(started);
+        g_shadowMaterialPendingNameHash =
+            g_nameHashLayoutVerified && name
+                ? *(const uint32_t*)name : 0;
+        g_shadowMaterialPendingContext = context;
+        g_shadowMaterialPendingTexture = texture;
+    }
+    return result;
+}
+
+// The material Name lives in ESI and the active shadow shader at caller
+// ESP+0x1c. The patched E8 adds a return address, making that ESP+0x20 here;
+// the enclosing GraphicsMesh caller's return address is at ESP+0x1c. A naked
+// adapter is the only way to forward these values without changing the game's
+// call-site ABI; the C helper above preserves the nonvolatile registers.
+void* __attribute__((naked)) __fastcall hookShadowMaterialTexture(
+    void*, void*) {
+    __asm__ __volatile__(
+        "pushl 0x1c(%%esp)\n\t"              // enclosing caller return
+        "pushl 0x24(%%esp)\n\t"              // shader after first push
+        "pushl %%esi\n\t"
+        "pushl %%ecx\n\t"
+        "call _shadowMaterialTextureFiltered\n\t"
+        "addl $16, %%esp\n\t"
+        "ret\n\t"
+        : : : "memory");
+}
+
+extern "C" void __cdecl shadowInstanceBumpEnsureFiltered(
+    void* texture, const void* shader) {
+    const bool inShadow = onMainThread()
+        && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0;
+    const bool cold = inShadow && texture && g_resourceStateVerified
+        && *(const unsigned*)((const BYTE*)texture
+                             + kResourceLoadedStateOffset) == 0;
+    const bool canFilter = g_shadowDeferActive && inShadow && shader
+        && g_engineBase && g_shaderHasParameterVerified && g_shaderHasParameter
+        && g_resourceStateVerified
+        && *(const unsigned*)((const BYTE*)shader
+                             + kResourceLoadedStateOffset) == 2;
+    if (canFilter
+        && !g_shaderHasParameter(
+            const_cast<void*>(shader), nullptr,
+            g_engineBase + kBumpTextureNameRva)) {
+        if (g_shadowTracing) {
+            tq::probe::engineCount(
+                tq::probe::CounterEngineShadowBumpTexSkipped);
+            if (cold)
+                tq::probe::engineCount(
+                    tq::probe::CounterEngineShadowBumpTexSkippedCold);
+        }
+        // The verified stock setter at the end of this block performs the
+        // same Name lookup before touching the supplied texture value. With
+        // no bumpTexture parameter it discards the empty vector result, so
+        // omitting this EnsureAvailable changes no shader binding.
+        return;
+    }
+    if (g_ensureAvailable) g_ensureAvailable(texture, nullptr);
+}
+
+// At the patched E8, ECX is the optional bump Resource and EBX is the active
+// shader. Preserve the game's no-argument __thiscall shape while supplying
+// both to the ordinary C helper.
+void __attribute__((naked)) __fastcall hookShadowInstanceBumpEnsure(
+    void*, void*) {
+    __asm__ __volatile__(
+        "pushl %%ebx\n\t"
+        "pushl %%ecx\n\t"
+        "call _shadowInstanceBumpEnsureFiltered\n\t"
+        "addl $8, %%esp\n\t"
+        "ret\n\t"
+        : : : "memory");
+}
+
+extern "C" void __cdecl shadowMeshSetShaderParametersContext(
+    void* mesh, void* instance, int pass, const void* shader,
+    int materialIndex) {
+    if (!g_graphicsMeshSetShaderParameters) return;
+    // The adapter is patched globally, but its context is needed only by the
+    // main-thread directional call. Do not let a concurrent colour/worker
+    // invocation overwrite the bracket's live instance pointer.
+    if (!onMainThread()
+        || InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0) {
+        g_graphicsMeshSetShaderParameters(
+            mesh, nullptr, shader, materialIndex);
+        return;
+    }
+    const ShadowMeshParameterContext prior = g_shadowMeshParameterContext;
+    ShadowMeshParameterContext current = {};
+    current.instance = instance;
+    current.pass = pass;
+    current.match = ShadowContextInstanceMissing;
+    if (g_shadowTracing)
+        findShadowRecordContext(instance, pass, &current);
+    g_shadowMeshParameterContext = current;
+    g_graphicsMeshSetShaderParameters(
+        mesh, nullptr, shader, materialIndex);
+    g_shadowMeshParameterContext = prior;
+}
+
+// At this patched E8's entry ECX is GraphicsMesh*, ESI is the owning
+// GraphicsMeshInstance, and the original two stack arguments are shader and
+// material index. EBP is a MeshRenderInfo*, not the pass. Each push of [esp+8]
+// is deliberate: after the first push, shader moves from old +4 to new +8;
+// after both, the original arg3/pass is at ESP+0xbc.
+void __attribute__((naked)) __fastcall hookShadowMeshSetShaderParameters(
+    void*, void*) {
+    __asm__ __volatile__(
+        "pushl 8(%%esp)\n\t"                 // material index
+        "pushl 8(%%esp)\n\t"                 // shader
+        "pushl 0xbc(%%esp)\n\t"              // original arg3, pass
+        "pushl %%esi\n\t"                    // instance
+        "pushl %%ecx\n\t"                    // mesh
+        "call _shadowMeshSetShaderParametersContext\n\t"
+        "addl $20, %%esp\n\t"
+        "ret $8\n\t"
+        : : : "memory");
+}
+
+int __fastcall hookShadowTextureParameter(
+    void* shader, void* edx, const void* name, unsigned index,
+    void* reserved, void* textureValue) {
+    if (g_shadowMaterialTexturePending) {
+        const bool canClassify = onMainThread()
+            && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0
+            && g_shaderHasParameterVerified && g_shaderHasParameter
+            && g_resourceStateVerified && shader && name
+            && *(const unsigned*)((const BYTE*)shader
+                                 + kResourceLoadedStateOffset) == 2;
+        const bool used = canClassify
+            && g_shaderHasParameter(shader, nullptr, name);
+        flushPendingShadowMaterialTexture(canClassify, used);
+    }
+    return g_setTextureParameter
+        ? g_setTextureParameter(shader, edx, name, index, reserved, textureValue)
+        : 0;
+}
+
+bool shouldDeferShadowAlpha(unsigned style, unsigned state) {
+    // GetShadowRenderStyle's verified return classes are opaque 0-2 and
+    // alpha-tested 3-5. Only the two cold Resource states are omitted.
+    return style >= 3 && style <= 5 && state <= 1;
+}
+
+void countDeferredShadowAlpha(unsigned state, bool enqueued, bool failed) {
+    if (!g_shadowTracing) return;
+    tq::probe::engineCount(tq::probe::CounterEngineShadowAlphaOmitted);
+    tq::probe::engineCount(state == 0
+        ? tq::probe::CounterEngineShadowAlphaState0
+        : tq::probe::CounterEngineShadowAlphaState1);
+    if (enqueued)
+        tq::probe::engineCount(tq::probe::CounterEngineShadowAlphaEnqueued);
+    if (failed)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowAlphaEnqueueFailed);
+}
+
+int __fastcall hookBuildShadowRecord(
+    void* renderer, void* edx, void* output, void* renderableEntry, int pass) {
+    if (!g_buildShadowRecord) return 0;
+
+    void* contextRenderable = nullptr;
+    unsigned contextStyle = 0;
+    bool contextStyleKnown = false;
+    const void* contextBaseTexture = nullptr;
+    bool contextBaseKnown = false;
+
+    // Decide before the original helper writes the temporary record. This
+    // avoids constructing a record the caller will not append, and therefore
+    // avoids depending on undocumented ownership inside that record.
+    if (g_shadowDeferActive && onMainThread()
+        && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0
+        && g_resourceStateVerified && renderableEntry && g_meshShadowStyle
+        && g_meshGetTexture && g_resourceLoaderAccessor && g_shadowEnqueue) {
+        void* const renderable = *(void**)renderableEntry;
+        void** const vtable = renderable ? *(void***)renderable : nullptr;
+        contextRenderable = renderable;
+        // Slot 2 identifies the exact GraphicsMeshInstance implementation of
+        // GetShadowRenderStyle. Other accepted renderables are recorded too,
+        // but remain class_other: this gate never applies mesh layout or
+        // behavior to an override it has not verified.
+        if (vtable && vtable[2] == (void*)g_meshShadowStyle) {
+            const unsigned style = (unsigned)g_meshShadowStyle(
+                renderable, nullptr, pass);
+            contextStyleKnown = true;
+            const bool alpha = style >= 3 && style <= 5;
+            const void* const texture = alpha
+                ? g_meshGetTexture(renderable, nullptr, pass,
+                    (const BYTE*)g_engineBase + kNameNoNameRva)
+                : nullptr;
+            contextStyle = style;
+            contextBaseTexture = texture;
+            contextBaseKnown = alpha && texture;
+            if (texture) {
+                const unsigned state = *(const unsigned*)(
+                    (const BYTE*)texture + kResourceLoadedStateOffset);
+                if (shouldDeferShadowAlpha(style, state)) {
+                    // Preserve the original helper's first eligibility
+                    // decision before queueing anything. This call is made
+                    // only for candidates we will omit, so every normal
+                    // caster still invokes the getter exactly once inside the
+                    // original helper.
+                    ShadowEligibleFn const eligible =
+                        (ShadowEligibleFn)vtable[9];
+                    if (!eligible)
+                        return g_buildShadowRecord(
+                            renderer, edx, output, renderableEntry, pass);
+                    if (!eligible(renderable, nullptr)) return 0;
+                    bool enqueued = false;
+                    bool failed = false;
+                    if (state == 0
+                        && !*(void* const*)((const BYTE*)texture
+                                           + kResourceInQueueOffset)) {
+                        void* const loader = g_resourceLoaderAccessor(
+                            const_cast<void*>(texture), nullptr);
+                        if (loader) {
+                            // This is the engine's own normal preload tuple:
+                            // priority 1, notify=true, immediate=false.
+                            g_shadowEnqueue(loader, nullptr, texture, 1, 1, 0);
+                            const unsigned after = *(const unsigned*)(
+                                (const BYTE*)texture
+                                + kResourceLoadedStateOffset);
+                            enqueued = after != 0
+                                || *(void* const*)((const BYTE*)texture
+                                                  + kResourceInQueueOffset);
+                        }
+                        failed = !enqueued;
+                    }
+                    countDeferredShadowAlpha(state, enqueued, failed);
+                    return 0;
+                }
+            }
+        }
+    }
+    const int result = g_buildShadowRecord(
+        renderer, edx, output, renderableEntry, pass);
+    if (result && g_shadowTracing && g_shadowMeshParameterHooked
+        && contextRenderable)
+        rememberShadowRecordContext(
+            contextRenderable, pass, contextStyle, contextStyleKnown,
+            contextBaseKnown, contextBaseTexture);
+    return result;
+}
+
+void __fastcall hookShadowMeshEnsure(void* resource, void* edx) {
+    if (!g_ensureAvailable) return;
+    const bool cold = onMainThread()
+        && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0
+        && g_resourceStateVerified && resource
+        && *(const unsigned*)((const BYTE*)resource
+                             + kResourceLoadedStateOffset) == 0;
+    if (!cold) {
+        g_ensureAvailable(resource, edx);
+        return;
+    }
+    const int64_t started = tq::probe::now();
+    g_ensureAvailable(resource, edx);
+    tq::probe::engineCount(tq::probe::CounterEngineShadowMeshCold);
+    tq::probe::engineCount(tq::probe::CounterEngineShadowMeshColdUs,
+                           tq::probe::microsecondsSince(started));
+}
+
 void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     if (!g_loadResource) return;
     // Sample before entering the game function: state 1 is the branch that
@@ -1421,6 +2768,15 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     const bool inQueue = classify
         && *(void* const*)((const BYTE*)resource + kResourceInQueueOffset)
             != nullptr;
+    const char* const resourceName = inShadow
+        && g_resourceFileNameVerified && g_resourceFileName && resource
+        ? g_resourceFileName(resource, nullptr) : nullptr;
+    const ShadowResourceType resourceType = resourceName
+        ? shadowResourceType(resourceName) : ShadowResourceOther;
+    const ShadowTextureCaller textureCaller =
+        resourceType == ShadowResourceTexture
+        ? shadowTextureCallerFromStack(&resource)
+        : ShadowTextureUnresolved;
     const int64_t started = tq::probe::now();
     g_loadResource(self, edx, resource);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
@@ -1434,6 +2790,15 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoadUs,
                                    elapsed);
             if (classify) countShadowResourceState(state, inQueue, elapsed);
+            if (g_resourceFileNameVerified) {
+                countShadowResourceType(resourceType, elapsed);
+                if (resourceType == ShadowResourceTexture) {
+                    countShadowTextureCaller(textureCaller, elapsed);
+                    if (textureCaller == ShadowTextureUnresolved)
+                        reportUnresolvedShadowTextureChain(
+                            &resource, resourceName, elapsed);
+                }
+            }
         }
     }
 }
@@ -1474,11 +2839,23 @@ int __fastcall hookRenderDirectional(
         return g_cachedShadowResult;
 
     const int64_t started = g_shadowTracing ? tq::probe::now() : 0;
-    if (g_shadowTracing) InterlockedIncrement(&g_insideDirectional);
+    const bool bracketDirectional = g_shadowTracing || g_shadowDeferActive;
+    if (bracketDirectional) {
+        if (g_shadowTracing) {
+            countShadowMeshContextPatchStatus();
+            flushPendingShadowMaterialTexture(false, false);
+            resetShadowRecordContexts();
+        }
+        InterlockedIncrement(&g_insideDirectional);
+    }
     const int result = g_renderDirectional(self, edx, canvas, camera, frustum,
                                             algorithm, surface, matrix);
-    if (g_shadowTracing) {
+    if (bracketDirectional) {
+        if (g_shadowTracing)
+            flushPendingShadowMaterialTexture(false, false);
         InterlockedDecrement(&g_insideDirectional);
+    }
+    if (g_shadowTracing) {
         tq::probe::engineCount(tq::probe::CounterEngineShadowRender);
         tq::probe::engineCount(tq::probe::CounterEngineShadowRenderUs,
                                tq::probe::microsecondsSince(started));
@@ -2266,7 +3643,193 @@ bool verifyResourceStateLayout(HMODULE engine) {
                          sizeof(kResourceInQueueBytes)));
     tq::hdr::log("Engine trace: Resource loaded-state/queue layout %s\r\n",
                  ok ? "verified" : "unavailable");
+    void* const fileName = resolve(engine, kResourceFileNameName,
+                                   kResourceFileNameRva);
+    g_resourceFileNameVerified = fileName
+        && tq::detour::matches(
+               engine, fileName,
+               signature(kResourceFileNameBytes,
+                         sizeof(kResourceFileNameBytes)));
+    g_resourceFileName = g_resourceFileNameVerified
+        ? (ResourceFileNameFn)fileName : nullptr;
+    tq::hdr::log("Engine trace: Resource filename accessor %s\r\n",
+                 g_resourceFileNameVerified ? "verified" : "unavailable");
     return ok;
+}
+
+// Resolve and verify every function the cold-alpha fix calls before any entry
+// detour can replace their first bytes. The enqueue export is also used by the
+// load trace, which installs earlier than the shadow call-site patch.
+bool prepareShadowAlphaDefer(HMODULE engine) {
+    g_resourceStateVerified = verifyResourceStateLayout(engine);
+    void* const style = resolve(engine, kMeshShadowStyleName,
+                                kMeshShadowStyleRva);
+    void* const texture = resolve(engine, kMeshGetTextureName,
+                                  kMeshGetTextureRva);
+    void* const loader = resolve(engine, kResourceLoaderAccessorName,
+                                 kResourceLoaderAccessorRva);
+    void* const enqueue = resolve(engine, kEnqueueName, kEnqueueRva);
+    void* const preload = resolve(engine, kPreloadResourceName,
+                                  kPreloadResourceRva);
+    void* const ensure = resolve(engine, kEnsureAvailableName,
+                                 kEnsureAvailableRva);
+    void* const materialOwner = resolve(
+        engine, kGraphicsMeshSetShaderParametersName,
+        kGraphicsMeshSetShaderParametersRva);
+    void* const instanceMaterialOwner = resolve(
+        engine, kGraphicsMeshInstanceSetShaderParametersName,
+        kGraphicsMeshInstanceSetShaderParametersRva);
+    void* const materialTexture = resolve(
+        engine, kGraphicsTextureGetTextureName,
+        kGraphicsTextureGetTextureRva);
+    void* const hasParameter = resolve(
+        engine, kShaderHasParameterName, kShaderHasParameterRva);
+    void* const helper = (BYTE*)engine + kBuildShadowRecordRva;
+    const bool ok = g_resourceStateVerified && style && texture && loader
+        && enqueue && preload && ensure && materialOwner
+        && instanceMaterialOwner && materialTexture && hasParameter
+        && tq::detour::matches(
+               engine, style,
+               signature(kMeshShadowStyleBytes,
+                         sizeof(kMeshShadowStyleBytes),
+                         kMeshShadowStyleRelocs, 1))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshShadowStyleAlphaRva,
+               signature(kMeshShadowStyleAlphaBytes,
+                         sizeof(kMeshShadowStyleAlphaBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshShadowStyleSkinnedRva,
+               signature(kMeshShadowStyleSkinnedBytes,
+                         sizeof(kMeshShadowStyleSkinnedBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshShadowStyleFoliageRva,
+               signature(kMeshShadowStyleFoliageBytes,
+                         sizeof(kMeshShadowStyleFoliageBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshShadowStyleStaticRva,
+               signature(kMeshShadowStyleStaticBytes,
+                         sizeof(kMeshShadowStyleStaticBytes)))
+        && tq::detour::matches(
+               engine, texture,
+               signature(kMeshGetTextureBytes, sizeof(kMeshGetTextureBytes),
+                         kMeshGetTextureRelocs, 2))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshGetTextureMeshRva,
+               signature(kMeshGetTextureMeshBytes,
+                         sizeof(kMeshGetTextureMeshBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kMeshGetTextureReturnRva,
+               signature(kMeshGetTextureReturnBytes,
+                         sizeof(kMeshGetTextureReturnBytes)))
+        && tq::detour::matches(
+               engine, loader,
+               signature(kResourceLoaderAccessorBytes,
+                         sizeof(kResourceLoaderAccessorBytes)))
+        && tq::detour::matches(
+               engine, enqueue,
+               signature(kEnqueueBytes, sizeof(kEnqueueBytes),
+                         kEnqueueRelocs, 1))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kPreloadEnqueueWindowRva,
+               signature(kPreloadEnqueueWindowBytes,
+                         sizeof(kPreloadEnqueueWindowBytes)))
+        && tq::detour::matches(
+               engine, helper,
+               signature(kBuildShadowRecordBytes,
+                         sizeof(kBuildShadowRecordBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowMaterialTextureWindowRva,
+               signature(kShadowMaterialTextureWindowBytes,
+                         sizeof(kShadowMaterialTextureWindowBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowMeshParameterFrameRva,
+               signature(kShadowMeshParameterFrameBytes,
+                         sizeof(kShadowMeshParameterFrameBytes),
+                         kShadowMeshParameterFrameRelocs, 1))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowMeshParameterEntryRva,
+               signature(kShadowMeshParameterEntryBytes,
+                         sizeof(kShadowMeshParameterEntryBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowMeshParameterContextRva,
+               signature(kShadowMeshParameterContextBytes,
+                         sizeof(kShadowMeshParameterContextBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowMeshParameterCallRva,
+               signature(kShadowMeshParameterCallBytes,
+                         sizeof(kShadowMeshParameterCallBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowInstanceBumpEnsureWindowRva,
+               signature(kShadowInstanceBumpEnsureWindowBytes,
+                         sizeof(kShadowInstanceBumpEnsureWindowBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowInstanceBumpSetterWindowRva,
+               signature(kShadowInstanceBumpSetterWindowBytes,
+                         sizeof(kShadowInstanceBumpSetterWindowBytes),
+                         kShadowInstanceBumpSetterWindowRelocs, 1))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kBumpTextureNameInitWindowRva,
+               signature(kBumpTextureNameInitWindowBytes,
+                         sizeof(kBumpTextureNameInitWindowBytes),
+                         kBumpTextureNameInitWindowRelocs, 3))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kSetTextureParameterMissingWindowRva,
+               signature(kSetTextureParameterMissingWindowBytes,
+                         sizeof(kSetTextureParameterMissingWindowBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kSetTextureParameterMissingReturnRva,
+               signature(kSetTextureParameterMissingReturnBytes,
+                         sizeof(kSetTextureParameterMissingReturnBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowInstanceBaseEnsureWindowRva,
+               signature(kShadowInstanceBaseEnsureWindowBytes,
+                         sizeof(kShadowInstanceBaseEnsureWindowBytes)))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kShadowInstanceBaseSetterWindowRva,
+               signature(kShadowInstanceBaseSetterWindowBytes,
+                         sizeof(kShadowInstanceBaseSetterWindowBytes),
+                         kShadowInstanceBaseSetterWindowRelocs, 1))
+        && tq::detour::matches(
+               engine, (BYTE*)engine + kBaseTextureNameInitWindowRva,
+               signature(kBaseTextureNameInitWindowBytes,
+                         sizeof(kBaseTextureNameInitWindowBytes),
+                         kBaseTextureNameInitWindowRelocs, 3))
+        && tq::detour::matches(
+               engine, hasParameter,
+               signature(kShaderHasParameterBytes,
+                         sizeof(kShaderHasParameterBytes)));
+    g_meshShadowStyle = ok ? (MeshShadowStyleFn)style : nullptr;
+    g_meshGetTexture = ok ? (MeshGetTextureFn)texture : nullptr;
+    g_resourceLoaderAccessor = ok ? (ResourceLoaderAccessorFn)loader : nullptr;
+    g_shadowEnqueue = ok ? (EnqueueFn)enqueue : nullptr;
+    g_ensureAvailable = ok ? (EnsureAvailableFn)ensure : nullptr;
+    g_buildShadowRecord = ok ? (BuildShadowRecordFn)helper : nullptr;
+    g_graphicsTextureGetTexture = ok
+        ? (GraphicsTextureGetTextureFn)materialTexture : nullptr;
+    g_graphicsMeshSetShaderParameters = ok
+        ? (GraphicsMeshSetShaderParametersFn)materialOwner : nullptr;
+    g_shaderHasParameterVerified = ok;
+    g_shaderHasParameter = ok ? (ShaderHasParameterFn)hasParameter : nullptr;
+    tq::hdr::log("Engine trace: cold alpha-shadow dependencies %s\r\n",
+                 ok ? "verified" : "unavailable");
+    return ok;
+}
+
+bool verifyShadowTextureDirectCallers(HMODULE engine, const void* getter) {
+    if (!engine || !getter) return false;
+    for (unsigned i = 0;
+         i < sizeof(kShadowTextureDirectCallerRvas)
+                    / sizeof(*kShadowTextureDirectCallerRvas);
+         ++i) {
+        const BYTE* const call =
+            (const BYTE*)engine + kShadowTextureDirectCallerRvas[i];
+        if (!tq::detour::readable(call, 5) || call[0] != 0xe8)
+            return false;
+        int32_t displacement = 0;
+        memcpy(&displacement, call + 1, sizeof(displacement));
+        if (call + 5 + displacement != getter) return false;
+    }
+    return true;
 }
 
 // Every attach here hands the detour the global the hook calls through, so the
@@ -2795,6 +4358,216 @@ bool installShadow(HMODULE engine, bool trace) {
         g_renderDirectional = nullptr;
     }
     note("GraphicsShadowMapDx11::RenderDirectional", ok);
+    if (ok && g_shadowDeferColdAlpha) {
+        const bool recordOk = g_buildShadowRecord
+            && tq::detour::patchCall(
+                g_shadowRecordPatch, engine,
+                (BYTE*)engine + kShadowRecordCallWindowRva,
+                signature(kShadowRecordCallWindowBytes,
+                          sizeof(kShadowRecordCallWindowBytes)),
+                kShadowRecordCallOffset, (const void*)g_buildShadowRecord,
+                (const void*)&hookBuildShadowRecord);
+        const bool contextOk = recordOk && g_graphicsMeshSetShaderParameters
+            && tq::detour::patchCall(
+                g_shadowMeshParameterPatch, engine,
+                (BYTE*)engine + kShadowMeshParameterCallRva,
+                signature(kShadowMeshParameterCallBytes,
+                          sizeof(kShadowMeshParameterCallBytes)),
+                kShadowMeshParameterCallOffset,
+                (const void*)g_graphicsMeshSetShaderParameters,
+                (const void*)&hookShadowMeshSetShaderParameters);
+        const bool filterOk = contextOk && g_graphicsTextureGetTexture
+            && tq::detour::patchCall(
+                g_shadowMaterialTexturePatch, engine,
+                (BYTE*)engine + kShadowMaterialTextureWindowRva,
+                signature(kShadowMaterialTextureWindowBytes,
+                          sizeof(kShadowMaterialTextureWindowBytes)),
+                kShadowMaterialTextureCallOffset,
+                (const void*)g_graphicsTextureGetTexture,
+                (const void*)&hookShadowMaterialTexture);
+        const bool bumpOk = filterOk && g_ensureAvailable
+            && tq::detour::patchCall(
+                g_shadowInstanceBumpEnsurePatch, engine,
+                (BYTE*)engine + kShadowInstanceBumpEnsureWindowRva,
+                signature(kShadowInstanceBumpEnsureWindowBytes,
+                          sizeof(kShadowInstanceBumpEnsureWindowBytes)),
+                kShadowInstanceBumpEnsureCallOffset,
+                (const void*)g_ensureAvailable,
+                (const void*)&hookShadowInstanceBumpEnsure);
+        const bool deferOk = recordOk && contextOk && filterOk && bumpOk;
+        if (!deferOk) {
+            tq::detour::restoreCall(g_shadowInstanceBumpEnsurePatch);
+            tq::detour::restoreCall(g_shadowMaterialTexturePatch);
+            tq::detour::restoreCall(g_shadowMeshParameterPatch);
+            tq::detour::restoreCall(g_shadowRecordPatch);
+            g_buildShadowRecord = nullptr;
+            g_meshShadowStyle = nullptr;
+            g_meshGetTexture = nullptr;
+            g_resourceLoaderAccessor = nullptr;
+            g_shadowEnqueue = nullptr;
+            g_graphicsTextureGetTexture = nullptr;
+            g_graphicsMeshSetShaderParameters = nullptr;
+            g_shaderHasParameter = nullptr;
+            g_shaderHasParameterVerified = false;
+        }
+        const bool contextActive = deferOk && contextOk;
+        g_shadowMeshParameterHooked = contextActive;
+        g_shadowMeshContextPatchStatus = contextActive
+            ? ShadowMeshContextPatchActive
+            : contextOk ? ShadowMeshContextPatchReverted
+                        : ShadowMeshContextPatchCallFailed;
+        g_shadowMaterialTextureHooked = deferOk && filterOk;
+        g_shadowDeferActive = deferOk;
+        note("GraphicsMeshInstance base-override context", contextActive);
+        note("opaque texture-free / cold alpha shadow mitigation", deferOk);
+        note("unused directional bump-texture omission", deferOk && bumpOk);
+    }
+    if (ok && trace && g_resourceStateVerified) {
+        void* const owner = resolve(engine, kShadowMeshPassCountName,
+                                    kShadowMeshPassCountRva);
+        void* const ensure = resolve(engine, kEnsureAvailableName,
+                                     kEnsureAvailableRva);
+        g_ensureAvailable = (EnsureAvailableFn)ensure;
+        const bool meshOk = owner && ensure && tq::detour::patchCall(
+            g_shadowMeshEnsurePatch, engine, owner,
+            signature(kShadowMeshPassCountBytes,
+                      sizeof(kShadowMeshPassCountBytes)),
+            kShadowMeshEnsureCallOffset, ensure,
+            (const void*)&hookShadowMeshEnsure);
+        // The fix's bump wrapper also forwards through this exact export.
+        // A diagnostic-boundary mismatch must disable only that diagnostic,
+        // never remove the forwarding target under an installed fix.
+        if (!meshOk && !g_shadowDeferActive) g_ensureAvailable = nullptr;
+        note("GraphicsMeshInstance cold shadow-mesh boundary", meshOk);
+
+        void* const materialOwner = resolve(
+            engine, kGraphicsMeshSetShaderParametersName,
+            kGraphicsMeshSetShaderParametersRva);
+        void* const instanceMaterialOwner = resolve(
+            engine, kGraphicsMeshInstanceSetShaderParametersName,
+            kGraphicsMeshInstanceSetShaderParametersRva);
+        void* const getTexture = resolve(
+            engine, kGraphicsTextureGetTextureName,
+            kGraphicsTextureGetTextureRva);
+        void* const hasParameter = resolve(
+            engine, kShaderHasParameterName, kShaderHasParameterRva);
+        void* const nameHash = resolve(
+            engine, kNameHashName, kNameHashRva);
+        if (!g_shaderHasParameterVerified) {
+            g_shaderHasParameterVerified = hasParameter
+                && tq::detour::matches(
+                    engine, hasParameter,
+                    signature(kShaderHasParameterBytes,
+                              sizeof(kShaderHasParameterBytes)));
+            g_shaderHasParameter = g_shaderHasParameterVerified
+                ? (ShaderHasParameterFn)hasParameter : nullptr;
+        }
+        g_nameHashLayoutVerified = nameHash
+            && tq::detour::matches(
+                engine, nameHash,
+                signature(kNameHashBytes, sizeof(kNameHashBytes)));
+        tq::hdr::log("Engine trace: material Name hash layout %s\r\n",
+                     g_nameHashLayoutVerified ? "verified" : "unavailable");
+        if (!g_graphicsTextureGetTexture)
+            g_graphicsTextureGetTexture =
+                (GraphicsTextureGetTextureFn)getTexture;
+        g_shadowTextureCallerSitesVerified =
+            verifyShadowTextureDirectCallers(engine, getTexture);
+        note("direct GraphicsTexture caller attribution",
+             g_shadowTextureCallerSitesVerified);
+
+        const bool meshContextAlready = g_shadowMeshParameterHooked;
+        const bool meshContextDependencies = meshContextAlready
+            || (instanceMaterialOwner
+                && materialOwner && g_meshShadowStyle && g_meshGetTexture);
+        const bool meshContextFrame = meshContextAlready
+            || (meshContextDependencies
+            && tq::detour::matches(
+                engine, (BYTE*)engine + kShadowMeshParameterFrameRva,
+                signature(kShadowMeshParameterFrameBytes,
+                          sizeof(kShadowMeshParameterFrameBytes),
+                          kShadowMeshParameterFrameRelocs, 1)));
+        const bool meshContextEntry = meshContextAlready
+            || (meshContextFrame
+            && tq::detour::matches(
+                engine, (BYTE*)engine + kShadowMeshParameterEntryRva,
+                signature(kShadowMeshParameterEntryBytes,
+                          sizeof(kShadowMeshParameterEntryBytes))));
+        const bool meshContextContext = meshContextAlready
+            || (meshContextEntry
+            && tq::detour::matches(
+                engine, (BYTE*)engine + kShadowMeshParameterContextRva,
+                signature(kShadowMeshParameterContextBytes,
+                          sizeof(kShadowMeshParameterContextBytes))));
+        const bool meshContextOk = meshContextAlready
+            || (meshContextContext && tq::detour::patchCall(
+                g_shadowMeshParameterPatch, engine,
+                (BYTE*)engine + kShadowMeshParameterCallRva,
+                signature(kShadowMeshParameterCallBytes,
+                          sizeof(kShadowMeshParameterCallBytes)),
+                kShadowMeshParameterCallOffset, materialOwner,
+                (const void*)&hookShadowMeshSetShaderParameters));
+        g_shadowMeshContextPatchStatus = !meshContextDependencies
+            ? ShadowMeshContextPatchDependencyMissing
+            : !meshContextFrame ? ShadowMeshContextPatchFrameMismatch
+            : !meshContextEntry ? ShadowMeshContextPatchEntryMismatch
+            : !meshContextContext ? ShadowMeshContextPatchContextMismatch
+            : !meshContextOk ? ShadowMeshContextPatchCallFailed
+            : ShadowMeshContextPatchActive;
+        g_shadowMeshParameterHooked = meshContextOk;
+        g_graphicsMeshSetShaderParameters = meshContextOk
+            ? (GraphicsMeshSetShaderParametersFn)materialOwner : nullptr;
+        if (meshContextAlready)
+            tq::hdr::log("Engine trace: GraphicsMeshInstance shadow material"
+                         " context installed by fix\r\n");
+        else
+            note("GraphicsMeshInstance shadow material context", meshContextOk);
+
+        g_setTextureParameter = (SetTextureParameterFn)(
+            (BYTE*)engine + kSetTextureParameterRva);
+        const bool setterOk = materialOwner && getTexture
+            && g_shaderHasParameterVerified
+            && tq::detour::patchCall(
+                g_shadowTextureParameterPatch, engine,
+                (BYTE*)engine + kShadowTextureParameterWindowRva,
+                signature(kShadowTextureParameterWindowBytes,
+                          sizeof(kShadowTextureParameterWindowBytes)),
+                kShadowTextureParameterCallOffset,
+                (const void*)g_setTextureParameter,
+                (const void*)&hookShadowTextureParameter);
+        g_shadowTextureParameterHooked = setterOk;
+        const bool getterOk = g_shadowMaterialTextureHooked
+            || (setterOk && tq::detour::patchCall(
+                g_shadowMaterialTexturePatch, engine,
+                (BYTE*)engine + kShadowMaterialTextureWindowRva,
+                signature(kShadowMaterialTextureWindowBytes,
+                          sizeof(kShadowMaterialTextureWindowBytes)),
+                kShadowMaterialTextureCallOffset, getTexture,
+                (const void*)&hookShadowMaterialTexture));
+        g_shadowMaterialTextureHooked = getterOk;
+        const bool materialOk = setterOk && getterOk;
+        if (!materialOk) {
+            tq::detour::restoreCall(g_shadowTextureParameterPatch);
+            g_shadowTextureParameterHooked = false;
+            g_setTextureParameter = nullptr;
+            if (!g_shadowDeferActive) {
+                tq::detour::restoreCall(g_shadowMeshParameterPatch);
+                g_shadowMeshParameterHooked = false;
+                g_graphicsMeshSetShaderParameters = nullptr;
+                if (meshContextOk)
+                    g_shadowMeshContextPatchStatus =
+                        ShadowMeshContextPatchReverted;
+            }
+            if (!g_shadowDeferActive) {
+                tq::detour::restoreCall(g_shadowMaterialTexturePatch);
+                g_shadowMaterialTextureHooked = false;
+                g_graphicsTextureGetTexture = nullptr;
+                g_shaderHasParameter = nullptr;
+                g_shaderHasParameterVerified = false;
+            }
+        }
+        note("cold shadow material-texture use", materialOk);
+    }
     return ok;
 }
 
@@ -2937,6 +4710,13 @@ void readOptions(const wchar_t* iniPath) {
     g_shadowTransitionReuse = iniPath && iniPath[0]
         && GetPrivateProfileIntW(L"performance", L"shadow_transition_reuse", 0,
                                  iniPath) != 0;
+    // Omits only alpha-tested GraphicsMeshInstance shadow records while their
+    // base texture is in loaded state 0 or 1, explicitly queueing state 0.
+    // This is a behaviour fix, not an instrument, so it also works with the
+    // performance probe off and defaults to leaving the engine untouched.
+    g_shadowDeferColdAlpha = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance", L"shadow_defer_cold_alpha", 0,
+                                 iniPath) != 0;
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -2949,7 +4729,8 @@ bool install(HMODULE engine) {
     // opens them:
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
-    // archive_cache_mb, async_level_load and shadow_transition_reuse add
+    // archive_cache_mb, async_level_load, shadow_transition_reuse and
+    // shadow_defer_cold_alpha add
     // independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
@@ -2960,9 +4741,11 @@ bool install(HMODULE engine) {
     const bool async = g_asyncLevelLoad;
     const bool pumpFilter = g_pumpTimerMinMs != 0;
     const bool shadowReuse = g_shadowTransitionReuse;
+    const bool shadowDefer = g_shadowDeferColdAlpha;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
     if (!g_tracing && !cache && !async && !pumpFilter && !shadowReuse
+        && !shadowDefer
         && !marker)
         return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
@@ -2989,6 +4772,8 @@ bool install(HMODULE engine) {
                                           sizeof(DWORD)) ? mainThread : nullptr;
 
     g_installedHooks = 0;
+    const bool shadowDeferReady = shadowDefer
+        && prepareShadowAlphaDefer(engine);
     if (wants(kGroupLoads)) installLoads(engine);
     if (wants(kGroupArchive) || cache)
         installArchive(engine, wants(kGroupArchive), cache);
@@ -3005,15 +4790,18 @@ bool install(HMODULE engine) {
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
     const bool traceShadow = wants(kGroupShadow);
-    if (traceShadow || shadowReuse) installShadow(engine, traceShadow);
+    if (traceShadow || shadowReuse || shadowDeferReady)
+        installShadow(engine, traceShadow);
     if (async) installAsyncLoad(engine);
 
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
                  " pump timer floor %u ms, shadow transition reuse %s,"
+                 " cold alpha-shadow defer %s,"
                  " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
                  g_pumpTimerMinMs, shadowReuse ? "requested" : "off",
+                 shadowDefer ? "requested" : "off",
                  g_installedHooks,
                  (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
@@ -3038,6 +4826,40 @@ void shutdown() {
         tq::detour::restoreCall(g_forceLoadPatches[i]);
     g_backgroundLoadLevel = nullptr;
     g_regionLoadLevel = nullptr;
+    tq::detour::restoreCall(g_shadowMeshEnsurePatch);
+    tq::detour::restoreCall(g_shadowInstanceBumpEnsurePatch);
+    g_ensureAvailable = nullptr;
+    tq::detour::restoreCall(g_shadowMaterialTexturePatch);
+    tq::detour::restoreCall(g_shadowTextureParameterPatch);
+    tq::detour::restoreCall(g_shadowMeshParameterPatch);
+    g_graphicsTextureGetTexture = nullptr;
+    g_graphicsMeshSetShaderParameters = nullptr;
+    g_shadowMaterialTextureHooked = false;
+    g_setTextureParameter = nullptr;
+    g_shadowTextureParameterHooked = false;
+    g_shadowMeshParameterHooked = false;
+    g_shadowMeshContextPatchStatus =
+        ShadowMeshContextPatchDependencyMissing;
+    g_shadowTextureCallerSitesVerified = false;
+    g_insideShadowMaterialTexture = false;
+    g_shaderHasParameter = nullptr;
+    g_shaderHasParameterVerified = false;
+    g_nameHashLayoutVerified = false;
+    g_shadowMaterialTexturePending = false;
+    g_shadowMaterialTexturePendingUs = 0;
+    g_shadowMaterialPendingNameHash = 0;
+    g_shadowMaterialReports = 0;
+    g_shadowTextureChainReports = 0;
+    g_shadowMeshParameterContext = {};
+    g_shadowMaterialPendingContext = {};
+    g_shadowMaterialPendingTexture = nullptr;
+    tq::detour::restoreCall(g_shadowRecordPatch);
+    g_buildShadowRecord = nullptr;
+    g_meshShadowStyle = nullptr;
+    g_meshGetTexture = nullptr;
+    g_resourceLoaderAccessor = nullptr;
+    g_shadowEnqueue = nullptr;
+    g_shadowDeferActive = false;
     tq::detour::restoreCall(g_shadowDirectionalPatch);
     g_renderDirectional = nullptr;
     g_lastShadowRegion = nullptr;
@@ -3115,6 +4937,8 @@ void shutdown() {
     tq::detour::detach(g_loadResourceDetour);
     g_loadResource = nullptr;
     g_resourceStateVerified = false;
+    g_resourceFileName = nullptr;
+    g_resourceFileNameVerified = false;
     tq::detour::detach(g_guaranteedDetour);
     g_guaranteedGetLevel = nullptr;
     tq::detour::detach(g_loadLevelDetour);
@@ -3138,6 +4962,17 @@ void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
 void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
 bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
 bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
+bool shadowDeferColdAlphaForTest() { return g_shadowDeferColdAlpha; }
+bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state) {
+    return shouldDeferShadowAlpha(style, state);
+}
+void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
+                                     bool failed) {
+    const bool tracing = g_shadowTracing;
+    g_shadowTracing = true;
+    countDeferredShadowAlpha(state, enqueued, failed);
+    g_shadowTracing = tracing;
+}
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix) {
     g_lastShadowRegion = region;
     rememberShadow(surface, matrix, 1);
@@ -3151,6 +4986,83 @@ bool reuseShadowForTest(void* region, void* surface, void* matrix) {
 void countShadowResourceStateForTest(unsigned state, bool inQueue,
                                      unsigned elapsedUs) {
     countShadowResourceState(state, inQueue, elapsedUs);
+}
+void countShadowResourceTypeForTest(const char* name, unsigned elapsedUs) {
+    countShadowResourceType(shadowResourceType(name), elapsedUs);
+}
+void countShadowMaterialTextureForTest(bool known, bool used,
+                                       unsigned elapsedUs) {
+    countShadowMaterialTexture(known, used, elapsedUs);
+}
+void countShadowMaterialUsedContextForTest(bool callKnown, bool context,
+                                           bool styleKnown,
+                                           unsigned match, unsigned style,
+                                           bool baseKnown, bool baseMatch, int pass,
+                                           bool outerInstanceSite,
+                                           unsigned elapsedUs) {
+    ShadowMeshParameterContext value = {};
+    value.active = context;
+    value.instance = callKnown ? (void*)0x2468 : nullptr;
+    value.styleKnown = styleKnown;
+    value.match = match < 4
+        ? (ShadowContextMatch)match : ShadowContextInstanceMissing;
+    value.style = style;
+    value.pass = pass;
+    value.baseKnown = baseKnown;
+    value.outerInstanceSite = outerInstanceSite;
+    const void* const loaded = (const void*)0x1234;
+    value.baseTexture = baseMatch ? loaded : (const void*)0x5678;
+    countShadowMaterialUsedContext(value, loaded, elapsedUs);
+}
+void resetShadowRecordContextsForTest() {
+    resetShadowRecordContexts();
+}
+void rememberShadowRecordContextForTest(void* instance, int pass,
+                                        unsigned style, bool styleKnown,
+                                        bool baseKnown,
+                                        const void* baseTexture) {
+    rememberShadowRecordContext(
+        instance, pass, style, styleKnown, baseKnown, baseTexture);
+}
+bool findShadowRecordContextForTest(void* instance, int pass,
+                                    unsigned* style, bool* styleKnown,
+                                    bool* baseKnown,
+                                    const void** baseTexture) {
+    ShadowMeshParameterContext value = {};
+    if (!findShadowRecordContext(instance, pass, &value)) return false;
+    if (style) *style = value.style;
+    if (styleKnown) *styleKnown = value.styleKnown;
+    if (baseKnown) *baseKnown = value.baseKnown;
+    if (baseTexture) *baseTexture = value.baseTexture;
+    return true;
+}
+unsigned explainShadowRecordMissForTest(void* instance, int pass) {
+    ShadowMeshParameterContext value = {};
+    value.instance = instance;
+    value.pass = pass;
+    explainShadowRecordMiss(&value);
+    return (unsigned)value.match;
+}
+void countShadowMeshContextPatchStatusForTest(unsigned status) {
+    const ShadowMeshContextPatchStatus prior = g_shadowMeshContextPatchStatus;
+    g_shadowMeshContextPatchStatus = status < ShadowMeshContextPatchStatusCount
+        ? (ShadowMeshContextPatchStatus)status
+        : ShadowMeshContextPatchDependencyMissing;
+    countShadowMeshContextPatchStatus();
+    g_shadowMeshContextPatchStatus = prior;
+}
+void countShadowTextureCallerForTest(unsigned caller, unsigned elapsedUs) {
+    countShadowTextureCaller((ShadowTextureCaller)caller, elapsedUs);
+}
+unsigned shadowTextureCallerFromWordsForTest(const void* const* words,
+                                             unsigned count,
+                                             const void* engineBase) {
+    const BYTE* const prior = g_engineBase;
+    g_engineBase = (const BYTE*)engineBase;
+    const ShadowTextureCaller result = shadowTextureCallerFromWords(
+        (const uintptr_t*)words, count);
+    g_engineBase = prior;
+    return (unsigned)result;
 }
 void slowLoadResetForTest(const void* base) {
     g_engineBase = (const BYTE*)base;

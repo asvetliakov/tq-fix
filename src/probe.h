@@ -248,6 +248,151 @@ enum Counter {
     CounterEngineShadowResStateOtherUs,
     CounterEngineShadowResInQueue,
     CounterEngineShadowResInQueueUs,
+    // Resource file-name classes for the same nested LoadResource calls.
+    // These partition by the engine's own .msh/.ssh/.tex suffixes. The
+    // mesh-cold pair is narrower: the cold Resource reached at
+    // GraphicsMeshInstance::GetNumShadowRenderPasses, before a caster enters
+    // the directional-shadow draw list. Its duration overlaps the mesh load.
+    CounterEngineShadowResMesh,
+    CounterEngineShadowResMeshUs,
+    CounterEngineShadowResShader,
+    CounterEngineShadowResShaderUs,
+    CounterEngineShadowResTexture,
+    CounterEngineShadowResTextureUs,
+    CounterEngineShadowResTypeOther,
+    CounterEngineShadowResTypeOtherUs,
+    // Direct GraphicsTexture::GetTexture caller partition for the texture
+    // loads above. The material site is recognized by a narrow dynamic
+    // bracket because run 51 already retargets that E8; the other nine direct
+    // Engine.dll call sites are recognized from their verified return RVAs.
+    // Unresolved includes indirect calls. Each pair overlaps, and exactly
+    // partitions, engine_shadow_res_texture/count and duration.
+    CounterEngineShadowTexFromMeshMaterial,
+    CounterEngineShadowTexFromMeshMaterialUs,
+    CounterEngineShadowTexFromBillboard,
+    CounterEngineShadowTexFromBillboardUs,
+    CounterEngineShadowTexFromForwardRenderer,
+    CounterEngineShadowTexFromForwardRendererUs,
+    CounterEngineShadowTexFromLineEffect,
+    CounterEngineShadowTexFromLineEffectUs,
+    CounterEngineShadowTexFromPieOmatic,
+    CounterEngineShadowTexFromPieOmaticUs,
+    CounterEngineShadowTexFromWater,
+    CounterEngineShadowTexFromWaterUs,
+    CounterEngineShadowTexFromStateParameter,
+    CounterEngineShadowTexFromStateParameterUs,
+    CounterEngineShadowTexFromFun1155b0,
+    CounterEngineShadowTexFromFun1155b0Us,
+    CounterEngineShadowTexFromFun12fa30,
+    CounterEngineShadowTexFromFun12fa30Us,
+    CounterEngineShadowTexFromFun23e1e0,
+    CounterEngineShadowTexFromFun23e1e0Us,
+    CounterEngineShadowTexFromUnresolved,
+    CounterEngineShadowTexFromUnresolvedUs,
+    CounterEngineShadowMeshCold,
+    CounterEngineShadowMeshColdUs,
+    // Cold material textures pulled by GraphicsMesh::SetShaderParameters
+    // while rendering the directional map. `used` means the active shadow
+    // shader reports a parameter with the material entry's Name; `unused`
+    // means the game loaded the texture before its setter discovered that the
+    // shadow shader has no such parameter. `unknown` preserves the partition
+    // if the verified shader query is unavailable. These overlap the texture
+    // resource-load class above.
+    CounterEngineShadowMaterialTex,
+    CounterEngineShadowMaterialTexUs,
+    CounterEngineShadowMaterialTexUsed,
+    CounterEngineShadowMaterialTexUsedUs,
+    CounterEngineShadowMaterialTexUnused,
+    CounterEngineShadowMaterialTexUnusedUs,
+    CounterEngineShadowMaterialTexUnknown,
+    CounterEngineShadowMaterialTexUnknownUs,
+    // A second exact partition of the cold shader-used material population.
+    // The style buckets are GraphicsMeshInstance's verified return values;
+    // base_match compares the loaded Resource pointer with the one inspected
+    // by the record gate; base_unknown is expected for opaque styles because
+    // their base is not fetched merely to instrument them. pass0/pass_other
+    // records the original pass supplied to GraphicsMeshInstance. Context
+    // unknown preserves all three partitions when no accepted record matches.
+    CounterEngineShadowMaterialUsedStyle0,
+    CounterEngineShadowMaterialUsedStyle0Us,
+    CounterEngineShadowMaterialUsedStyle1,
+    CounterEngineShadowMaterialUsedStyle1Us,
+    CounterEngineShadowMaterialUsedStyle2,
+    CounterEngineShadowMaterialUsedStyle2Us,
+    CounterEngineShadowMaterialUsedStyle3,
+    CounterEngineShadowMaterialUsedStyle3Us,
+    CounterEngineShadowMaterialUsedStyle4,
+    CounterEngineShadowMaterialUsedStyle4Us,
+    CounterEngineShadowMaterialUsedStyle5,
+    CounterEngineShadowMaterialUsedStyle5Us,
+    CounterEngineShadowMaterialUsedContextUnknown,
+    CounterEngineShadowMaterialUsedContextUnknownUs,
+    CounterEngineShadowMaterialUsedBaseMatch,
+    CounterEngineShadowMaterialUsedBaseMatchUs,
+    CounterEngineShadowMaterialUsedBaseOther,
+    CounterEngineShadowMaterialUsedBaseOtherUs,
+    CounterEngineShadowMaterialUsedBaseUnknown,
+    CounterEngineShadowMaterialUsedBaseUnknownUs,
+    CounterEngineShadowMaterialUsedPass0,
+    CounterEngineShadowMaterialUsedPass0Us,
+    CounterEngineShadowMaterialUsedPassOther,
+    CounterEngineShadowMaterialUsedPassOtherUs,
+    CounterEngineShadowMaterialUsedPassUnknown,
+    CounterEngineShadowMaterialUsedPassUnknownUs,
+    // Overlapping explanation of how the record-table lookup resolved. These
+    // partition cold shader-used material textures independently of the
+    // style/base/pass dimensions above.
+    CounterEngineShadowMaterialLookupExact,
+    CounterEngineShadowMaterialLookupExactUs,
+    CounterEngineShadowMaterialLookupClassOther,
+    CounterEngineShadowMaterialLookupClassOtherUs,
+    CounterEngineShadowMaterialLookupPassMismatch,
+    CounterEngineShadowMaterialLookupPassMismatchUs,
+    CounterEngineShadowMaterialLookupInstanceMissing,
+    CounterEngineShadowMaterialLookupInstanceMissingUs,
+    CounterEngineShadowContextTableOverflow,
+    // Exact caller of GraphicsMesh::SetShaderParameters for a cold used
+    // material texture. The expected site is the one inside the verified
+    // base GraphicsMeshInstance method; other includes indirect/other paths.
+    CounterEngineShadowMaterialOuterInstanceSite,
+    CounterEngineShadowMaterialOuterInstanceSiteUs,
+    CounterEngineShadowMaterialOuterOtherSite,
+    CounterEngineShadowMaterialOuterOtherSiteUs,
+    // One of these is emitted for each traced directional build. Together
+    // they expose why the optional instance/pass call patch is unavailable,
+    // including the case where a later material hook forced it to roll back.
+    CounterEngineShadowContextPatchActive,
+    CounterEngineShadowContextPatchDependencyMissing,
+    CounterEngineShadowContextPatchFrameMismatch,
+    CounterEngineShadowContextPatchEntryMismatch,
+    CounterEngineShadowContextPatchContextMismatch,
+    CounterEngineShadowContextPatchCallFailed,
+    CounterEngineShadowContextPatchReverted,
+    // With shadow_defer_cold_alpha enabled, a missing shader parameter is
+    // checked before GetTexture. `skipped` is every avoided getter and
+    // `skipped_cold` is the state-0 subset that would have loaded now.
+    CounterEngineShadowMaterialTexSkipped,
+    CounterEngineShadowMaterialTexSkippedCold,
+    // The equivalent late-use bug in GraphicsMeshInstance's optional
+    // bumpTexture override. Stock code ensures the Resource before its setter
+    // discovers that the directional-shadow shader has no such parameter.
+    CounterEngineShadowBumpTexSkipped,
+    CounterEngineShadowBumpTexSkippedCold,
+    // A GraphicsMeshInstance baseTexture override is bound after its generic
+    // mesh material. A different generic baseTexture has no surviving value;
+    // these count directional-only omissions and their cold subset.
+    CounterEngineShadowBaseOverrideSkipped,
+    CounterEngineShadowBaseOverrideSkippedCold,
+    // [performance] shadow_defer_cold_alpha. These describe omitted
+    // alpha-tested caster/pass records by the base texture's pre-call state.
+    // State 0 is explicitly queued unless it was already in the queue; state
+    // 1 is already loading. No pointer survives the call, and state 2 is
+    // rendered normally, so the counts also show how quickly casters return.
+    CounterEngineShadowAlphaOmitted,
+    CounterEngineShadowAlphaState0,
+    CounterEngineShadowAlphaState1,
+    CounterEngineShadowAlphaEnqueued,
+    CounterEngineShadowAlphaEnqueueFailed,
     CounterEngineRegionUnload,
     CounterEngineRegionUnloadUs,
     // Archive::ReadFromFile calls and the bytes they asked for. Counted, not

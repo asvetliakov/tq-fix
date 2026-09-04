@@ -258,6 +258,44 @@ LoadMesh@GraphicsEngine
 GraphicsEngine::LoadShader2
 LoadShader2@GraphicsEngine
 GraphicsTexture::Initialize
+
+# ---------------------------------------------------------------------------
+# Directional-shadow caster discovery and draw submission.  These seeds keep
+# the exact boundary that can demand a cold mesh or shader in the reproducible
+# audit rather than relying on an inferred indirect-call graph.
+# ---------------------------------------------------------------------------
+GraphicsShadowMapDx11::RenderDirectional
+RenderDirectional@GraphicsShadowMapDx11
+GraphicsShadowMapDx11::AddSurface
+AddSurface@GraphicsShadowMapDx11
+GraphicsShadowMapRenderer::Render
+Render@GraphicsShadowMapRenderer
+GraphicsSceneRenderer::AddRenderable
+AddRenderable@GraphicsSceneRenderer
+Actor::AddToScene
+AddToScene@Actor
+Entity::AddToScene
+AddToScene@Entity
+GraphicsMeshInstance::GetNumShadowRenderPasses
+GetNumShadowRenderPasses@GraphicsMeshInstance
+GraphicsMeshInstance::GetNumRenderPasses
+GetNumRenderPasses@GraphicsMeshInstance
+GraphicsMeshInstance::GetShader2
+GetShader2@GraphicsMeshInstance
+GraphicsMeshInstance::RenderPass
+RenderPass@GraphicsMeshInstance
+GraphicsMeshInstance::SetShaderParameters
+SetShaderParameters@GraphicsMeshInstance
+GraphicsMesh::GetMeshRenderInfo
+GetMeshRenderInfo@GraphicsMesh
+GraphicsMesh::GetIndexBuffer
+GetIndexBuffer@GraphicsMesh
+GraphicsMesh::GetVertexBuffer
+GetVertexBuffer@GraphicsMesh
+FUN_10033770
+FUN_1018c520
+FUN_1018c650
+FUN_1018c870
 Initialize@GraphicsTexture
 GetIsReadyToUse
 GetThreadInfos

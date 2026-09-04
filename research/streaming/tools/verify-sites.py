@@ -54,6 +54,13 @@ def table(name):
     return [int(t, 0) for t in re.findall(r"0x[0-9a-fA-F]+|(?<![\w.])\d+", body)]
 
 
+def dword_table(name):
+    m = re.search(r"const DWORD %s\[\] = \{(.*?)\};" % name, src, re.S)
+    body = re.sub(r"//[^\n]*", "", m.group(1))
+    return [int(t, 0) for t in re.findall(
+        r"0x[0-9a-fA-F]+|(?<![\w.])\d+", body)]
+
+
 NAMED_RVA = {"kEnterCriticalSectionSlotRva": 0x2ac17c,
              "kLeaveCriticalSectionSlotRva": 0x2ac178,
              "kWaitForSingleObjectSlotRva": 0x2ac188,
@@ -67,7 +74,9 @@ def relocs(name):
     m = re.search(r"const Relocation %s\[\] = \{(.*?)\};" % name, src, re.S)
     out = []
     for off, r in re.findall(r"\{\s*(\w+)\s*,\s*(\w+)\s*\}", m.group(1)):
-        out.append((int(off, 0), NAMED_RVA[r] if r in NAMED_RVA else int(r, 0)))
+        target = (NAMED_RVA[r] if r in NAMED_RVA else
+                  int(r, 0) if re.match(r"^(?:0x|\d)", r) else const(r))
+        out.append((int(off, 0), target))
     return out
 
 
@@ -421,7 +430,7 @@ def check_directional_shadow(engine):
 
 
 def check_resource_lifecycle(engine):
-    """Prove the two Resource fields sampled before a shadow-forced load."""
+    """Prove Resource fields and the filename used for the type partition."""
     print("\nShadow-resource lifecycle")
     state = table("kResourceLoadedStateBytes")
     state_offset = const("kResourceLoadedStateOffset")
@@ -440,6 +449,576 @@ def check_resource_lifecycle(engine):
     ok(engine.exports().get(cstr("kResourceInQueueName"))
        == const("kResourceInQueueRva"),
        "in-queue accessor export resolves to its recorded RVA")
+    filename = table("kResourceFileNameBytes")
+    ok(len(filename) == 16
+       and filename[0:4] == [0x83, 0x79, 0x20, 0x10]
+       and filename[4:7] == [0x8d, 0x41, 0x0c]
+       and filename[7:12] == [0x72, 0x02, 0x8b, 0x00, 0xc3],
+       "Resource::GetFileName returns the verified MSVC string at resource+0xc")
+    ok(engine.exports().get(cstr("kResourceFileNameName"))
+       == const("kResourceFileNameRva"),
+       "filename accessor export resolves to its recorded RVA")
+
+
+def check_shadow_mesh_boundary(engine):
+    """Prove the per-mesh omission/preload boundary and its one patched call."""
+    print("\nDirectional-shadow cold-mesh boundary")
+    code = table("kShadowMeshPassCountBytes")
+    at = const("kShadowMeshPassCountRva")
+    off = const("kShadowMeshEnsureCallOffset")
+    ensure = const("kEnsureAvailableRva")
+    ok(len(code) == 24,
+       "GetNumShadowRenderPasses verifies all %d bytes (required 16-24)"
+       % len(code))
+    ok(code[0:10] == [0x56, 0x8b, 0x71, 0x04, 0x85, 0xf6, 0x74, 0x0c,
+                      0x8b, 0xce],
+       "the boundary obtains GraphicsMeshInstance+4 and null-checks it")
+    ok(off + 5 <= len(code) and code[off] == 0xe8,
+       "cold-mesh call offset %d lands on E8" % off)
+    dest = at + off + 5 + struct.unpack_from("<i", bytes(code), off + 1)[0]
+    ok(dest == ensure,
+       "the boundary call resolves to Resource::EnsureAvailable (%#x)" % dest)
+    ok(code[15:20] == [0x8b, 0x46, 0x7c, 0x5e, 0xc3]
+       and code[20:24] == [0x33, 0xc0, 0x5e, 0xc3],
+       "after EnsureAvailable it returns mesh+0x7c; null returns zero passes")
+    ok(engine.exports().get(cstr("kShadowMeshPassCountName")) == at,
+       "GetNumShadowRenderPasses export resolves to its recorded RVA")
+    ok(engine.exports().get(cstr("kEnsureAvailableName")) == ensure,
+       "EnsureAvailable export resolves to its recorded RVA")
+
+
+def check_shadow_material_textures(engine):
+    """Prove the two adjacent material-texture calls and use query."""
+    print("\nDirectional-shadow material textures")
+    getter = table("kShadowMaterialTextureWindowBytes")
+    getter_at = const("kShadowMaterialTextureWindowRva")
+    getter_off = const("kShadowMaterialTextureCallOffset")
+    getter_target = const("kGraphicsTextureGetTextureRva")
+    setter = table("kShadowTextureParameterWindowBytes")
+    setter_at = const("kShadowTextureParameterWindowRva")
+    setter_off = const("kShadowTextureParameterCallOffset")
+    setter_target = const("kSetTextureParameterRva")
+    owner = const("kGraphicsMeshSetShaderParametersRva")
+    mesh_frame = table("kGraphicsMeshSetShaderParametersFrameBytes")
+    loop_frame = table("kShadowMaterialLoopFrameBytes")
+
+    ok(16 <= len(mesh_frame) <= 24
+       and mesh_frame[0:8] == [0x83, 0xec, 0x08, 0x53, 0x55, 0x56,
+                               0x8b, 0xf1],
+       "mesh material frame allocates 8 bytes and saves EBX/EBP/ESI")
+    ok(16 <= len(loop_frame) <= 24 and loop_frame[13] == 0x57,
+       "mesh material loop saves EDI before entering the texture cases")
+    outer_stack = const("kShadowMaterialOuterCallerStackOffset")
+    shader_stack = const("kShadowMaterialShaderStackOffset")
+    derived_outer_stack = mesh_frame[2] + 4 * 4 + 4
+    ok(outer_stack == derived_outer_stack == 0x1c
+       and shader_stack == outer_stack + 4,
+       "getter adapter stack offsets retain enclosing caller and shader")
+
+    ok(16 <= len(getter) <= 24,
+       "material texture getter verifies %d bytes (required 16-24)"
+       % len(getter))
+    ok(getter[0:3] == [0x8b, 0x4e, 0x14],
+       "material getter receives the type-7 entry's resource at +0x14")
+    ok(getter_off + 5 <= len(getter) and getter[getter_off] == 0xe8,
+       "material texture call offset %d lands on E8" % getter_off)
+    dest = getter_at + getter_off + 5 + struct.unpack_from(
+        "<i", bytes(getter), getter_off + 1)[0]
+    ok(dest == getter_target,
+       "material call resolves to GraphicsTexture::GetTexture (%#x)" % dest)
+
+    ok(16 <= len(setter) <= 24,
+       "texture-parameter setter verifies %d bytes (required 16-24)"
+       % len(setter))
+    ok(setter[0:9] == [0x50, 0x51, 0x8b, 0x4c, 0x24, 0x24,
+                       0x6a, 0x00, 0x56],
+       "setter receives texture output, shadow shader, and material Name")
+    ok(setter[5] - 8 + 4 == shader_stack,
+       "getter adapter's shader is at entry ESP+%#x" % shader_stack)
+    ok(setter_off + 5 <= len(setter) and setter[setter_off] == 0xe8,
+       "texture-parameter call offset %d lands on E8" % setter_off)
+    dest = setter_at + setter_off + 5 + struct.unpack_from(
+        "<i", bytes(setter), setter_off + 1)[0]
+    ok(dest == setter_target,
+       "texture-parameter call resolves to its original setter (%#x)" % dest)
+    ok(getter_at + len(getter) == setter_at
+       and owner < getter_at < setter_at,
+       "getter and setter windows are adjacent inside GraphicsMesh material setup")
+
+    has = table("kShaderHasParameterBytes")
+    has_at = const("kShaderHasParameterRva")
+    name_hash = table("kNameHashBytes")
+    name_hash_at = const("kNameHashRva")
+    ensure = const("kEnsureAvailableRva")
+    ok(16 <= len(has) <= 24,
+       "HasParameter verifies %d bytes (required 16-24)" % len(has))
+    ok(has[4] == 0xe8,
+       "HasParameter's shader-residency call lands on E8")
+    dest = has_at + 9 + struct.unpack_from("<i", bytes(has), 5)[0]
+    ok(dest == ensure,
+       "HasParameter first ensures the shader resource (%#x)" % dest)
+    ok(has[9:18] == [0xff, 0x74, 0x24, 0x0c,
+                      0x8d, 0x44, 0x24, 0x10, 0x50]
+       and has[18:24] == [0x8d, 0x8e, 0xa0, 0x00, 0x00, 0x00],
+       "HasParameter looks up the supplied Name in shader+0xa0")
+    ok(engine.exports().get(cstr("kGraphicsMeshSetShaderParametersName"))
+       == owner,
+       "GraphicsMesh::SetShaderParameters export owns both call sites")
+    ok(engine.exports().get(cstr("kGraphicsTextureGetTextureName"))
+       == getter_target,
+       "GraphicsTexture::GetTexture export resolves to its recorded RVA")
+    ok(engine.exports().get(cstr("kShaderHasParameterName")) == has_at,
+       "GraphicsShader2::HasParameter export resolves to its recorded RVA")
+    ok(len(name_hash) == 16 and name_hash[0:3] == [0x8b, 0x01, 0xc3]
+       and name_hash[3:] == [0xcc] * 13,
+       "Name::Hash proves the material Name digest starts at offset zero")
+    ok(engine.exports().get(cstr("kNameHashName")) == name_hash_at,
+       "Name::Hash export resolves to its recorded RVA")
+
+    adapter = re.search(
+        r"hookShadowMaterialTexture\(.*?__asm__ __volatile__\((.*?)\);",
+        src, re.S)
+    adapter_text = adapter.group(1) if adapter else ""
+    ok(('"pushl %#x(%%%%esp)' % outer_stack) in adapter_text
+       and ('"pushl %#x(%%%%esp)' % (shader_stack + 4)) in adapter_text
+       and '"addl $16, %%esp' in adapter_text,
+       "material adapter forwards its verified enclosing caller and shader")
+
+    report_begin = src.find("void reportShadowMaterialDependency(")
+    report_end = src.find("\n}\n\nvoid flushPendingShadowMaterialTexture",
+                          report_begin)
+    report = src[report_begin:report_end]
+    flush_begin = src.find("void flushPendingShadowMaterialTexture(")
+    flush_end = src.find("\n}\n\nextern \"C\" void* __cdecl",
+                         flush_begin)
+    flush = src[flush_begin:flush_end]
+    ok(report_begin >= 0 and report_end > report_begin
+       and "g_shadowMaterialReports" in report
+       and "report >= (LONG)kChainSlots" in report
+       and "Name::Hash=%#lx" in report
+       and flush_begin >= 0 and flush_end > flush_begin
+       and "if (known && used)" in flush
+       and "reportShadowMaterialDependency(" in flush,
+       "cold used material identities are logged live and bounded")
+
+
+def check_shadow_texture_attribution(engine):
+    """Prove the instance/pass context call and exhaustive direct callers."""
+    print("\nDirectional-shadow texture dependency attribution")
+    frame = table("kShadowMeshParameterFrameBytes")
+    entry = table("kShadowMeshParameterEntryBytes")
+    context = table("kShadowMeshParameterContextBytes")
+    args = table("kShadowMeshParameterArgsBytes")
+    call = table("kShadowMeshParameterCallBytes")
+    call_at = const("kShadowMeshParameterCallRva")
+    call_off = const("kShadowMeshParameterCallOffset")
+    mesh_setter = const("kGraphicsMeshSetShaderParametersRva")
+    instance_setter = const("kGraphicsMeshInstanceSetShaderParametersRva")
+    frame_relocs = relocs("kShadowMeshParameterFrameRelocs")
+
+    ok(16 <= len(frame) <= 24,
+       "mesh-parameter frame verifies %d bytes (required 16-24)" % len(frame))
+    ok(frame[6] == 0xa1
+       and struct.unpack_from("<I", bytes(frame), 7)[0]
+           == engine.base + 0x41b044
+       and frame_relocs == [(7, 0x41b044)],
+       "frame A1 operand has the exact runtime relocation descriptor")
+    ok(frame[0:6] == [0x81, 0xec, 0x8c, 0, 0, 0]
+       and frame[11] == 0x53
+       and frame[12:19] == [0x8b, 0x9c, 0x24, 0x94, 0, 0, 0],
+       "frame allocates 0x8c locals, saves EBX, and loads shader arg1")
+    ok(16 <= len(entry) <= 24,
+       "mesh-parameter entry verifies %d bytes (required 16-24)" % len(entry))
+    ok(entry[0] == 0x53
+       and entry[1:8] == [0x8b, 0x9c, 0x24, 0x94, 0, 0, 0]
+       and entry[8] == 0x55
+       and entry[9:16] == [0x8b, 0xac, 0x24, 0xa0, 0, 0, 0],
+       "entry keeps shader arg1 in EBX and pass arg3 in EBP")
+    ok(16 <= len(context) <= 24,
+       "mesh-parameter context verifies %d bytes (required 16-24)"
+       % len(context))
+    ok(context[0:7] == [0x8b, 0xac, 0x24, 0xa0, 0, 0, 0]
+       and context[7:9] == [0x56, 0x57]
+       and context[9:16] == [0x8b, 0xbc, 0x24, 0xac, 0, 0, 0]
+       and context[16:18] == [0x8b, 0xf1],
+       "context keeps pass in EBP, render info in EDI, and instance in ESI")
+    ok(16 <= len(args) <= 24,
+       "mesh material arguments verify %d bytes (required 16-24)" % len(args))
+    ok(args[0:7] == [0xff, 0xb4, 0x24, 0xa4, 0, 0, 0]
+       and args[7:13] == [0x6b, 0xed, 0x34, 0x03, 0x6f, 0x1c]
+       and args[13:16] == [0x8b, 0x4e, 0x04],
+       "call pushes arg2, then converts EBP pass to a MeshRenderInfo pointer")
+    ok(16 <= len(call) <= 24,
+       "mesh material call verifies %d bytes (required 16-24)" % len(call))
+    ok(call[0:9] == [0x6b, 0xed, 0x34, 0x03, 0x6f, 0x1c,
+                      0x8b, 0x4e, 0x04]
+       and call[9:14] == [0x53, 0x89, 0x6c, 0x24, 0x20],
+       "call keeps ESI instance but changes EBP from pass to render-info pointer")
+    ok(call_off + 5 <= len(call) and call[call_off] == 0xe8,
+       "mesh material call offset %d lands on E8" % call_off)
+    dest = call_at + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    ok(dest == mesh_setter,
+       "mesh material call resolves to GraphicsMesh::SetShaderParameters (%#x)"
+       % dest)
+    ok(engine.exports().get(
+           cstr("kGraphicsMeshInstanceSetShaderParametersName"))
+       == instance_setter,
+       "GraphicsMeshInstance::SetShaderParameters owns the context call")
+
+    # Re-derive all direct E8 callers from the pinned .text rather than merely
+    # checking that the source's chosen subset happens to point at E8 bytes.
+    # The material call is verified separately because run 51 retargets it at
+    # runtime; the DWORD table must contain every other direct caller exactly.
+    text_section = next(s for s in engine.sections if s[0] == ".text")
+    _, text_rva, text_size, _, _ = text_section
+    code = engine.read(engine.base + text_rva, text_size)
+    found = []
+    for i in range(len(code) - 4):
+        if code[i] != 0xe8:
+            continue
+        target = text_rva + i + 5 + struct.unpack_from("<i", code, i + 1)[0]
+        if target == const("kGraphicsTextureGetTextureRva"):
+            found.append(text_rva + i)
+    recorded = dword_table("kShadowTextureDirectCallerRvas")
+    material_call = const("kShadowMaterialTextureWindowRva") \
+        + const("kShadowMaterialTextureCallOffset")
+    ok(len(recorded) == 9 and len(set(recorded)) == len(recorded),
+       "nine non-material direct texture callers are recorded exactly once")
+    ok(sorted(recorded + [material_call]) == sorted(found),
+       "caller table plus the material site equals all %d direct GetTexture calls"
+       % len(found))
+    for at in recorded:
+        opcode = engine.read(engine.base + at, 5)
+        target = at + 5 + struct.unpack_from("<i", opcode, 1)[0]
+        ok(opcode[0] == 0xe8 and target == const("kGraphicsTextureGetTextureRva"),
+           "texture caller %#x resolves to GraphicsTexture::GetTexture" % at)
+
+    adapter = re.search(
+        r"hookShadowMeshSetShaderParameters\(.*?__asm__ __volatile__\((.*?)\);",
+        src, re.S)
+    adapter_text = adapter.group(1) if adapter else ""
+    pass_offset = const("kShadowMeshParameterAdapterPassOffset")
+    # Entry ESP is original ESP-0xa8: 0x8c locals, four saved registers,
+    # two call arguments, and the E8 return. Original arg3 is then +0xb4;
+    # the adapter's first two pushes move it to +0xbc.
+    local_bytes = struct.unpack_from("<I", bytes(frame), 2)[0]
+    derived_pass_offset = local_bytes + 4 * 4 + 2 * 4 + 4 + 3 * 4 + 2 * 4
+    ok(pass_offset == derived_pass_offset == 0xbc,
+       "adapter pass offset accounts for the complete stack frame and pushes")
+    ok(adapter_text.count('"pushl 8(%%esp)') == 2
+       and ('"pushl %#x(%%%%esp)' % pass_offset) in adapter_text
+       and '"pushl %%esi' in adapter_text
+       and '"pushl %%ecx' in adapter_text
+       and '"ret $8' in adapter_text,
+       "naked adapter forwards material, shader, pass, instance, and mesh")
+
+    # Run 54's diagnostic join deliberately has no new engine call or binary
+    # patch site. Verify its source invariants here so changing the table or
+    # moving an engine call into the rare miss path cannot pass unnoticed.
+    slots = const("kShadowRecordContextSlots")
+    ok(slots == 4096 and slots & (slots - 1) == 0,
+       "shadow context join has the recorded 4096 power-of-two slots")
+    miss_begin = src.find("void explainShadowRecordMiss(")
+    miss_end = src.find("\n}\n\n// Which call site", miss_begin)
+    miss = src[miss_begin:miss_end]
+    ok(miss_begin >= 0 and miss_end > miss_begin
+       and "g_meshShadowStyle" not in miss
+       and "g_meshGetTexture" not in miss
+       and "g_graphicsTextureGetTexture" not in miss
+       and "context->match = ShadowContextInstanceMissing" in miss,
+       "context miss explanation scans retained identities without engine calls")
+    build_begin = src.find("int __fastcall hookBuildShadowRecord(")
+    build_end = src.find("\n}\n\nvoid __fastcall hookShadowMeshEnsure", build_begin)
+    build = src[build_begin:build_end]
+    accepted = build.find("const int result = g_buildShadowRecord(")
+    retained = build.find("rememberShadowRecordContext(")
+    ok(build_begin >= 0 and build_end > build_begin
+       and accepted >= 0 and retained > accepted
+       and "if (result && g_shadowTracing" in build,
+       "only accepted directional records populate the diagnostic join")
+    filtered_begin = src.find(
+        'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
+    filtered_end = src.find("\n}\n\n// The material Name", filtered_begin)
+    filtered = src[filtered_begin:filtered_end]
+    ok(filtered_begin >= 0 and filtered_end > filtered_begin
+       and "if (cold && !context.active) explainShadowRecordMiss(&context);"
+           in filtered,
+       "only a cold material-texture miss pays for the fallback identity scan")
+    ok("context.outerInstanceSite = context.instance" in filtered
+       and "|| outerCaller ==" in filtered,
+       "outer caller retains the verified instance site through its wrapper")
+
+    chain_begin = src.find("void reportUnresolvedShadowTextureChain(")
+    chain_end = src.find("\n}\n\nvoid reportChains()", chain_begin)
+    chain = src[chain_begin:chain_end]
+    load_begin = src.find("void __fastcall hookLoadResource(")
+    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load = src[load_begin:load_end]
+    ok(chain_begin >= 0 and chain_end > chain_begin
+       and "g_shadowTextureChainReports" in chain
+       and "report >= (LONG)kChainSlots" in chain
+       and "i < kStackWords" in chain
+       and "unresolved shadow texture" in chain,
+       "unresolved texture chains are written live with fixed bounds")
+    ok(load_begin >= 0 and load_end > load_begin
+       and "textureCaller == ShadowTextureUnresolved" in load
+       and "reportUnresolvedShadowTextureChain(" in load,
+       "only unresolved directional-shadow textures emit chain diagnostics")
+
+
+def check_shadow_alpha_defer(engine):
+    """Prove the exact caster omission point and every called dependency."""
+    print("\nDirectional-shadow cold alpha-caster deferral")
+    call = table("kShadowRecordCallWindowBytes")
+    call_at = const("kShadowRecordCallWindowRva")
+    call_off = const("kShadowRecordCallOffset")
+    helper_at = const("kBuildShadowRecordRva")
+    helper = table("kBuildShadowRecordBytes")
+    ok(16 <= len(call) <= 24,
+       "shadow-record call verifies %d bytes (required 16-24)" % len(call))
+    ok(call[0:9] == [0x57, 0x56, 0x8d, 0x44, 0x24, 0x30, 0x50,
+                      0x8b, 0xcd],
+       "record decision receives pass, renderable entry, output, and renderer")
+    ok(call_off + 5 <= len(call) and call[call_off] == 0xe8,
+       "shadow-record call offset %d lands on E8" % call_off)
+    dest = call_at + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    ok(dest == helper_at,
+       "shadow-record call resolves to its original helper (%#x)" % dest)
+    ok(call[14:22] == [0x84, 0xc0, 0x0f, 0x84, 0x8c, 0x00, 0x00, 0x00],
+       "a false helper result skips appending the caster/pass record")
+    ok(16 <= len(helper) <= 24,
+       "build-record helper verifies %d bytes (required 16-24)" % len(helper))
+    ok(helper[8:19] == [0x8b, 0x0b, 0x56, 0x8b, 0x01, 0x57,
+                         0x8b, 0x40, 0x24, 0xff, 0xd0],
+       "the original helper rejects through renderable virtual slot 0x24")
+
+    style_at = const("kMeshShadowStyleRva")
+    style = table("kMeshShadowStyleBytes")
+    no_name = const("kNameNoNameRva")
+    ok(16 <= len(style) <= 24,
+       "mesh shadow-style entry verifies %d bytes (required 16-24)" % len(style))
+    ok(style[4] == 0x68
+       and struct.unpack_from("<I", bytes(style), 5)[0] == engine.base + no_name,
+       "shadow style requests the base texture with Name::noName")
+    ok(style[9:20] == [0x8b, 0x06, 0xff, 0x74, 0x24, 0x10,
+                        0x32, 0xdb, 0xff, 0x50, 0x1c],
+       "shadow style calls the instance's virtual GetTexture and starts opaque")
+    alpha = table("kMeshShadowStyleAlphaBytes")
+    skinned = table("kMeshShadowStyleSkinnedBytes")
+    foliage = table("kMeshShadowStyleFoliageBytes")
+    static = table("kMeshShadowStyleStaticBytes")
+    for label, values in [("alpha flag", alpha), ("skinned return", skinned),
+                          ("foliage return", foliage), ("static return", static)]:
+        ok(16 <= len(values) <= 24,
+           "%s verifies %d bytes (required 16-24)" % (label, len(values)))
+    ok(alpha[0:17] == [0x80, 0xb8, 0x81, 0x00, 0x00, 0x00, 0x02,
+                        0xb3, 0x01, 0x7c, 0x06,
+                        0x8a, 0x98, 0x80, 0x00, 0x00, 0x00],
+       "texture metadata supplies the alpha-tested selector")
+    ok(skinned[9:19] == [0xb8, 0x01, 0x00, 0x00, 0x00,
+                          0xb9, 0x04, 0x00, 0x00, 0x00]
+       and foliage[4:14] == [0xb8, 0x02, 0x00, 0x00, 0x00,
+                              0xb9, 0x05, 0x00, 0x00, 0x00]
+       and static[0:9] == [0x33, 0xc0, 0x84, 0xdb,
+                            0xb9, 0x03, 0x00, 0x00, 0x00],
+       "styles 0-2 are opaque and 3-5 are their alpha-tested counterparts")
+
+    getter_at = const("kMeshGetTextureRva")
+    getter = table("kMeshGetTextureBytes")
+    mesh = table("kMeshGetTextureMeshBytes")
+    mesh_at = const("kMeshGetTextureMeshRva")
+    mesh_off = const("kMeshGetTextureEnsureCallOffset")
+    returned = table("kMeshGetTextureReturnBytes")
+    ok(16 <= len(getter) <= 24,
+       "mesh GetTexture entry verifies %d bytes (required 16-24)" % len(getter))
+    ok(16 <= len(mesh) <= 24 and mesh[mesh_off] == 0xe8,
+       "mesh GetTexture's dependency call is inside a %d-byte window" % len(mesh))
+    dest = mesh_at + mesh_off + 5 + struct.unpack_from(
+        "<i", bytes(mesh), mesh_off + 1)[0]
+    ok(dest == const("kEnsureAvailableRva"),
+       "mesh GetTexture ensures the owning mesh, not the returned texture")
+    ok(16 <= len(returned) <= 24
+       and returned[7:11] == [0x8b, 0x44, 0x01, 0x14],
+       "mesh GetTexture returns the material entry's resource at +0x14")
+
+    accessor = table("kResourceLoaderAccessorBytes")
+    ok(len(accessor) == 16 and accessor[0:4] == [0x8b, 0x41, 0x24, 0xc3],
+       "Resource::GetResourceLoader returns resource+0x24")
+    preload = table("kPreloadEnqueueWindowBytes")
+    preload_at = const("kPreloadEnqueueWindowRva")
+    preload_off = const("kPreloadEnqueueCallOffset")
+    ok(16 <= len(preload) <= 24,
+       "stock preload enqueue verifies %d bytes (required 16-24)" % len(preload))
+    ok(preload[3:10] == [0x6a, 0x00, 0x6a, 0x01, 0x6a, 0x01, 0x56],
+       "stock preload tuple is immediate=false, notify=true, priority=1")
+    dest = preload_at + preload_off + 5 + struct.unpack_from(
+        "<i", bytes(preload), preload_off + 1)[0]
+    ok(dest == const("kEnqueueRva"),
+       "stock preload call resolves to ResourceLoader::EnqueueResource")
+
+    for name_const, rva_const, label in [
+            ("kMeshShadowStyleName", "kMeshShadowStyleRva",
+             "GraphicsMeshInstance::GetShadowRenderStyle"),
+            ("kMeshGetTextureName", "kMeshGetTextureRva",
+             "GraphicsMeshInstance::GetTexture"),
+            ("kResourceLoaderAccessorName", "kResourceLoaderAccessorRva",
+             "Resource::GetResourceLoader"),
+            ("kPreloadResourceName", "kPreloadResourceRva",
+             "BaseResourceManager::PreLoadResource")]:
+        ok(engine.exports().get(cstr(name_const)) == const(rva_const),
+           "%s export resolves to its recorded RVA" % label)
+
+    bump = table("kShadowInstanceBumpEnsureWindowBytes")
+    bump_at = const("kShadowInstanceBumpEnsureWindowRva")
+    bump_off = const("kShadowInstanceBumpEnsureCallOffset")
+    ok(16 <= len(bump) <= 24,
+       "instance bump Ensure verifies %d bytes (required 16-24)" % len(bump))
+    ok(bump[0:9] == [0x8b, 0x7e, 0x18, 0x85, 0xff, 0x74, 0x6b,
+                      0x8b, 0xcf],
+       "instance+0x18 supplies the optional texture Resource in ECX")
+    ok(bump_off + 5 <= len(bump) and bump[bump_off] == 0xe8,
+       "instance bump call offset %d lands on E8" % bump_off)
+    dest = bump_at + bump_off + 5 + struct.unpack_from(
+        "<i", bytes(bump), bump_off + 1)[0]
+    ok(dest == const("kEnsureAvailableRva"),
+       "instance bump call resolves to Resource::EnsureAvailable")
+
+    setter = table("kShadowInstanceBumpSetterWindowBytes")
+    setter_at = const("kShadowInstanceBumpSetterWindowRva")
+    bump_name = const("kBumpTextureNameRva")
+    ok(16 <= len(setter) <= 24,
+       "instance bump setter verifies %d bytes (required 16-24)" % len(setter))
+    ok(setter[12] == 0x68
+       and struct.unpack_from("<I", bytes(setter), 13)[0]
+           == engine.base + bump_name,
+       "the post-Ensure setter uses the same bumpTexture Name")
+    setter_dest = setter_at + 19 + 5 + struct.unpack_from(
+        "<i", bytes(setter), 20)[0]
+    ok(setter[19] == 0xe8 and setter_dest == const("kSetTextureParameterRva"),
+       "instance bump block ends at the verified texture-parameter setter")
+
+    init = table("kBumpTextureNameInitWindowBytes")
+    literal = const("kBumpTextureLiteralRva")
+    ok(16 <= len(init) <= 24 and init[8:10] == [0x6a, 0x0b],
+       "bumpTexture Name initialization verifies its 11-byte length")
+    ok(engine.read(engine.base + literal, 12) == b"bumpTexture\0",
+       "bumpTexture static Name source is the exact engine string")
+
+    missing = table("kSetTextureParameterMissingWindowBytes")
+    missing_at = const("kSetTextureParameterMissingWindowRva")
+    missing_return = const("kSetTextureParameterMissingReturnRva")
+    ok(16 <= len(missing) <= 24,
+       "texture-setter missing path verifies %d bytes (required 16-24)"
+       % len(missing))
+    first_target = missing_at + 12 + struct.unpack_from("b", bytes(missing), 11)[0]
+    second_target = missing_at + 20 + struct.unpack_from("b", bytes(missing), 19)[0]
+    ok(missing[10] == 0x74 and missing[18] == 0x74
+       and first_target == missing_return and second_target == missing_return,
+       "an absent Name or parameter index returns before reading textureValue")
+    missing_tail = table("kSetTextureParameterMissingReturnBytes")
+    ok(16 <= len(missing_tail) <= 24
+       and missing_tail[0:7] == [0x5f, 0xb0, 0x01, 0x5e,
+                                  0xc2, 0x10, 0x00],
+       "texture setter's missing-parameter target returns success")
+
+    wrapper_begin = src.find(
+        'extern "C" void __cdecl shadowInstanceBumpEnsureFiltered(')
+    wrapper_end = src.find("\n}\n\n// At the patched E8", wrapper_begin)
+    wrapper = src[wrapper_begin:wrapper_end]
+    ok(wrapper_begin >= 0 and wrapper_end > wrapper_begin
+       and "g_shadowDeferActive && inShadow && shader" in wrapper
+       and "&& !g_shaderHasParameter(" in wrapper
+       and "g_engineBase + kBumpTextureNameRva" in wrapper
+       and "g_ensureAvailable(texture, nullptr)" in wrapper,
+       "bump omission is directional-only and forwards every used case")
+    install_begin = src.find("if (ok && g_shadowDeferColdAlpha) {")
+    install_end = src.find("\n    if (ok && trace", install_begin)
+    install = src[install_begin:install_end]
+    ok(install_begin >= 0 and install_end > install_begin
+       and "g_shadowInstanceBumpEnsurePatch" in install
+       and "hookShadowInstanceBumpEnsure" in install
+       and "restoreCall(g_shadowInstanceBumpEnsurePatch)" in install
+       and "const bool deferOk = recordOk && contextOk && filterOk && bumpOk;"
+           in install,
+       "cold-alpha fix requires the verified bump call patch atomically")
+
+    base_ensure = table("kShadowInstanceBaseEnsureWindowBytes")
+    base_ensure_at = const("kShadowInstanceBaseEnsureWindowRva")
+    base_ensure_off = const("kShadowInstanceBaseEnsureCallOffset")
+    ok(16 <= len(base_ensure) <= 24,
+       "instance base override verifies %d bytes (required 16-24)"
+       % len(base_ensure))
+    ok(base_ensure[0:9] == [0x8b, 0x7e, 0x14, 0x85, 0xff, 0x74, 0x6b,
+                             0x8b, 0xcf],
+       "instance+0x14 supplies the non-null base override in ECX")
+    ok(base_ensure_off + 5 <= len(base_ensure)
+       and base_ensure[base_ensure_off] == 0xe8,
+       "instance base override call offset %d lands on E8" % base_ensure_off)
+    dest = base_ensure_at + base_ensure_off + 5 + struct.unpack_from(
+        "<i", bytes(base_ensure), base_ensure_off + 1)[0]
+    ok(dest == const("kEnsureAvailableRva"),
+       "instance base override is ensured after the generic material call")
+
+    base_setter = table("kShadowInstanceBaseSetterWindowBytes")
+    base_setter_at = const("kShadowInstanceBaseSetterWindowRva")
+    base_name = const("kBaseTextureNameRva")
+    ok(16 <= len(base_setter) <= 24,
+       "instance base setter verifies %d bytes (required 16-24)"
+       % len(base_setter))
+    ok(base_setter[12] == 0x68
+       and struct.unpack_from("<I", bytes(base_setter), 13)[0]
+           == engine.base + base_name,
+       "the instance override binds to the exact baseTexture Name")
+    base_setter_dest = base_setter_at + 19 + 5 + struct.unpack_from(
+        "<i", bytes(base_setter), 20)[0]
+    ok(base_setter[19] == 0xe8
+       and base_setter_dest == const("kSetTextureParameterRva"),
+       "instance base override ends at the verified texture setter")
+    generic_call = (const("kShadowMeshParameterCallRva")
+                    + const("kShadowMeshParameterCallOffset"))
+    ok(generic_call < base_ensure_at < base_setter_at,
+       "generic material application precedes ensure and binding of override")
+
+    base_init = table("kBaseTextureNameInitWindowBytes")
+    base_literal = const("kBaseTextureLiteralRva")
+    ok(16 <= len(base_init) <= 24 and base_init[8:10] == [0x6a, 0x0b],
+       "baseTexture Name initialization verifies its 11-byte length")
+    ok(engine.read(engine.base + base_literal, 12) == b"baseTexture\0",
+       "baseTexture static Name source is the exact engine string")
+
+    filtered_begin = src.find(
+        'extern "C" void* __cdecl shadowMaterialTextureFiltered(')
+    filtered_end = src.find("\n}\n\n// The material Name", filtered_begin)
+    filtered = src[filtered_begin:filtered_end]
+    ok(filtered_begin >= 0 and filtered_end > filtered_begin
+       and "const bool overriddenBase = g_shadowDeferActive && inShadow"
+           " && texture" in filtered
+       and "context.instance + 0x14" in filtered
+       and "texture != baseOverride" in filtered
+       and "memcmp(name, g_engineBase + kBaseTextureNameRva, 16) == 0"
+           in filtered
+       and "CounterEngineShadowBaseOverrideSkippedCold" in filtered,
+       "base omission requires directional context, a distinct live override,"
+       " and the exact Name")
+    ok("const bool contextOk = recordOk" in install
+       and "const bool filterOk = contextOk" in install
+       and "const bool contextActive = deferOk && contextOk;" in install
+       and "g_shadowMaterialTextureHooked = deferOk && filterOk;" in install
+       and "restoreCall(g_shadowMeshParameterPatch)" in install,
+       "base-override context patch is an atomic fix dependency")
+    context_begin = src.find(
+        'extern "C" void __cdecl shadowMeshSetShaderParametersContext(')
+    context_end = src.find("\n}\n\n// At this patched E8", context_begin)
+    context_adapter = src[context_begin:context_end]
+    ok(context_begin >= 0 and context_end > context_begin
+       and "if (!onMainThread()" in context_adapter
+       and "|| InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0"
+           in context_adapter
+       and "g_graphicsMeshSetShaderParameters(" in context_adapter
+       and "return;" in context_adapter,
+       "global call patch exposes context only on the main directional path")
 
 
 def main():
@@ -458,8 +1037,10 @@ def main():
             ("kLoadResourceBytes", "kLoadResourceRva", "kLoadResourceRelocs"),
             ("kResourceLoadedStateBytes", "kResourceLoadedStateRva", None),
             ("kResourceInQueueBytes", "kResourceInQueueRva", None),
+            ("kResourceFileNameBytes", "kResourceFileNameRva", None),
             ("kUnloadLevelBytes", "kUnloadLevelRva", "kUnloadLevelRelocs"),
             ("kEnqueueBytes", "kEnqueueRva", "kEnqueueRelocs"),
+            ("kPreloadEnqueueWindowBytes", "kPreloadEnqueueWindowRva", None),
             ("kReadFromFileBytes", "kReadFromFileRva", None),
             ("kArchiveBlockBytes", "kArchiveBlockRva", None),
             ("kArchiveSeekWindowBytes", "kArchiveSeekWindowRva",
@@ -480,6 +1061,61 @@ def main():
              None),
             ("kShadowOutputArgumentBytes", "kShadowOutputArgumentRva", None),
             ("kShadowOutputCopyBytes", "kShadowOutputCopyRva", None),
+            ("kShadowMeshPassCountBytes", "kShadowMeshPassCountRva", None),
+            ("kGraphicsMeshSetShaderParametersFrameBytes",
+             "kGraphicsMeshSetShaderParametersFrameRva", None),
+            ("kShadowMaterialLoopFrameBytes",
+             "kShadowMaterialLoopFrameRva", None),
+            ("kShadowMaterialTextureWindowBytes",
+             "kShadowMaterialTextureWindowRva", None),
+            ("kShadowTextureParameterWindowBytes",
+             "kShadowTextureParameterWindowRva", None),
+            ("kShaderHasParameterBytes", "kShaderHasParameterRva", None),
+            ("kNameHashBytes", "kNameHashRva", None),
+            ("kShadowMeshParameterFrameBytes",
+             "kShadowMeshParameterFrameRva",
+             "kShadowMeshParameterFrameRelocs"),
+            ("kShadowMeshParameterEntryBytes",
+             "kShadowMeshParameterEntryRva", None),
+            ("kShadowMeshParameterContextBytes",
+             "kShadowMeshParameterContextRva", None),
+            ("kShadowMeshParameterArgsBytes",
+             "kShadowMeshParameterArgsRva", None),
+            ("kShadowMeshParameterCallBytes",
+             "kShadowMeshParameterCallRva", None),
+            ("kShadowInstanceBumpEnsureWindowBytes",
+             "kShadowInstanceBumpEnsureWindowRva", None),
+            ("kShadowInstanceBumpSetterWindowBytes",
+             "kShadowInstanceBumpSetterWindowRva",
+             "kShadowInstanceBumpSetterWindowRelocs"),
+            ("kBumpTextureNameInitWindowBytes",
+             "kBumpTextureNameInitWindowRva",
+             "kBumpTextureNameInitWindowRelocs"),
+            ("kSetTextureParameterMissingWindowBytes",
+             "kSetTextureParameterMissingWindowRva", None),
+            ("kSetTextureParameterMissingReturnBytes",
+             "kSetTextureParameterMissingReturnRva", None),
+            ("kShadowInstanceBaseEnsureWindowBytes",
+             "kShadowInstanceBaseEnsureWindowRva", None),
+            ("kShadowInstanceBaseSetterWindowBytes",
+             "kShadowInstanceBaseSetterWindowRva",
+             "kShadowInstanceBaseSetterWindowRelocs"),
+            ("kBaseTextureNameInitWindowBytes",
+             "kBaseTextureNameInitWindowRva",
+             "kBaseTextureNameInitWindowRelocs"),
+            ("kShadowRecordCallWindowBytes", "kShadowRecordCallWindowRva", None),
+            ("kBuildShadowRecordBytes", "kBuildShadowRecordRva", None),
+            ("kMeshShadowStyleBytes", "kMeshShadowStyleRva",
+             "kMeshShadowStyleRelocs"),
+            ("kMeshShadowStyleAlphaBytes", "kMeshShadowStyleAlphaRva", None),
+            ("kMeshShadowStyleSkinnedBytes", "kMeshShadowStyleSkinnedRva", None),
+            ("kMeshShadowStyleFoliageBytes", "kMeshShadowStyleFoliageRva", None),
+            ("kMeshShadowStyleStaticBytes", "kMeshShadowStyleStaticRva", None),
+            ("kMeshGetTextureBytes", "kMeshGetTextureRva",
+             "kMeshGetTextureRelocs"),
+            ("kMeshGetTextureMeshBytes", "kMeshGetTextureMeshRva", None),
+            ("kMeshGetTextureReturnBytes", "kMeshGetTextureReturnRva", None),
+            ("kResourceLoaderAccessorBytes", "kResourceLoaderAccessorRva", None),
             ("kGuaranteedGetLevelBytes", "kGuaranteedGetLevelRva", None),
             ("kBackgroundEntryBytes", "kBackgroundLoadLevelRva", None),
             ("kBackgroundFlagsBytes", "kBackgroundFlagsRva", None),
@@ -508,8 +1144,11 @@ def main():
              "kResourceLoadedStateRva"),
             (engine, "Engine", "kResourceInQueueName",
              "kResourceInQueueRva"),
+            (engine, "Engine", "kResourceFileNameName",
+             "kResourceFileNameRva"),
             (engine, "Engine", "kUnloadLevelName", "kUnloadLevelRva"),
             (engine, "Engine", "kEnqueueName", "kEnqueueRva"),
+            (engine, "Engine", "kPreloadResourceName", "kPreloadResourceRva"),
             (engine, "Engine", "kReadFromFileName", "kReadFromFileRva"),
             (engine, "Engine", "kWaitForLoadingName", "kWaitForLoadingRva"),
             (engine, "Engine", "kBackgroundLoadLevelName",
@@ -521,6 +1160,24 @@ def main():
             (engine, "Engine", "kSweepTargetName", "kSweepTargetRva"),
             (engine, "Engine", "kRenderDirectionalName",
              "kRenderDirectionalRva"),
+            (engine, "Engine", "kShadowMeshPassCountName",
+             "kShadowMeshPassCountRva"),
+            (engine, "Engine", "kEnsureAvailableName",
+             "kEnsureAvailableRva"),
+            (engine, "Engine", "kGraphicsMeshSetShaderParametersName",
+             "kGraphicsMeshSetShaderParametersRva"),
+            (engine, "Engine", "kGraphicsTextureGetTextureName",
+             "kGraphicsTextureGetTextureRva"),
+            (engine, "Engine", "kShaderHasParameterName",
+             "kShaderHasParameterRva"),
+            (engine, "Engine", "kGraphicsMeshInstanceSetShaderParametersName",
+             "kGraphicsMeshInstanceSetShaderParametersRva"),
+            (engine, "Engine", "kMeshShadowStyleName",
+             "kMeshShadowStyleRva"),
+            (engine, "Engine", "kMeshGetTextureName",
+             "kMeshGetTextureRva"),
+            (engine, "Engine", "kResourceLoaderAccessorName",
+             "kResourceLoaderAccessorRva"),
             (game, "Game", "kGameUpdateName", "kGameUpdateRva")]:
         name = cstr(name_const)
         ok(pe.exports().get(name) == const(rva_const),
@@ -549,6 +1206,10 @@ def main():
     check_async_level_load(engine, sites)
     check_directional_shadow(engine)
     check_resource_lifecycle(engine)
+    check_shadow_mesh_boundary(engine)
+    check_shadow_material_textures(engine)
+    check_shadow_alpha_defer(engine)
+    check_shadow_texture_attribution(engine)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}

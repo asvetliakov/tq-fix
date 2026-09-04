@@ -58,10 +58,21 @@ namespace engineprobe {
 //16384 the deferred renderer's one GraphicsShadowMapDx11::RenderDirectional
 //      call: whole-call CPU time, region changes, and main-thread resource
 //      loads nested inside it. With group 2, each nested load is also split by
-//      the resource's raw pre-call loaded state (0/1/2/other) and overlapping
-//      in-queue flag, choosing between cold shadow demand and joining work the
-//      loader already had in flight. Select group 2 as well when using a mask
-//      so ResourceLoader::LoadResource is present to populate both splits.
+//      the resource's raw pre-call loaded state (0/1/2/other), overlapping
+//      in-queue flag, and engine filename class (mesh/shader/texture/other).
+//      A call-site wrapper also measures cold meshes at
+//      GraphicsMeshInstance::GetNumShadowRenderPasses, before the caster's
+//      draw record is built. Two further call-site wrappers classify cold
+//      material textures pulled during RenderPass by whether the active shadow
+//      shader actually declares that material parameter. A third relates the
+//      mesh-instance style/pass captured at the earlier record gate to used
+//      material textures; alpha styles carry base identity and opaque styles
+//      report base_unknown. Every accepted renderable is retained so a miss
+//      splits into class override, pass mismatch, or missing record without
+//      another engine call. The direct GraphicsTexture::GetTexture callers
+//      independently partition all shadow-nested texture loads. Select group 2 as well when
+//      using a mask so ResourceLoader::LoadResource and the verified Resource
+//      layout are present to populate all splits.
 void readOptions(const wchar_t* iniPath);
 
 // [performance] timer_period_ms, an experiment rather than a fix.
@@ -116,6 +127,30 @@ void readOptions(const wchar_t* iniPath);
 // It reaches install() with the performance probe off and brings no trace
 // group. Group 16384 adds `engine_shadow_reuse` when measuring it.
 
+// [performance] shadow_defer_cold_alpha, a fix and defaulting to 0.
+//
+// GraphicsMeshInstance's alpha-tested shadow styles need a base texture only
+// to cut holes in the caster. At 1, a caster/pass whose verified base texture
+// Resource is in state 0 or 1 is omitted from that directional map; state 0 is
+// explicitly enqueued with the engine's normal preload arguments. It returns
+// automatically once the Resource reaches state 2. Opaque casters still render
+// normally, but a material texture whose Name is absent from their active
+// shadow shader is not loaded. The colour pass is unchanged. This avoids
+// rendering foliage/fences as solid while removing both classes of needless
+// synchronous shadow-side texture load. GraphicsMeshInstance's optional
+// bumpTexture override has the same stock ordering bug--EnsureAvailable runs
+// before the setter checks the shader--so it is likewise skipped only when
+// the active directional-shadow shader proves it has no bumpTexture input.
+// The base mesh material can also carry a baseTexture that is immediately
+// replaced by GraphicsMeshInstance+0x14. Inside the directional pass only,
+// that earlier getter is skipped when the live override is non-null, distinct,
+// and the material Name exactly matches baseTexture; the verified stock code
+// ensures and binds the override before any draw.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 16384 reports omitted states, enqueue outcomes, and skipped
+// material/bump dependencies when enabled.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
@@ -139,12 +174,40 @@ bool wantsForTest(unsigned group);
 // module that was never Engine.dll anyway.
 bool asyncLevelLoadForTest();
 bool shadowTransitionReuseForTest();
+bool shadowDeferColdAlphaForTest();
+bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state);
+void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
+                                     bool failed);
 // Drives the whole-map/matrix cache without patching an off-game synthetic
 // module. The production wrapper uses these same two helpers.
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix);
 bool reuseShadowForTest(void* region, void* surface, void* matrix);
 void countShadowResourceStateForTest(unsigned state, bool inQueue,
                                      unsigned elapsedUs);
+void countShadowResourceTypeForTest(const char* name, unsigned elapsedUs);
+void countShadowMaterialTextureForTest(bool known, bool used,
+                                       unsigned elapsedUs);
+void countShadowMaterialUsedContextForTest(bool callKnown, bool context,
+                                           bool styleKnown,
+                                           unsigned match, unsigned style,
+                                           bool baseKnown, bool baseMatch, int pass,
+                                           bool outerInstanceSite,
+                                           unsigned elapsedUs);
+void resetShadowRecordContextsForTest();
+void rememberShadowRecordContextForTest(void* instance, int pass,
+                                        unsigned style, bool styleKnown,
+                                        bool baseKnown,
+                                        const void* baseTexture);
+bool findShadowRecordContextForTest(void* instance, int pass,
+                                    unsigned* style, bool* styleKnown,
+                                    bool* baseKnown,
+                                    const void** baseTexture);
+unsigned explainShadowRecordMissForTest(void* instance, int pass);
+void countShadowMeshContextPatchStatusForTest(unsigned status);
+void countShadowTextureCallerForTest(unsigned caller, unsigned elapsedUs);
+unsigned shadowTextureCallerFromWordsForTest(const void* const* words,
+                                             unsigned count,
+                                             const void* engineBase);
 // The slow-LoadLevel caller table, which decides where Stage 5.1 should point.
 // Driven directly rather than through a real detour: what is worth testing is
 // the aggregation and the module bound, not __builtin_return_address.

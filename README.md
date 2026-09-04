@@ -78,6 +78,7 @@ async_level_load=0
 timer_period_ms=0
 pump_timer_min_ms=0
 shadow_transition_reuse=0
+shadow_defer_cold_alpha=0
 
 [debug]
 frame_overlay=0
@@ -203,6 +204,27 @@ remains the necessary shadow-distance feature. Run 47 rejected this experiment:
 the stale map visibly flickers and the complete build is merely paid on the
 following frame. Leave it at `0`; the switch remains only to preserve the exact
 measured experiment.
+
+`shadow_defer_cold_alpha=1` changes only alpha-tested
+`GraphicsMeshInstance` casters in the directional shadow map. If their base
+texture is still unloaded or loading, the caster/pass is omitted and an
+unloaded texture is explicitly queued through the engine's normal preload
+path. The caster returns automatically when that texture is resident. Opaque
+casters still cast normally, but their material textures are not loaded when
+the active shadow shader has no matching parameter. The same check now covers
+an instance's optional `bumpTexture` override: stock code ensured that Resource
+before discovering that a directional-shadow shader had no bump input. The
+generic mesh `baseTexture` is also omitted in the directional pass when the
+same instance has a distinct non-null base override that the verified stock
+path immediately ensures and binds to the same Name. The normal colour pass is
+unchanged, and a shadow shader that does use the bump texture still takes the
+stock path. The temporary alpha trade is a missing cutout shadow rather than
+solid-looking foliage or a missing visible object. It defaults to `0`, works
+with the performance probe off, and installs no trace group by itself.
+Run 51 found no visible flicker or shadow popping from this omission, but it
+did not remove the marked two-frame loading burst: other cold shadow textures
+were still loaded after the checked base texture became resident. Treat the
+switch as a verified mechanism, not yet as a complete loading-burst fix.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
@@ -343,7 +365,7 @@ frames slower than 20 ms are written, each carrying a final `unusual` column
 naming how far every field sat from its own median over the preceding sixty
 frames -- which is the part that names the cause; the file grows by a few
 hundred bytes per hitch, so this mode is cheap enough to leave on.
-`performance_trace=full` writes every frame instead, about 40 KB a second with
+`performance_trace=full` writes every frame instead, about 50 KB a second with
 the current columns, for a measurement session. At `0`, the default, nothing
 is measured, allocated, or written; what remains compiled in is one branch per
 instrumented call site.
@@ -391,7 +413,44 @@ are mutually exclusive; their `_us` partners carry the corresponding complete
 `LoadResource` durations. `engine_shadow_res_in_queue` is an overlapping
 cross-check, not another bucket to add. State 0 means the shadow traversal
 demanded an unloaded resource; state 1 means it met resource work already in
-flight. The loader-fence wait in `Engine::Update`, the seven resource-manager
+flight. `engine_shadow_res_mesh` / `shader` / `texture` / `type_other` and
+their `_us` partners partition those same nested loads by the filename suffix
+returned by the engine. `engine_shadow_mesh_cold` / `_us` is narrower and
+overlapping: a state-0 mesh at
+`GraphicsMeshInstance::GetNumShadowRenderPasses`, before that caster enters the
+directional draw list. `engine_shadow_material_tex` / `_us` is another
+overlapping subset: state-0 texture getters reached from the generic material
+loop during the directional build. Its `used`, `unused`, and `unknown`
+counter/duration pairs partition that subset according to whether the active
+shadow shader contains the material parameter name. An `unused` load is work
+performed before the game's parameter setter discovers it has nowhere to bind
+the texture; `used` includes textures that may affect shadow coverage, such as
+opacity maps on cutout foliage. For every `used` load,
+`engine_shadow_material_used_style0` through `style5` (or `context_unknown`),
+`base_match` / `base_other` / `base_unknown`, and `pass0` / `pass_other` /
+`pass_unknown` identify the originating `GraphicsMeshInstance` call.
+The verified adapter supplies `pass0` / `pass_other` even when the accepted
+record lookup misses; `pass_unknown` means that adapter context itself was
+absent, not merely that the record-table join missed.
+`base_unknown` is expected for opaque styles: their base texture is not looked
+up merely for instrumentation. The overlapping
+`engine_shadow_material_lookup_*` pairs explain whether the same-call record
+join found the exact base class, another/overriding class, the same instance
+under a different pass, or no accepted record. Table overflow is explicit.
+The `engine_shadow_material_outer_instance_site` / `outer_other_site`
+counter/duration pairs independently partition those used loads by the
+enclosing `GraphicsMesh::SetShaderParameters` caller. The seven
+`engine_shadow_context_patch_*` counters partition every actual directional
+build by the install state of the optional base-`GraphicsMeshInstance` context
+call patch; they make a missing dependency, one of three signature failures,
+a call-patch failure, or rollback after a material-hook failure visible in the
+CSV rather than only in an exit-time log.
+Independently, the `engine_shadow_tex_from_*` counter/duration pairs partition
+every shadow-nested texture load by the direct `GraphicsTexture::GetTexture`
+caller; `unresolved` includes indirect callers. All engine durations end in
+`_us`. These columns are diagnostic only and change no resource or rendering
+behaviour. The loader-fence wait in `Engine::Update`, the seven
+resource-manager
 sweeps beside it, any time the render path blocked on a region lock, and
 `Engine::Update` and `Engine::Render` bracketed whole so the rest can be read
 against the half of the frame they happened in, and `GameEngine::Update` from

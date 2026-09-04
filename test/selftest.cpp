@@ -896,6 +896,40 @@ void testEngineProbe() {
           "re-reading no INI puts shadow_transition_reuse back off");
     DeleteFileW(ini);
 
+    // The seventh independent way in is the cold alpha-tested shadow-caster
+    // deferral. Like the archive cache and async level load it is a fix, not
+    // an instrument: it defaults off, reaches install() with the probe off,
+    // and cannot enable any trace group by itself.
+    check(!tq::engineprobe::shadowDeferColdAlphaForTest(),
+          "shadow_defer_cold_alpha is off with no INI at all");
+    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_alpha",
+                               L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::shadowDeferColdAlphaForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "shadow_defer_cold_alpha reaches install() with the probe off, and"
+          " still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(16384),
+          "a cold-alpha-shadow-only boot installs no trace group");
+    check(tq::engineprobe::shouldDeferShadowAlphaForTest(3, 0)
+          && tq::engineprobe::shouldDeferShadowAlphaForTest(4, 1)
+          && tq::engineprobe::shouldDeferShadowAlphaForTest(5, 0)
+          && !tq::engineprobe::shouldDeferShadowAlphaForTest(0, 0)
+          && !tq::engineprobe::shouldDeferShadowAlphaForTest(2, 1)
+          && !tq::engineprobe::shouldDeferShadowAlphaForTest(3, 2)
+          && !tq::engineprobe::shouldDeferShadowAlphaForTest(6, 0),
+          "only alpha-tested styles in resource states 0/1 are deferred");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::shadowDeferColdAlphaForTest(),
+          "re-reading no INI puts shadow_defer_cold_alpha back off");
+    DeleteFileW(ini);
+
     // The slow-LoadLevel caller table. Five calls a session decide where
     // Stage 5.1 should point, so a slot bug costs a boot rather than a build;
     // this drives the aggregator directly.
@@ -1941,6 +1975,266 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
               0, tq::probe::CounterEngineShadowResInQueueUs) == 6600,
           "shadow resource queue flag overlaps its loaded-state buckets");
 
+    // Run 49's engine-native filename partition. These are the resource
+    // classes observed at LoadResource, not guesses from which renderer was
+    // active; mixed-case suffixes remain the same engine file type.
+    tq::engineprobe::countShadowResourceTypeForTest(
+        "Creatures/Monster.msh", 1100);
+    tq::engineprobe::countShadowResourceTypeForTest(
+        "Shaders/Pieces/Shadow.SSH", 2200);
+    tq::engineprobe::countShadowResourceTypeForTest(
+        "Items/Weapon.tex", 3300);
+    tq::engineprobe::countShadowResourceTypeForTest(nullptr, 4400);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResMesh) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResMeshUs) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResShader) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResShaderUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResTexture) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResTextureUs) == 3300
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResTypeOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowResTypeOtherUs) == 4400,
+          "shadow resource filename classes partition calls and durations");
+
+    // Run 52's texture-load caller split. The raw word scan stops at the
+    // nearest exact E8 return address, and an out-of-range semantic value is
+    // retained in the explicit unresolved bucket rather than indexing past
+    // the counter arrays.
+    const uintptr_t fakeEngineBase = 0x10000000u;
+    const void* textureStack[] = {
+        (const void*)(fakeEngineBase + 0x120f37u + 5u),
+        (const void*)(fakeEngineBase + 0x18a90eu + 5u)
+    };
+    check(tq::engineprobe::shadowTextureCallerFromWordsForTest(
+              textureStack, 2, (const void*)fakeEngineBase) == 2,
+          "shadow texture stack scan selects the nearest verified caller");
+
+    // Run 53 replaces run 52's unsafe re-entry from the material loop with a
+    // frame-local identity table populated at the already exercised record
+    // gate. Prove both pass keys and generation expiry without calling any
+    // engine method from inside GraphicsMesh::SetShaderParameters.
+    void* const recordInstance = (void*)0x12345000;
+    const void* const recordBase = (const void*)0x76543000;
+    tq::engineprobe::resetShadowRecordContextsForTest();
+    tq::engineprobe::rememberShadowRecordContextForTest(
+        recordInstance, 0, 3, true, true, recordBase);
+    tq::engineprobe::rememberShadowRecordContextForTest(
+        recordInstance, 1, 4, false, false, nullptr);
+    unsigned recordStyle = 0;
+    bool recordStyleKnown = false;
+    bool recordBaseKnown = false;
+    const void* foundBase = nullptr;
+    check(tq::engineprobe::findShadowRecordContextForTest(
+              recordInstance, 0, &recordStyle, &recordStyleKnown,
+              &recordBaseKnown, &foundBase)
+          && recordStyle == 3 && recordStyleKnown && recordBaseKnown
+          && foundBase == recordBase,
+          "shadow record context retains exact instance/pass identity");
+    check(tq::engineprobe::findShadowRecordContextForTest(
+              recordInstance, 1, &recordStyle, &recordStyleKnown,
+              &recordBaseKnown, &foundBase)
+          && recordStyle == 4 && !recordStyleKnown && !recordBaseKnown
+          && foundBase == nullptr,
+          "shadow record context keeps an overridden class explicit");
+    check(tq::engineprobe::explainShadowRecordMissForTest(
+              recordInstance, 2) == 2
+          && tq::engineprobe::explainShadowRecordMissForTest(
+                 (void*)0x11111000, 0) == 3
+          && tq::engineprobe::explainShadowRecordMissForTest(nullptr, 0) == 3,
+          "shadow record misses distinguish pass mismatch from every missing instance");
+    tq::engineprobe::resetShadowRecordContextsForTest();
+    check(!tq::engineprobe::findShadowRecordContextForTest(
+              recordInstance, 0, nullptr, nullptr, nullptr, nullptr),
+          "a new directional generation expires prior record identities");
+
+    // The fixed table must fail visibly rather than silently losing the join.
+    // These are identity-only values: the implementation never dereferences
+    // anything retained here.
+    for (uintptr_t i = 0; i < 4096; ++i)
+        tq::engineprobe::rememberShadowRecordContextForTest(
+            (void*)(0x20000000u + i * 16u), 0, 0, true, false, nullptr);
+    tq::engineprobe::rememberShadowRecordContextForTest(
+        (void*)0x30000000u, 0, 0, true, false, nullptr);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextTableOverflow) == 1,
+          "shadow record context table reports an explicit overflow");
+    tq::engineprobe::resetShadowRecordContextsForTest();
+
+    tq::engineprobe::countShadowTextureCallerForTest(0, 1100);
+    tq::engineprobe::countShadowTextureCallerForTest(2, 2200);
+    tq::engineprobe::countShadowTextureCallerForTest(99, 3300);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromMeshMaterial) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromMeshMaterialUs) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromBillboard) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromBillboardUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromUnresolved) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowTexFromUnresolvedUs) == 3300,
+          "shadow texture callers retain counts and durations by exact site");
+
+    tq::engineprobe::countShadowMaterialTextureForTest(true, true, 1100);
+    tq::engineprobe::countShadowMaterialTextureForTest(true, false, 2200);
+    tq::engineprobe::countShadowMaterialTextureForTest(false, false, 3300);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTex) == 3
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUs) == 6600
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUsed) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUsedUs) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUnused) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUnusedUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUnknown) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialTexUnknownUs) == 3300,
+          "shadow material textures partition by active-shader use");
+
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, true, true, 0, 0, true, true, 0, true, 1100);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, true, true, 0, 3, true, false, 2, true, 2200);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, true, true, 0, 1, false, false, 0, true, 4400);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, true, false, 1, 0, false, false, 1, true, 5500);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, false, false, 2, 0, false, false, 0, true, 6600);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        true, false, false, 3, 0, false, false, 0, true, 3300);
+    tq::engineprobe::countShadowMaterialUsedContextForTest(
+        false, false, false, 3, 0, false, false, 0, false, 7700);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedStyle0) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedStyle0Us) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedStyle3) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedStyle3Us) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedContextUnknown) == 4
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedContextUnknownUs)
+                 == 23100,
+          "cold used material textures partition by style or explicit unknown");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseMatch) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseMatchUs) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseOtherUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseUnknown) == 5
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedBaseUnknownUs)
+                 == 27500
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPass0) == 4
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPass0Us) == 15400
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPassOther) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPassOtherUs) == 7700
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPassUnknown) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialUsedPassUnknownUs)
+                 == 7700,
+          "cold used material textures partition by base identity and pass");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupExact) == 3
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupExactUs) == 7700
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupClassOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupClassOtherUs)
+                 == 5500
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupPassMismatch) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupPassMismatchUs)
+                 == 6600
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupInstanceMissing)
+                 == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialLookupInstanceMissingUs)
+                 == 11000,
+          "material context lookup partitions exact, class, pass, and missing");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialOuterInstanceSite) == 6
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialOuterInstanceSiteUs)
+                 == 23100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialOuterOtherSite) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMaterialOuterOtherSiteUs)
+                 == 7700,
+          "used shadow materials partition by their enclosing mesh caller");
+
+    for (unsigned status = 0; status < 7; ++status)
+        tq::engineprobe::countShadowMeshContextPatchStatusForTest(status);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchActive) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchDependencyMissing)
+                 == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchFrameMismatch) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchEntryMismatch) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchContextMismatch)
+                 == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchCallFailed) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowContextPatchReverted) == 1,
+          "directional rows expose the exact mesh-context patch status");
+
+    tq::engineprobe::countDeferredShadowAlphaForTest(0, true, false);
+    tq::engineprobe::countDeferredShadowAlphaForTest(1, false, false);
+    tq::engineprobe::countDeferredShadowAlphaForTest(0, false, true);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowAlphaOmitted) == 3
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowAlphaState0) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowAlphaState1) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowAlphaEnqueued) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowAlphaEnqueueFailed) == 1,
+          "cold alpha-shadow counters partition state and enqueue outcome");
+
     // A steady baseline, then one frame that spikes in a single phase. The row
     // for that frame has to name the phase, not merely report the frame time.
     for (unsigned i = 0; i < 90; ++i) tq::probe::endFrame(16.7f);
@@ -2036,6 +2330,73 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && strstr(csvText, "engine_shadow_res_state_other_us") != nullptr
           && strstr(csvText, "engine_shadow_res_in_queue_us") != nullptr,
           "the header carries the directional-shadow attribution columns");
+    check(csvText && strstr(csvText, "engine_shadow_res_mesh_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_shader_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_texture_us") != nullptr
+          && strstr(csvText, "engine_shadow_res_type_other_us") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_cold_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_used_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_unused_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_unknown_us") != nullptr
+          && strstr(csvText, "engine_shadow_tex_from_mesh_material_us") != nullptr
+          && strstr(csvText, "engine_shadow_tex_from_billboard_us") != nullptr
+          && strstr(csvText, "engine_shadow_tex_from_unresolved_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_used_style0_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_used_style5_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_used_context_unknown_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_used_base_match_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_used_base_other_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_used_base_unknown_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_used_pass0_us") != nullptr
+          && strstr(csvText, "engine_shadow_material_used_pass_other_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_used_pass_unknown_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_lookup_exact_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_lookup_class_other_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_material_lookup_pass_mismatch_us")
+                 != nullptr
+          && strstr(csvText,
+                    "engine_shadow_material_lookup_instance_missing_us")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_context_table_overflow") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_material_outer_instance_site_us") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_material_outer_other_site_us") != nullptr
+          && strstr(csvText, "engine_shadow_context_patch_active") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_dependency_missing") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_frame_mismatch") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_entry_mismatch") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_context_mismatch") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_call_failed") != nullptr
+          && strstr(csvText,
+                    "engine_shadow_context_patch_reverted") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_skipped") != nullptr
+          && strstr(csvText, "engine_shadow_material_tex_skipped_cold") != nullptr
+          && strstr(csvText, "engine_shadow_bump_tex_skipped") != nullptr
+          && strstr(csvText, "engine_shadow_bump_tex_skipped_cold") != nullptr
+          && strstr(csvText, "engine_shadow_base_override_skipped") != nullptr
+          && strstr(csvText, "engine_shadow_base_override_skipped_cold")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_alpha_omitted") != nullptr
+          && strstr(csvText, "engine_shadow_alpha_state0") != nullptr
+          && strstr(csvText, "engine_shadow_alpha_state1") != nullptr
+          && strstr(csvText, "engine_shadow_alpha_enqueued") != nullptr
+          && strstr(csvText, "engine_shadow_alpha_enqueue_failed") != nullptr,
+          "the header carries shadow resource types and cold-mesh boundary");
     // The permanent regression test for the header buffer. snprintf truncation
     // is silent -- `n += snprintf(...)` returns the length it wanted, so an
     // overrun writes a short, unterminated header and nothing reports it. A
