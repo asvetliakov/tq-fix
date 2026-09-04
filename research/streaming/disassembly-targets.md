@@ -66,6 +66,11 @@ constructors at `0x23dde0` and `0x23ded0` write that exact vtable.
 
 | RVA | Exact target or site | Why it matters |
 | --- | --- | --- |
+| `0x111ea0` | `Actor::AddToScene` | The DX11 directional scene-gather virtual reached at `RenderDirectional+0x1298`; Run 68's repeated verified stack subsequence identifies this exact class before the cold mesh load. |
+| `0x111fd5` | `Actor::AddToScene -> Actor::UpdateMeshInstance` | Exact `E8` inside the 23-byte window at `0x111fca`. This is the safe earlier behavior boundary: the wrapper can inspect the Actor's root before pose work, while every other caller stays stock. |
+| `0x112060` | `Actor::UpdateMeshInstance` | The independently verified 24-byte entry reads the mesh instance at `Actor+0x184`, updates its transform, then calls `GraphicsMeshInstance::UpdatePose`. |
+| `0x11212e` | `Actor::UpdateMeshInstance -> GraphicsMeshInstance::UpdatePose` | Run 68 records its return at `0x112133` between the Actor scene-add and mesh-load frames. |
+| `0x176570` | `GraphicsMeshInstance::UpdatePose` | Its call at `0x17659d` synchronously ensures `GraphicsMeshInstance+0x4`; all 20 marked cold meshes share return `0x1765a2`. The Run 69 boundary acts before this method rather than letting it touch unloaded mesh fields. |
 | `0x173440` | `GraphicsMeshInstance::GetNumShadowRenderPasses` | Reads the root mesh at instance `+0x4`, immediately ensures it, then returns mesh `+0x7c`. The accepted fix defers only state-0/1 root meshes at this exact class boundary. |
 | `0x1733b0` | `GraphicsMeshInstance::GetShadowRenderStyle` | Obtains the base texture and maps opaque styles `0..2` to alpha-tested styles `3..5`. |
 | `0x1731a0` | `GraphicsMeshInstance::GetTexture` | Ensures the owning mesh, then returns a material texture Resource at entry `+0x14`. |

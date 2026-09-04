@@ -79,6 +79,7 @@ timer_period_ms=0
 pump_timer_min_ms=0
 shadow_transition_reuse=0
 shadow_defer_cold_alpha=0
+shadow_defer_cold_actor_pose=0
 terrain_preload_layers=0
 
 [debug]
@@ -234,6 +235,25 @@ Run 59 then removed every directional-shadow texture load in play, leaving
 cold root meshes and GPU work as the marked burst. The root-mesh part remains
 an explicit temporary local-shadow quality trade under measurement; it is not
 claimed to remove the complete burst.
+
+`shadow_defer_cold_actor_pose=1` moves that same cold-root decision to the
+earlier exact `Actor::AddToScene` call used while
+`GraphicsShadowMapDx11::RenderDirectional` gathers its scene. Stock code calls
+`Actor::UpdateMeshInstance`, which enters `GraphicsMeshInstance::UpdatePose`
+and synchronously loads the root mesh before the later caster gate can see it
+as cold. The switch queues a state-0 root and skips that pose update for this
+directional gather only after the root is already loading, already linked to a
+queue, or the new queue link is confirmed. If queuing cannot be confirmed—or
+if the request makes the root resident immediately—it runs the stock pose
+update instead. The existing exact-class root gate then omits a confirmed-cold
+caster until residency reaches state 2. It implies the complete
+`shadow_defer_cold_alpha` patch set, defaults to `0`, works with the performance
+probe off, and installs no trace group by itself. Color rendering, point
+shadows, resident actors, and every other `Actor::UpdateMeshInstance` caller
+remain stock. With tracing enabled, the `engine_shadow_actor_pose_*` count
+columns show the exact state and enqueue outcome. Run 69 removed the targeted
+synchronous directional loads and exposed the need for the stock fallback on
+an unconfirmed enqueue.
 
 `terrain_preload_layers=1` fixes the runtime terrain path's omitted semantic
 preload. `TerrainRT::LoadRenderData` creates each layer `TerrainType`'s base,

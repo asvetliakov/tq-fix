@@ -1218,7 +1218,8 @@ def check_shadow_mesh_boundary(engine):
        and hook.rstrip().endswith("return 0;"),
        "state-0 root meshes use the stock enqueue tuple and return zero passes")
 
-    install_begin = src.find("if (ok && g_shadowDeferColdAlpha) {")
+    install_begin = src.find(
+        "if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {")
     install_end = src.find("\n    if (ok && trace", install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
@@ -1248,6 +1249,123 @@ def check_shadow_mesh_boundary(engine):
        and "detach(g_shadowMeshPassCountDetour);" in shutdown
        and "g_shadowMeshPassCount = nullptr;" in shutdown,
        "shutdown restores either mesh instrument and clears the trampoline")
+
+
+def check_shadow_actor_pose_boundary(engine):
+    """Prove the earlier exact Actor cold-root deferral and call patch."""
+    print("\nDirectional-shadow Actor pose boundary")
+    callee = table("kActorUpdateMeshInstanceBytes")
+    callee_at = const("kActorUpdateMeshInstanceRva")
+    actor_mesh = const("kActorMeshInstanceOffset")
+    call = table("kActorAddToSceneUpdateMeshWindowBytes")
+    call_at = const("kActorAddToSceneUpdateMeshWindowRva")
+    call_off = const("kActorAddToSceneUpdateMeshCallOffset")
+
+    ok(len(callee) == 24,
+       "Actor::UpdateMeshInstance verifies all 24 bytes around the shared"
+       " prologue")
+    ok(callee[:6] == [0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8]
+       and callee[12:18] == [0x8b, 0x86, 0x84, 0x01, 0x00, 0x00]
+       and struct.unpack_from("<I", bytes(callee), 14)[0] == actor_mesh,
+       "the callee independently proves Actor+%#x is its mesh instance"
+       % actor_mesh)
+    ok(len(call) == 23,
+       "Actor::AddToScene verifies a 23-byte call window")
+    ok(call_off + 5 <= len(call) and call[call_off] == 0xe8,
+       "Actor::AddToScene call offset lands on E8")
+    dest = call_at + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    ok(dest == callee_at,
+       "Actor::AddToScene E8 resolves to Actor::UpdateMeshInstance (%#x)"
+       % dest)
+    ok(engine.exports().get(cstr("kActorUpdateMeshInstanceName")) == callee_at,
+       "Actor::UpdateMeshInstance export resolves to its recorded RVA")
+
+    hook_begin = src.find(
+        "void __fastcall hookShadowActorUpdateMeshInstance(")
+    hook_end = src.find("\n}\n\nint __fastcall hookShadowMeshPassCount",
+                        hook_begin)
+    hook = src[hook_begin:hook_end]
+    ok(hook_begin >= 0 and hook_end > hook_begin
+       and "!g_shadowActorPoseDeferActive || !onMainThread()" in hook
+       and "InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0"
+           in hook
+       and "self + kActorMeshInstanceOffset" in hook
+       and "instance + kGraphicsMeshResourceOffset" in hook
+       and "if (!shouldDeferShadowMesh(state))" in hook,
+       "the earlier gate is exact Actor class, main-thread, directional and"
+       " cold-state only")
+    confirm_begin = src.find("bool shadowActorPoseQueueConfirmed(")
+    confirm_end = src.find("\n}\n\nvoid countShadowActorPoseEnqueueFailure",
+                           confirm_begin)
+    confirm = src[confirm_begin:confirm_end]
+    ok(confirm_begin >= 0 and confirm_end > confirm_begin
+       and "return state == 1 || (state == 0 && inQueue);" in confirm,
+       "the queue postcondition accepts only loading or observably queued"
+       " cold roots")
+    ok(hook.count("g_actorUpdateMeshInstance(self, edx);") == 5
+       and "g_shadowEnqueue(loader, nullptr, mesh, 1, 1, 0);" in hook
+       and "countDeferredShadowActorPose(state, enqueued, false);" in hook,
+       "all non-target paths forward once and state 0 uses the stock queue"
+       " tuple")
+    resident = hook.find("if (after >= 2) {")
+    failed = hook.find("if (failed) {")
+    counted = hook.find("countDeferredShadowActorPose(state, enqueued, false);")
+    ok("enqueued = shadowActorPoseQueueConfirmed(after, inQueue);" in hook
+       and 0 <= resident < failed < counted
+       and "countShadowActorPoseEnqueueFailure();" in hook[failed:counted]
+       and "g_actorUpdateMeshInstance(self, edx);" in hook[resident:failed]
+       and "g_actorUpdateMeshInstance(self, edx);" in hook[failed:counted]
+       and "return;" in hook[resident:failed]
+       and "return;" in hook[failed:counted],
+       "resident-after-enqueue and unconfirmed-enqueue paths fall back to"
+       " stock pose work before a deferred event is counted")
+
+    install_begin = src.find("if (ok && g_shadowDeferColdActorPose) {")
+    install_end = src.find("\n    if (ok && trace", install_begin)
+    install = src[install_begin:install_end]
+    ok(install_begin >= 0 and install_end > install_begin
+       and "resolve(engine, kActorUpdateMeshInstanceName" in install
+       and "signature(kActorUpdateMeshInstanceBytes" in install
+       and "g_shadowDeferActive && updateMeshVerified" in install
+       and "g_shadowActorUpdateMeshPatch" in install
+       and "signature(kActorAddToSceneUpdateMeshWindowBytes" in install
+       and "kActorAddToSceneUpdateMeshCallOffset, updateMesh" in install,
+       "the earlier behavior activates only after both exact windows and the"
+       " later caster gate")
+    ok("g_shadowActorPoseDeferActive = actorPoseOk;" in install
+       and "if (!actorPoseOk) g_actorUpdateMeshInstance = nullptr;" in install,
+       "a failed call patch cannot leave the earlier behavior active")
+
+    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
+    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
+    options = src[read_begin:read_end]
+    install_all_begin = src.find("bool install(HMODULE engine)")
+    install_all_end = src.find("\n}\n\nvoid shutdown()", install_all_begin)
+    install_all = src[install_all_begin:install_all_end]
+    ok('L"shadow_defer_cold_actor_pose", 0' in options
+       and "const bool shadowDefer = g_shadowDeferColdAlpha || shadowActorPose;"
+           in install_all
+       and "!g_tracing && !cache && !async && !pumpFilter && !shadowReuse"
+           in install_all,
+       "the default-off fix reaches install with tracing disabled and implies"
+       " the later root gate")
+    ok('"engine_shadow_actor_pose_deferred"' in probe_src
+       and '"engine_shadow_actor_pose_state0"' in probe_src
+       and '"engine_shadow_actor_pose_state1"' in probe_src
+       and '"engine_shadow_actor_pose_enqueued"' in probe_src
+       and '"engine_shadow_actor_pose_enqueue_failed"' in probe_src
+       and '"engine_shadow_actor_pose_deferred_us"' not in probe_src,
+       "Actor pose diagnostics are counts and no engine duration is charged"
+       " to the mod")
+
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok("restoreCall(g_shadowActorUpdateMeshPatch);" in shutdown
+       and "g_actorUpdateMeshInstance = nullptr;" in shutdown
+       and "g_shadowActorPoseDeferActive = false;" in shutdown,
+       "shutdown restores the Actor call before the later caster gate")
 
 
 def check_shadow_material_textures(engine):
@@ -1696,7 +1814,8 @@ def check_shadow_alpha_defer(engine):
        and "g_engineBase + kBumpTextureNameRva" in wrapper
        and "g_ensureAvailable(texture, nullptr)" in wrapper,
        "bump omission is directional-only and forwards every used case")
-    install_begin = src.find("if (ok && g_shadowDeferColdAlpha) {")
+    install_begin = src.find(
+        "if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {")
     install_end = src.find("\n    if (ok && trace", install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
@@ -1853,6 +1972,10 @@ def main():
             ("kTerrainBlockShaderWindowBytes",
              "kTerrainBlockShaderWindowRva", None),
             ("kShadowMeshPassCountBytes", "kShadowMeshPassCountRva", None),
+            ("kActorUpdateMeshInstanceBytes",
+             "kActorUpdateMeshInstanceRva", None),
+            ("kActorAddToSceneUpdateMeshWindowBytes",
+             "kActorAddToSceneUpdateMeshWindowRva", None),
             ("kGraphicsMeshSetShaderParametersFrameBytes",
              "kGraphicsMeshSetShaderParametersFrameRva", None),
             ("kShadowMaterialLoopFrameBytes",
@@ -2018,6 +2141,7 @@ def main():
     check_outside_directional_resources()
     check_directional_mesh_resource_retention()
     check_shadow_mesh_boundary(engine)
+    check_shadow_actor_pose_boundary(engine)
     check_shadow_material_textures(engine)
     check_shadow_alpha_defer(engine)
     check_shadow_texture_attribution(engine)

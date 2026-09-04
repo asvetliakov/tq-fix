@@ -26,8 +26,8 @@ evidence from a local installation.
 - `object-layouts.md` records only object offsets proven by reads or writes.
 - `cpu-path.md` follows setup, fitting, caster selection, and rendering.
 - `../streaming/disassembly-targets.md` indexes the exact Engine RVAs shared by
-  the shadow and stutter investigations, including the later root-mesh,
-  material-texture, and runtime-terrain targets.
+  the shadow and stutter investigations, including the Actor scene-add/pose
+  chain, later root-mesh gate, material-texture, and runtime-terrain targets.
 - `backend.md` records the D3D11 resource and state configuration.
 - `shaders.md` classifies caster and receiver shaders.
 - `shaders/` contains representative runtime captures, a generated

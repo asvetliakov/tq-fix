@@ -2,37 +2,138 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current after **Run 67 reduced
-the marked play colour-terrain load class**, with the Run 68 directional-mesh
-caller trace installed on branch `stutter-mitigation`.
+built, what is measured, and what to do next. Current after **Run 69 removed
+the synchronous directional cold-mesh class** and its enqueue-failure fallback
+was corrected on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
 
-**READ FINDINGS §80 BEFORE §79. Run 68 is installed.** Run 67's reduced marked
-**play** transition still loads 26 state-0 meshes / 23.583 ms inside the exact
-directional-shadow class, despite twelve base `GraphicsMeshInstance` root
-casters already being omitted. Run 68 passively retains each such mesh's
-engine filename, queue state, frame/duration, verified immediate caller, and
-up to 24 verified call-shaped upstream candidates. F12 emits the prior
-120-frame window from a fixed 128-record ring and reports truncation.
+**READ FINDINGS §84 BEFORE §83.** The post-run checkpoint now forwards stock
+`Actor::UpdateMeshInstance` if a state-0 queue request cannot be confirmed, or
+if it makes the root resident immediately. It skips pose work only for state 1
+or state 0 with an observable queue link. This prevents Run 69's 165 repeated
+failure observations from becoming a multi-second missing caster. No binary
+site or INI setting changed. The verifier passes 456 checks and all 91/91
+relevant mutations are rejected; doctor, release build, and the complete
+off-game self-test pass. The built but not installed
+710,656-byte DLL is SHA-256
+`8cd457072f927455b1f8a4bc4a2af3f399f6501235d268a2cd6c21935ad8ffba`.
 
-There is no new GPU query, per-draw hook, resource operation, behavior knob,
-culling/shadow change, or logging on the candidate frame. Both accepted fixes
-remain enabled. The normal route is required; press F12 after the reduced
-**play** transition and separately note whether the **first world frame**
-loading burst again feels unusually long.
+**READ FINDINGS §83 BEFORE §82. Run 69 completed.** Its five parts are
+**menu** 0--2013, **load-game frame** 2014, **loading screen** 2015--3168,
+**first world frame** 3169, and **play** 3170--7405. F12 at play frame 6826
+has a nearer 65.694 ms `Engine::Update`-class candidate at 6825, but the
+normal-route transition pair is 6797/6798 at 95.290/120.984 ms, beginning
+850 ms and ending 633 ms before the press. Do not merge them or claim the
+marker proves which was felt.
 
-The verifier passes 439 checks and 71/71 relevant mutations are rejected.
-Doctor, release build, and full off-game self-test pass, including the new
-window tests and GPU timestamp retirement. The installed 709,120-byte DLL is
-SHA-256
-`bec80cafbdc9fae6845ba24b1653b9b7cced2a6d86bc6d55a07d28f863f1ebc7`;
-the installed Run 68 INI is
-`d92bfd247b6edd7eeeff4595f2dc3d13b1c145dc644e060f56d878593376e12a`.
-Both installed/source pairs match. Run 67 live files matched their archives
-before removal, and the game was not launched.
+On transition frame 6797, the exact `GraphicsShadowMapDx11::RenderDirectional`
+class sees 30 state-0 `GraphicsMeshInstance` Actor roots before pose, confirms
+23 new queue insertions, skips all 30 pose updates, and omits all 30 roots at
+the later pass-count gate. There are zero directional Resource loads, versus
+Run 68's 20 meshes / 16.419 ms plus one shader / 0.963 ms. Directional CPU
+falls from 19.318 to 5.146 ms. The targeted synchronous class is gone; this is
+stronger evidence than the total pair changing from 242.708 to 216.274 ms.
+
+The remaining pair spends 159.309 ms in the game's `Draw` / `DrawIndexed`
+calls and 2.885 ms in `Map`. Frame 6797's whole GPU interval is 168.095 ms:
+54.441 ms directional, 10.236 ms terrain ground, 4.798 ms enhanced grass, and
+97.007 ms not yet assigned to a named GPU class. Frame 6798 spends 97.651 ms
+in draw submission while its own GPU interval is only 28.044 ms, alongside
+23 off-main texture creations / 55.814 ms. This is the established
+first-use/submission/backpressure class, not remaining synchronous shadow-mesh
+loading and not a message-pump or Wine-only explanation.
+
+The checkpoint has corrected one unsafe edge in the tested code. Away from the marked burst, frames
+6920--7084 record one unconfirmed state-0 Actor-root enqueue on every frame.
+It now forwards stock `Actor::UpdateMeshInstance` whenever
+the queue postcondition cannot be confirmed; continue skipping only state 1,
+already-queued roots, and confirmed new enqueues. Frame 6797 had no such
+failure, so the correction preserves the measured win. The completion message did not
+say whether any missing actor or shadow pop was visible; obtain that answer
+separately. Then classify the 97.007 ms unnamed GPU interval before proposing
+another behavior change.
+
+Run 69 archives are SHA-256
+`38f95a3cd21c499e9057432f9447da1f15124e148210889382b4ed48c05a79ae`
+for the CSV and
+`2b7d1ff73c04fc87926218f0b23a1681d89e7a115fc222086a64bd0ef23fa3ae`
+for the during-session log; both matched their live files.
+
+**READ FINDINGS §82 BEFORE §81. Run 69 was the earlier-deferral setup.** Run 68's five parts are
+**menu** 0--1897, **load-game frame** 1898, **loading screen** 1899--2967,
+**first world frame** 2968, and **play** 2969--7292. F12 at play frame 6654
+follows the normal-route pair 6631/6632 at 108.875/133.833 ms, beginning
+740 ms and ending 498 ms before the press. A nearer separate candidate is
+frame 6644 at 51.206 ms, dominated by 31.117 ms in the `Engine::Update` class;
+the marker cannot by itself prove which the reporter felt. Do not collapse
+them into one max-selected claim.
+
+Frame 6631 has 20 cold `.msh` Resource calls / 16.419 ms plus one `.ssh` /
+0.963 ms inside the exact `GraphicsShadowMapDx11::RenderDirectional` class.
+The 20 mesh calls do **not** include their textures. Two Gadir terrain `.tex`
+loads / 9.464 ms occur separately in the color-render class, and directional
+texture loads are zero. Frame 6631 submits a 200.097 ms whole-GPU interval,
+including 101.390 ms in the directional-shadow class and 18.741 ms enhanced
+grass. Frame 6632 has no Resource load but blocks 84.977 ms in the game's
+`DrawIndexed` calls and 9.459 ms in `Map`. These nested/queued intervals are
+not additive.
+
+All 20 cold meshes, plus one at play frame 6641, share the verified deepest
+chain `Resource::EnsureAvailable <- GraphicsMeshInstance::UpdatePose <-
+Actor::UpdateMeshInstance <- Actor::AddToScene`, under the live DX11
+directional bracket. The exact returns are Engine RVAs `0x213137`, `0x1765a2`,
+`0x112133`, `0x111fda`, and the enclosing scene-add virtual returns at
+`RenderDirectional+0x129b` (`0x18ee1b`). The other logged stack candidates are
+the documented raw superset, not callers. This proves the accepted
+`GetNumShadowRenderPasses` root gate is too late for this Actor class: pose
+work has made the root resident before eligibility is asked. It is not a
+stale DX9-only route.
+
+Run 69 changes only the behavior variable
+`shadow_defer_cold_actor_pose: 0 -> 1` relative to Run 68. It retargets the
+exact `Actor::AddToScene -> Actor::UpdateMeshInstance` call. For a state-0/1
+root on the main thread inside the directional class, it queues state 0 and
+skips this one pose update; the already accepted exact-class root gate then
+omits the still-cold caster until state 2. Color, point shadows, workers,
+resident actors, every other Actor update caller, and `shadow_split` remain
+unchanged. This may remove both the measured 16.419 ms CPU load and the shadow
+draws those newly admitted meshes added; it is not claimed to remove all
+242.708 ms of the pair. Reject it for visible missing actors or objectionable
+shadow pop.
+
+Both sides are independently verified: a 23-byte caller window and 24-byte
+callee window cover the direct call, shared six-byte prologue, exported target,
+and `Actor+0x184` field. The verifier passes 454 checks and all 87/87 relevant
+one-at-a-time mutations are rejected. Doctor, release build, and the full
+off-game self-test pass, including GPU timestamp retirement. The installed
+710,656-byte DLL is SHA-256
+`29f0f725734c3412e609e1b3b4afb69919c66a0e64d876fedfbd616cda6a6dd5`;
+the installed Run 69 INI is SHA-256
+`2f75bdc85228220473aa389d7cb9b2dd7769397110a91657676dce9e1776d6a7`.
+Both installed/source pairs match. Run 68 live files matched their archives
+before removal, both stale live names are absent, and the game was not
+launched. Run the same normal route, press F12 after the **play** transition,
+and separately report any missing actor or shadow pop.
+
+Run 68 archives are SHA-256
+`f68a640d69949ffd4adc9e1ec346ca14939d6eb342754a5bd3a30df33542fec9`
+for the CSV and
+`0af78f91699c3da0791f3294a321d114e262f27e25cf338967fb3f3e81ceaba9`
+for the during-session log. Its **first world frame** is 828.877 ms, so Run
+67's 1,352.9 ms spike did not repeat. In matched collision-active full-scene
+**play** rows under 60 ms, Run 68 versus Run 67 stays within 0.27 ms in all
+reported draw bands; never use an across-run p50.
+
+**READ FINDINGS §80 BEFORE §79. Run 68 was the passive caller trace.** Run 67's
+reduced marked **play** transition still loaded 26 state-0 meshes / 23.583 ms
+inside the exact directional-shadow class despite twelve base
+`GraphicsMeshInstance` root casters already being omitted. Run 68 retained
+each mesh's engine filename, queue state, frame/duration, verified immediate
+caller, and up to 24 verified call-shaped upstream candidates. Its F12 report
+was complete and the result is corrected forward by §81.
 
 **READ FINDINGS §79 BEFORE §78. Run 67 completed and the user says the old
 stutter feels much smaller.** Its five parts are **menu** 0--2074,

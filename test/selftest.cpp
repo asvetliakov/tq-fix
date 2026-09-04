@@ -928,6 +928,14 @@ void testEngineProbe() {
           && !tq::engineprobe::shouldDeferShadowMeshForTest(2)
           && !tq::engineprobe::shouldDeferShadowMeshForTest(3),
           "only root meshes in resource states 0/1 are deferred");
+    check(!tq::engineprobe::shadowActorPoseQueueConfirmedForTest(0, false)
+          && tq::engineprobe::shadowActorPoseQueueConfirmedForTest(0, true)
+          && tq::engineprobe::shadowActorPoseQueueConfirmedForTest(1, false)
+          && tq::engineprobe::shadowActorPoseQueueConfirmedForTest(1, true)
+          && !tq::engineprobe::shadowActorPoseQueueConfirmedForTest(2, false)
+          && !tq::engineprobe::shadowActorPoseQueueConfirmedForTest(2, true),
+          "cold Actor pose omission requires a confirmed queue and never"
+          " skips a resident root");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
@@ -935,7 +943,32 @@ void testEngineProbe() {
           "re-reading no INI puts shadow_defer_cold_alpha back off");
     DeleteFileW(ini);
 
-    // The eighth independent way in queues runtime terrain-layer textures at
+    // The eighth independent way in moves the same cold-root decision to the
+    // exact Actor::AddToScene call proved by Run 68. It implies the later
+    // caster gate, defaults off, and brings no trace group by itself.
+    check(!tq::engineprobe::shadowDeferColdActorPoseForTest(),
+          "shadow_defer_cold_actor_pose is off with no INI at all");
+    WritePrivateProfileStringW(L"performance",
+                               L"shadow_defer_cold_actor_pose", L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::shadowDeferColdActorPoseForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "shadow_defer_cold_actor_pose reaches install() with the probe off,"
+          " and still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(16384),
+          "an actor-pose-defer-only boot installs no trace group");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::shadowDeferColdActorPoseForTest(),
+          "re-reading no INI puts shadow_defer_cold_actor_pose back off");
+    DeleteFileW(ini);
+
+    // The ninth independent way in queues runtime terrain-layer textures at
     // their exact post-LoadTextures boundary. It is a behavior fix: default
     // off, reachable with the probe off, and unable to bring a trace group.
     check(!tq::engineprobe::terrainPreloadLayersForTest(),
@@ -2405,6 +2438,9 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     tq::engineprobe::countDeferredShadowMeshForTest(0, true, false);
     tq::engineprobe::countDeferredShadowMeshForTest(1, false, false);
     tq::engineprobe::countDeferredShadowMeshForTest(0, false, true);
+    tq::engineprobe::countDeferredShadowActorPoseForTest(0, true, false);
+    tq::engineprobe::countDeferredShadowActorPoseForTest(1, false, false);
+    tq::engineprobe::countDeferredShadowActorPoseForTest(0, false, true);
     tq::probe::endFrame(16.7f);
     check(tq::probe::counterForTest(
               0, tq::probe::CounterEngineShadowAlphaOmitted) == 3
@@ -2428,6 +2464,17 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && tq::probe::counterForTest(
               0, tq::probe::CounterEngineShadowMeshOmittedEnqueueFailed) == 1,
           "cold root-mesh counters partition state and enqueue outcome");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowActorPoseDeferred) == 3
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowActorPoseState0) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowActorPoseState1) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowActorPoseEnqueued) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowActorPoseEnqueueFailed) == 1,
+          "cold Actor pose counters partition state and enqueue outcome");
 
     // A steady baseline, then one frame that spikes in a single phase. The row
     // for that frame has to name the phase, not merely report the frame time.
@@ -2589,6 +2636,12 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && strstr(csvText, "engine_shadow_mesh_omitted_state1") != nullptr
           && strstr(csvText, "engine_shadow_mesh_omitted_enqueued") != nullptr
           && strstr(csvText, "engine_shadow_mesh_omitted_enqueue_failed")
+                 != nullptr
+          && strstr(csvText, "engine_shadow_actor_pose_deferred") != nullptr
+          && strstr(csvText, "engine_shadow_actor_pose_state0") != nullptr
+          && strstr(csvText, "engine_shadow_actor_pose_state1") != nullptr
+          && strstr(csvText, "engine_shadow_actor_pose_enqueued") != nullptr
+          && strstr(csvText, "engine_shadow_actor_pose_enqueue_failed")
                  != nullptr
           && strstr(csvText, "engine_shadow_material_tex_us") != nullptr
           && strstr(csvText, "engine_shadow_material_tex_used_us") != nullptr

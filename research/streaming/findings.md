@@ -5700,6 +5700,265 @@ and `shadow_split` must remain unchanged. No visual observation accompanied
 the completion message, so run 59 supplies no new artifact-safety claim.
 
 
+## 84. Post-Run-69 safety correction: an unconfirmed queue must take the stock pose path
+
+Run 69 proves the successful transition deferral, but its 165 consecutive
+enqueue-failure counters prove that the original failure policy was too broad.
+The behavior no longer equates "we called `EnqueueResource`" with "this root
+may safely be omitted." After the call it re-reads both verified fields. It
+skips `Actor::UpdateMeshInstance` only if the root is in loader state 1 or is
+state 0 with a non-null queue link. If the root has already reached state 2,
+it runs the stock pose update immediately; if it remains state 0 without a
+queue link, it records the failure and also runs the stock update. A resident
+caster therefore cannot be admitted with stale pose data, and an unqueueable
+caster cannot remain missing for many directional builds.
+
+This correction changes no byte site, offset, exported identity, enqueue
+tuple, or INI setting. The independently verified 23-byte
+`Actor::AddToScene` caller window and 24-byte `Actor::UpdateMeshInstance`
+callee window remain the complete binary surface. The source verifier now
+also requires both stock-forward branches before a deferred event can be
+counted and passes 456 checks. The mutation audit rejects all 91/91 relevant
+one-at-a-time changes, including the queue predicate and both stock fallbacks.
+The off-game self-test covers the exact queue
+postcondition for states 0, 1, and 2. `npm run doctor`, the release build, and
+the complete self-test pass, including GPU timestamp retirement. The resulting
+710,656-byte checkpoint DLL is SHA-256
+`8cd457072f927455b1f8a4bc4a2af3f399f6501235d268a2cd6c21935ad8ffba`.
+It is built but not installed; the game directory still contains the tested
+Run 69 DLL/configuration and its live files.
+
+
+## 83. Run 69 removes the synchronous directional mesh class; the remaining burst is submission/queue work
+
+Run 69 is archived as `tqflicker-frames.run69.csv`, SHA-256
+`38f95a3cd21c499e9057432f9447da1f15124e148210889382b4ed48c05a79ae`,
+and `tqflicker-debug.run69.log`, SHA-256
+`2b7d1ff73c04fc87926218f0b23a1681d89e7a115fc222086a64bd0ef23fa3ae`.
+Both archives were byte-compared with the live files. The CSV contains 7,406
+contiguous presented frames, 0--7405, totaling 95.087 s. Its five parts are
+**menu** 0--2013 (18.275 s), **load-game frame** 2014 (1,513.717 ms),
+**loading screen** 2015--3168 (10.125 s), **first world frame** 3169
+(915.749 ms), and **play** 3170--7405 (64.257 s).
+
+F12 at **play** frame 6826 again leaves two candidates that must not be
+collapsed. The nearest is frame 6825 at 65.694 ms, ending 17 ms before the
+marker; it has no Resource load and spends 46.309 ms in the `Engine::Update`
+class. The normal-route loading transition is the earlier contiguous pair
+6797/6798 at 95.290/120.984 ms, beginning 850 ms and ending 633 ms before the
+marker. It totals 216.274 ms. The marker does not by itself prove which the
+reporter felt.
+
+The new behavior does exactly the narrow operation it was built to test on
+frame 6797. In the `GraphicsShadowMapDx11::RenderDirectional` class it finds
+30 state-0 `GraphicsMeshInstance` Actor roots before pose work, confirms 23
+new queue insertions, and skips all 30 `Actor::UpdateMeshInstance` calls. The
+later exact-class gate omits all 30 roots. There is no enqueue failure on this
+frame. Directional synchronous Resource loads are **zero**, versus 21 calls /
+17.382 ms on Run 68's corresponding onset; that previous population was 20
+meshes / 16.419 ms and one shader / 0.963 ms. The directional CPU call falls
+from 19.318 to 5.146 ms. This is direct evidence that the earlier gate removes
+the targeted class, independently of total-frame variation.
+
+The only main-thread Resource work left on frame 6797 is two colour-terrain
+textures / 4.174 ms outside directional shadow, again the Gadir rocky-pebbles
+base/normal pair. One additional 0.977 ms Resource call is non-main. Frame
+6798 has no main-thread Resource load. Thus the deferred meshes did not merely
+reappear as synchronous directional work on the next frame.
+
+The pair is not fixed. Run 69 totals 159.309 ms in the game's `Draw` /
+`DrawIndexed` calls and 2.885 ms in `Map`, or 162.194 ms of the 216.274 ms
+pair. The two directional CPU calls total only 8.827 ms. Frame 6797 submits a
+168.095 ms whole-GPU interval, including 54.441 ms directional shadow,
+10.236 ms terrain ground, and 4.798 ms enhanced grass; the currently named GPU
+classes leave 97.007 ms unclassified. Frame 6798 then spends 97.651 ms in
+draw submission while its own GPU interval is only 28.044 ms. It also records
+23 off-main texture creations / 55.814 ms and 38.827 ms of archive inflate;
+those worker intervals overlap the frame and are not amounts to add. This is
+the established first-use GPU submission/backpressure shape, now with the
+cold directional mesh wait removed. It exists in D3D11 on native Windows as
+well as under CrossOver; the present run does not support a host-only cause.
+
+For scale only, the corresponding Run 68 pair was 242.708 ms. The observed
+Run-69 difference is -26.434 ms, but prior nominally identical transitions
+vary too widely to assign that whole delta to the behavior. The class-local
+zero and the 14.172 ms directional-CPU reduction are the stronger evidence.
+In collision-active, full-scene **play** frames under 60 ms with no Resource
+load or region change, Run 69 minus Run 68 mean frame/GPU differences are
+-0.008/-0.008 ms at 500--999 indexed draws (1,159 versus 1,141 frames),
++0.296/+0.281 ms at 1,500--1,999 (715 versus 831), and +0.259/+0.330 ms at
+2,000-plus (234 versus 222). The 1,000--1,499 population is only 42 versus 43
+frames and is not used. This excludes a gross steady-scene regression; it is
+not a fine improvement claim and no across-run p50 is used.
+
+One safety result needs correction before this becomes an accepted default.
+Across **play**, the Actor gate sees 255 state-0 roots and no state-1 roots.
+It confirms 76 new queue insertions; 14 were already linked to a queue. On
+frames 6920--7084, exactly one state-0 attempt per frame fails to establish
+either a nonzero state or a queue link, producing 165 consecutive
+`engine_shadow_actor_pose_enqueue_failed` events. The trace does not retain
+the Resource identity, so calling all 165 one object remains an inference,
+but the run proves the current code can keep omitting an unconfirmed root for
+several seconds. The safe policy is narrower: skip pose work only for state 1,
+an existing queue link, or a state-0 enqueue whose postcondition is confirmed;
+on failure, forward the stock `Actor::UpdateMeshInstance` call. That fallback
+does not affect frame 6797, where every attempted enqueue succeeds.
+
+Visual acceptance is still separate evidence. The completion message did not
+say whether a missing actor or shadow pop was seen, so this run does not claim
+that result. After the failure fallback and visual answer, the next useful
+instrument is a GPU-pass breakdown of the 97.007 ms unclassified interval,
+not another mesh/resource A/B and not another message-pump experiment.
+
+
+## 82. Run 69 setup: defer cold Actor roots before directional pose work
+
+Run 68 identifies an earlier exact boundary rather than a reason to rewrite
+the shadow system. All 20 cold mesh Resources on the marked **play** transition
+frame are synchronously ensured by `GraphicsMeshInstance::UpdatePose`, called
+from `Actor::UpdateMeshInstance`, called from `Actor::AddToScene`, while the
+verified `GraphicsShadowMapDx11::RenderDirectional` bracket is live. The
+accepted `GraphicsMeshInstance::GetNumShadowRenderPasses` root gate comes
+later; these roots have already reached state 2 by then and escape it.
+
+Run 69 adds `[performance] shadow_defer_cold_actor_pose=1`. It retargets only
+the direct `Actor::AddToScene -> Actor::UpdateMeshInstance` `E8` at RVA
+`0x111fd5`, inside a 23-byte verified caller window. An independent 24-byte
+callee window verifies the shared six-byte prologue, exported
+`Actor::UpdateMeshInstance` identity at `0x112060`, and the mesh instance at
+`Actor+0x184`. The wrapper follows that exact instance to its root Resource at
+`GraphicsMeshInstance+0x4`. On the main thread and inside the DX11 directional
+class only, state 0 is handed to the stock loader with the established
+`(priority=1, notify=true, immediate=false)` tuple and state 0/1 skips this one
+pose update. `Actor::AddToScene` still adds the renderable; the already
+accepted exact-class pass-count gate then returns zero until the root reaches
+state 2. Resident actors, the color class, point shadows, workers, and every
+other `Actor::UpdateMeshInstance` caller retain stock behavior.
+
+This test is not justified by 16.419 ms alone. Keeping those 20 roots cold at
+the later gate also omits their shadow draws from the transition frame, so it
+can affect part of Run 68's 101.390 ms directional GPU interval and the next
+frame's 84.977 ms `DrawIndexed` drain. The visual trade remains temporary
+missing local casters while the ordinary background request completes; check
+explicitly for shadow popping or missing actors. `shadow_split` is untouched.
+
+The switch defaults off, reaches `install()` with the performance probe off,
+and brings no trace group. Enabling it implies the complete later
+`shadow_defer_cold_alpha` patch set because skipping pose work without the
+later root rejection would be unsafe. With tracing already enabled, five new
+count-only `engine_shadow_actor_pose_*` columns record state and enqueue
+outcome; no engine duration is named `_ms` or charged to the mod.
+
+The exact caller/callee windows, field, call destination, export, option,
+directional/state predicates, enqueue tuple, activation dependency, rollback,
+and CSV identity are independently checked. `verify-sites.py` passes 454
+checks. Doctor, the release build, and the complete off-game self-test pass,
+including GPU timestamp retirement and the new default-off/no-trace and
+counter-partition tests. The mutation audit rejects all 87 one-at-a-time
+changes, including all 16 added for this boundary.
+
+Run 69 is built from `cache/runs/run69-defer-cold-actor-pose.ini`. Relative to
+Run 68, the only behavior variable changed is
+`shadow_defer_cold_actor_pose: 0 -> 1`; both accepted behaviors and the same
+four instruments remain enabled. The 710,656-byte installed DLL is
+byte-identical to the build at SHA-256
+`29f0f725734c3412e609e1b3b4afb69919c66a0e64d876fedfbd616cda6a6dd5`.
+The installed/source INIs are byte-identical at SHA-256
+`2f75bdc85228220473aa389d7cb9b2dd7769397110a91657676dce9e1776d6a7`.
+Run 68's live CSV/log matched their archives before removal and both stale live
+names are absent. The game was not launched. Run the same normal route, press
+F12 after the **play** transition, and report any visible missing actor or
+shadow pop separately from the transition's felt duration.
+
+
+## 81. Run 68 resolves the remaining cold meshes to Actor pose work before caster eligibility
+
+Run 68 completed with 7,293 contiguous presented frames, 0--7292, totaling
+96.435 s. Its five session parts are **menu** 0--1897 (17.840 s), **load-game
+frame** 1898 (1,511.398 ms), **loading screen** 1899--2967 (9.492 s), **first
+world frame** 2968 (828.877 ms), and **play** 2969--7292 (66.763 s).
+
+F12 at **play** frame 6654 is still a reaction anchor, not proof that the
+nearest candidate is the felt event. The nearest candidate is frame 6644 at
+51.206 ms, ending 219 ms before the press; it has no Resource load and spends
+31.117 ms in the `Engine::Update` class. The normal-route loading transition
+is the earlier contiguous pair 6631/6632 at 108.875/133.833 ms, beginning
+740 ms and ending 498 ms before the press. That pair totals 242.708 ms. It is
+the same resource-plus-submission shape as the old marked transition, but the
+marker cannot by itself prove whether the reporter reacted to the pair or the
+nearer update frame. Neither is selected by whole-file `max()`.
+
+On frame 6631, 23 main-thread Resource calls / 26.846 ms partition exactly
+into 21 / 17.382 ms inside the `GraphicsShadowMapDx11::RenderDirectional`
+class and two / 9.464 ms outside it. The directional population is 20 `.msh`
+Resources / 16.419 ms plus one `.ssh` Resource / 0.963 ms. The complete mesh
+call durations include the mesh loader's own parsing, decompression, and
+buffer work, but not the two separately observed terrain `.tex` loads and not
+an unobserved bundle of mesh textures. There are zero directional `.tex`
+loads. The two outside calls are again the Gadir rocky-pebbles base/normal
+terrain pair; the exact `TerrainType` received `PreLoad(true)` in the
+**loading screen** at frame 2045 and its runtime owner was preloaded through
+frame 6630, yet both enter color material use in state 0. Run 67's reduction
+from thirteen onset textures to two therefore repeats, while the remaining
+pair again shows that one early queue request is not a residency guarantee.
+
+The retained caller evidence is complete: F12 emits 21 records from its
+120-frame **play** window, with no ring truncation. Twenty occur on frame 6631
+and one on frame 6641; every one entered state 0 with no pre-existing queue
+flag and has the same verified deepest subsequence:
+
+```
+Resource::EnsureAvailable return                 E+0x213137
+GraphicsMeshInstance::UpdatePose return          E+0x1765a2
+Actor::UpdateMeshInstance return                 E+0x112133
+Actor::AddToScene return                         E+0x111fda
+GraphicsShadowMapDx11::RenderDirectional virtual E+0x18ee1b
+```
+
+Static bytes select that sequence from the deliberately over-complete raw
+stack candidates. `0x1765a2` follows the `E8` from `UpdatePose` to
+`Resource::EnsureAvailable`; `0x112133` follows the `E8` from
+`Actor::UpdateMeshInstance` to `UpdatePose`; `0x111fda` follows the `E8` from
+`Actor::AddToScene` to `UpdateMeshInstance`; and `0x18ee1b` follows the
+directional renderer's virtual scene-add call. Other repeated candidates,
+including the earlier `RenderDirectional+0x113a`, are a raw-stack superset and
+are not promoted to callers merely because they look call-shaped. This proves
+the remaining meshes are admitted during the DX11 directional scene gather,
+before `GetNumShadowRenderPasses`; it does not support a stale-DX9-only label.
+
+The resource time is not the dominant bound. Frame 6631 spends 102.641 ms in
+the `Engine::Render` class and 52.733 ms in the game's `DrawIndexed` calls
+while submitting a 200.097 ms whole-GPU interval, including 101.390 ms in the
+directional-shadow class and 18.741 ms in the enhanced-grass class. Frame
+6632 has no Resource load but spends 84.977 ms in `DrawIndexed` and 9.459 ms
+in `Map`, producing a 117.300 ms `Engine::Render` interval. The CPU resource,
+CPU render, GPU, and following submission intervals overlap or queue behind
+one another and must not be added as independent costs.
+
+Run 67's unusually long **first world frame** did not repeat: this run is
+828.877 ms rather than 1,352.9 ms. It is a different session part and is not
+evidence for the **play** behavior. The passive caller retention also has no
+measurable steady-state regression. For collision-active, full-scene **play**
+frames under 60 ms with no Resource load or shadow-region change, Run 68 minus
+Run 67 mean frame differences are +0.104 ms at 500--999 indexed draws (1,155
+versus 1,168 frames), -0.265 ms at 1,500--1,999 (842 versus 751), and +0.051
+ms at 2,000-plus (223 versus 227). The corresponding GPU differences are
++0.100, -0.231, and +0.021 ms. No across-run p50 is used.
+
+The supported next test is not a mesh-system rewrite or broad preload. Move
+the existing cold-root decision to the exact `Actor::AddToScene` call before
+`UpdateMeshInstance`, queue state 0, and let the later exact-class gate omit
+the still-cold caster. That isolates both the measured 16.419 ms CPU load and
+any shadow draws those newly admitted meshes would have added. It leaves the
+color scene and all resident actors unchanged.
+
+The archived CSV is `tqflicker-frames.run68.csv`, SHA-256
+`f68a640d69949ffd4adc9e1ec346ca14939d6eb342754a5bd3a30df33542fec9`.
+The during-session log is `tqflicker-debug.run68.log`, SHA-256
+`0af78f91699c3da0791f3294a321d114e262f27e25cf338967fb3f3e81ceaba9`;
+the live files were byte-identical to those archives at capture.
+
+
 ## 80. Run 68 setup: retain exact caller chains for the remaining directional cold meshes
 
 Run 67 leaves a specific class, not a reason to broaden the current shadow

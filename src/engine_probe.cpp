@@ -204,6 +204,36 @@ const BYTE kShadowMeshPassCountBytes[] = {
     0x5e, 0xc3                                 // pop esi; ret
 };
 
+// Run 68 proved the remaining cold root meshes are forced earlier than the
+// pass-count boundary above. GraphicsShadowMapDx11::RenderDirectional invokes
+// Actor::AddToScene through its scene-gather virtual; that exact Actor method
+// calls Actor::UpdateMeshInstance, which calls GraphicsMeshInstance::UpdatePose
+// and synchronously ensures Actor+0x184 -> GraphicsMeshInstance+4. Retarget the
+// existing E8 rather than detouring either shared-prologue function. The
+// 23-byte caller window and independent 24-byte callee window prove the exact
+// class, target, and Actor mesh-instance field before the wrapper reads it.
+const DWORD kActorUpdateMeshInstanceRva = 0x112060;
+const char kActorUpdateMeshInstanceName[] =
+    "?UpdateMeshInstance@Actor@GAME@@QAEXXZ";
+const unsigned kActorMeshInstanceOffset = 0x184;
+const BYTE kActorUpdateMeshInstanceBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,        // shared prologue
+    0x83, 0xec, 0x64,
+    0x56,
+    0x8b, 0xf1,
+    0x8b, 0x86, 0x84, 0x01, 0x00, 0x00,        // [Actor+0x184]
+    0xf3, 0x0f, 0x7e, 0x86, 0x74, 0x02
+};
+const DWORD kActorAddToSceneUpdateMeshWindowRva = 0x111fca;
+const unsigned kActorAddToSceneUpdateMeshCallOffset = 11;
+const BYTE kActorAddToSceneUpdateMeshWindowBytes[] = {
+    0x80, 0xbe, 0x88, 0x01, 0x00, 0x00, 0x00,  // cmp byte [Actor+0x188],0
+    0x74, 0x6e,
+    0x8b, 0xce,                                // ecx = Actor
+    0xe8, 0x86, 0x00, 0x00, 0x00,              // Actor::UpdateMeshInstance
+    0x0f, 0xb6, 0x86, 0x94, 0x02, 0x00, 0x00
+};
+
 // The DX11 shadow RenderPass reaches the mesh's generic material-parameter
 // loop. For every type-7 (texture) entry that loop calls
 // GraphicsTexture::GetTexture *before* asking FUN_10035ea0 to bind the value;
@@ -1567,6 +1597,14 @@ bool g_shadowTransitionReuse;
 // resident casters are untouched.
 bool g_shadowDeferColdAlpha;
 bool g_shadowDeferActive;
+// [performance] shadow_defer_cold_actor_pose. Run 68 resolves a still-earlier
+// synchronous root-mesh dependency in the exact Actor::AddToScene class.
+// When enabled, state-0 roots are queued and Actor::UpdateMeshInstance is
+// deferred for this directional gather only. The later root-caster gate above
+// then omits the not-yet-resident renderable. This option implies the complete
+// accepted shadow-defer patch set and, like it, installs no trace group.
+bool g_shadowDeferColdActorPose;
+bool g_shadowActorPoseDeferActive;
 // [performance] terrain_preload_layers. After runtime LoadRenderData creates
 // one TerrainType's texture Resources, call the engine's own semantic
 // PreLoad(true) so those resources enter the ordinary background queue before
@@ -1613,6 +1651,7 @@ typedef void* (__fastcall* GuaranteedGetLevelFn)(void* self, void* edx,
 typedef void (__fastcall* LoadResourceFn)(void* self, void* edx, void* resource);
 typedef void (__fastcall* EnsureAvailableFn)(void* self, void* edx);
 typedef int (__fastcall* ShadowMeshPassCountFn)(void* self, void* edx);
+typedef void (__fastcall* ActorUpdateMeshInstanceFn)(void* self, void* edx);
 typedef const char* (__fastcall* ResourceFileNameFn)(void* self, void* edx);
 typedef void* (__fastcall* GraphicsTextureGetTextureFn)(void* self, void* edx);
 typedef void (__fastcall* GraphicsMeshSetShaderParametersFn)(
@@ -1692,6 +1731,7 @@ GuaranteedGetLevelFn g_guaranteedGetLevel;
 LoadResourceFn g_loadResource;
 EnsureAvailableFn g_ensureAvailable;
 ShadowMeshPassCountFn g_shadowMeshPassCount;
+ActorUpdateMeshInstanceFn g_actorUpdateMeshInstance;
 ResourceFileNameFn g_resourceFileName;
 GraphicsTextureGetTextureFn g_graphicsTextureGetTexture;
 GraphicsMeshSetShaderParametersFn g_graphicsMeshSetShaderParameters;
@@ -1771,6 +1811,7 @@ CallPatch g_forceLoadPatches[kForceLoadSiteCount];
 CallPatch g_fencePatch;
 CallPatch g_sweepPatches[kSweepCount];
 CallPatch g_shadowDirectionalPatch;
+CallPatch g_shadowActorUpdateMeshPatch;
 CallPatch g_shadowMeshEnsurePatch;
 CallPatch g_shadowMaterialTexturePatch;
 CallPatch g_shadowTextureParameterPatch;
@@ -3616,6 +3657,97 @@ void countDeferredShadowMesh(unsigned state, bool enqueued, bool failed) {
     if (failed)
         tq::probe::engineCount(
             tq::probe::CounterEngineShadowMeshOmittedEnqueueFailed);
+}
+
+void countDeferredShadowActorPose(unsigned state, bool enqueued, bool failed) {
+    if (!g_shadowTracing) return;
+    tq::probe::engineCount(
+        tq::probe::CounterEngineShadowActorPoseDeferred);
+    tq::probe::engineCount(state == 0
+        ? tq::probe::CounterEngineShadowActorPoseState0
+        : tq::probe::CounterEngineShadowActorPoseState1);
+    if (enqueued)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowActorPoseEnqueued);
+    if (failed)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowActorPoseEnqueueFailed);
+}
+
+bool shadowActorPoseQueueConfirmed(unsigned state, bool inQueue) {
+    // A state-0 root is safe to omit only while it has an observable queue
+    // owner. State 1 is the loader's in-progress state. State 2 must run the
+    // pose update immediately; admitting a resident caster after skipping its
+    // update would be worse than the synchronous fallback.
+    return state == 1 || (state == 0 && inQueue);
+}
+
+void countShadowActorPoseEnqueueFailure() {
+    if (g_shadowTracing)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowActorPoseEnqueueFailed);
+}
+
+void __fastcall hookShadowActorUpdateMeshInstance(void* self, void* edx) {
+    if (!g_actorUpdateMeshInstance) return;
+    // This wrapper replaces only Actor::AddToScene's direct call. The dynamic
+    // bracket narrows it further to the main-thread DX11 directional gather;
+    // every colour, point-shadow, worker, resident, and other Actor update is
+    // forwarded unchanged.
+    if (!g_shadowActorPoseDeferActive || !onMainThread()
+        || InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0
+        || !g_resourceStateVerified || !self || !g_resourceLoaderAccessor
+        || !g_shadowEnqueue) {
+        g_actorUpdateMeshInstance(self, edx);
+        return;
+    }
+
+    void* const instance = *(void**)((BYTE*)self + kActorMeshInstanceOffset);
+    void* const mesh = instance
+        ? *(void**)((BYTE*)instance + kGraphicsMeshResourceOffset) : nullptr;
+    if (!mesh) {
+        g_actorUpdateMeshInstance(self, edx);
+        return;
+    }
+    const unsigned state = *(const unsigned*)((const BYTE*)mesh
+                                              + kResourceLoadedStateOffset);
+    if (!shouldDeferShadowMesh(state)) {
+        g_actorUpdateMeshInstance(self, edx);
+        return;
+    }
+
+    bool enqueued = false;
+    bool failed = false;
+    if (state == 0
+        && !*(void* const*)((const BYTE*)mesh + kResourceInQueueOffset)) {
+        void* const loader = g_resourceLoaderAccessor(mesh, nullptr);
+        if (loader) {
+            // The same stock preload tuple used by the later root-caster gate:
+            // priority 1, notify=true, immediate=false.
+            g_shadowEnqueue(loader, nullptr, mesh, 1, 1, 0);
+            const unsigned after = *(const unsigned*)((const BYTE*)mesh
+                                                       + kResourceLoadedStateOffset);
+            const bool inQueue = *(void* const*)((const BYTE*)mesh
+                                                 + kResourceInQueueOffset)
+                != nullptr;
+            enqueued = shadowActorPoseQueueConfirmed(after, inQueue);
+            if (after >= 2) {
+                g_actorUpdateMeshInstance(self, edx);
+                return;
+            }
+        }
+        failed = !enqueued;
+        if (failed) {
+            countShadowActorPoseEnqueueFailure();
+            g_actorUpdateMeshInstance(self, edx);
+            return;
+        }
+    }
+    countDeferredShadowActorPose(state, enqueued, false);
+    // Do not enter UpdatePose for this directional gather. Actor::AddToScene
+    // still submits the renderable; the already-installed exact-class
+    // GetNumShadowRenderPasses gate returns zero while this root is cold, and
+    // both paths restore themselves automatically after residency reaches 2.
 }
 
 int __fastcall hookShadowMeshPassCount(void* self, void* edx) {
@@ -5801,7 +5933,7 @@ bool installShadow(HMODULE engine, bool trace) {
         g_renderDirectional = nullptr;
     }
     note("GraphicsShadowMapDx11::RenderDirectional", ok);
-    if (ok && g_shadowDeferColdAlpha) {
+    if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {
         const bool recordOk = g_buildShadowRecord
             && tq::detour::patchCall(
                 g_shadowRecordPatch, engine,
@@ -5877,6 +6009,28 @@ bool installShadow(HMODULE engine, bool trace) {
         note("opaque texture-free / cold alpha shadow mitigation", deferOk);
         note("unused directional bump-texture omission", deferOk && bumpOk);
         note("cold root-mesh caster deferral", deferOk && meshOk);
+    }
+    if (ok && g_shadowDeferColdActorPose) {
+        void* const updateMesh = resolve(engine, kActorUpdateMeshInstanceName,
+                                         kActorUpdateMeshInstanceRva);
+        const bool updateMeshVerified = updateMesh
+            && tq::detour::matches(
+                engine, updateMesh,
+                signature(kActorUpdateMeshInstanceBytes,
+                          sizeof(kActorUpdateMeshInstanceBytes)));
+        g_actorUpdateMeshInstance = updateMeshVerified
+            ? (ActorUpdateMeshInstanceFn)updateMesh : nullptr;
+        const bool actorPoseOk = g_shadowDeferActive && updateMeshVerified
+            && tq::detour::patchCall(
+                g_shadowActorUpdateMeshPatch, engine,
+                (BYTE*)engine + kActorAddToSceneUpdateMeshWindowRva,
+                signature(kActorAddToSceneUpdateMeshWindowBytes,
+                          sizeof(kActorAddToSceneUpdateMeshWindowBytes)),
+                kActorAddToSceneUpdateMeshCallOffset, updateMesh,
+                (const void*)&hookShadowActorUpdateMeshInstance);
+        if (!actorPoseOk) g_actorUpdateMeshInstance = nullptr;
+        g_shadowActorPoseDeferActive = actorPoseOk;
+        note("Actor::AddToScene cold directional pose deferral", actorPoseOk);
     }
     if (ok && trace && g_resourceStateVerified) {
         void* const ensure = resolve(engine, kEnsureAvailableName,
@@ -6177,6 +6331,14 @@ void readOptions(const wchar_t* iniPath) {
     g_shadowDeferColdAlpha = iniPath && iniPath[0]
         && GetPrivateProfileIntW(L"performance", L"shadow_defer_cold_alpha", 0,
                                  iniPath) != 0;
+    // Moves the same cold-root decision earlier for the exact
+    // Actor::AddToScene -> Actor::UpdateMeshInstance call proved by Run 68.
+    // Enabling it implies the later complete shadow-defer patch set, because
+    // the early skip is safe only when the cold renderable is then omitted.
+    g_shadowDeferColdActorPose = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance",
+                                 L"shadow_defer_cold_actor_pose", 0,
+                                 iniPath) != 0;
     // Runtime TerrainRT creates layer texture Resources but omits the stock
     // TerrainType semantic preload that would queue them. This fix invokes
     // that stock non-blocking path at the exact post-LoadTextures boundary.
@@ -6196,7 +6358,8 @@ bool install(HMODULE engine) {
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
     // archive_cache_mb, async_level_load, shadow_transition_reuse,
-    // shadow_defer_cold_alpha and terrain_preload_layers add
+    // shadow_defer_cold_alpha, shadow_defer_cold_actor_pose and
+    // terrain_preload_layers add
     // independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
@@ -6207,7 +6370,10 @@ bool install(HMODULE engine) {
     const bool async = g_asyncLevelLoad;
     const bool pumpFilter = g_pumpTimerMinMs != 0;
     const bool shadowReuse = g_shadowTransitionReuse;
-    const bool shadowDefer = g_shadowDeferColdAlpha;
+    const bool shadowActorPose = g_shadowDeferColdActorPose;
+    // The earlier Actor boundary depends on the exact later root-caster gate;
+    // requesting it therefore installs the same complete accepted patch set.
+    const bool shadowDefer = g_shadowDeferColdAlpha || shadowActorPose;
     const bool terrainPreload = g_terrainPreloadLayers;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
@@ -6256,6 +6422,8 @@ bool install(HMODULE engine) {
     g_activeTerrainMaterialIndex = -1;
     g_terrainTracing = false;
     g_terrainPreloadLayersActive = false;
+    g_shadowActorPoseDeferActive = false;
+    g_actorUpdateMeshInstance = nullptr;
     const bool shadowDeferReady = shadowDefer
         && prepareShadowAlphaDefer(engine);
     if (wants(kGroupLoads)) installLoads(engine);
@@ -6298,12 +6466,14 @@ bool install(HMODULE engine) {
 
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
                  " pump timer floor %u ms, shadow transition reuse %s,"
-                 " cold alpha-shadow defer %s, terrain layer preload %s,"
+                 " cold alpha-shadow defer %s, cold actor-pose defer %s,"
+                 " terrain layer preload %s,"
                  " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
                  g_pumpTimerMinMs, shadowReuse ? "requested" : "off",
                  shadowDefer ? "requested" : "off",
+                 shadowActorPose ? "requested" : "off",
                  terrainPreload ? "requested" : "off",
                  g_installedHooks,
                  (const void*)g_mainThreadId);
@@ -6334,6 +6504,9 @@ void shutdown() {
         tq::detour::restoreCall(g_forceLoadPatches[i]);
     g_backgroundLoadLevel = nullptr;
     g_regionLoadLevel = nullptr;
+    tq::detour::restoreCall(g_shadowActorUpdateMeshPatch);
+    g_actorUpdateMeshInstance = nullptr;
+    g_shadowActorPoseDeferActive = false;
     tq::detour::restoreCall(g_shadowMeshEnsurePatch);
     tq::detour::detach(g_shadowMeshPassCountDetour);
     g_shadowMeshPassCount = nullptr;
@@ -6513,12 +6686,18 @@ void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
 bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
 bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
 bool shadowDeferColdAlphaForTest() { return g_shadowDeferColdAlpha; }
+bool shadowDeferColdActorPoseForTest() {
+    return g_shadowDeferColdActorPose;
+}
 bool terrainPreloadLayersForTest() { return g_terrainPreloadLayers; }
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state) {
     return shouldDeferShadowAlpha(style, state);
 }
 bool shouldDeferShadowMeshForTest(unsigned state) {
     return shouldDeferShadowMesh(state);
+}
+bool shadowActorPoseQueueConfirmedForTest(unsigned state, bool inQueue) {
+    return shadowActorPoseQueueConfirmed(state, inQueue);
 }
 void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
                                      bool failed) {
@@ -6532,6 +6711,13 @@ void countDeferredShadowMeshForTest(unsigned state, bool enqueued,
     const bool tracing = g_shadowTracing;
     g_shadowTracing = true;
     countDeferredShadowMesh(state, enqueued, failed);
+    g_shadowTracing = tracing;
+}
+void countDeferredShadowActorPoseForTest(unsigned state, bool enqueued,
+                                         bool failed) {
+    const bool tracing = g_shadowTracing;
+    g_shadowTracing = true;
+    countDeferredShadowActorPose(state, enqueued, failed);
     g_shadowTracing = tracing;
 }
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix) {

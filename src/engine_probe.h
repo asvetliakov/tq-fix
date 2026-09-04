@@ -168,6 +168,19 @@ void readOptions(const wchar_t* iniPath);
 // group. Group 16384 reports omitted states, enqueue outcomes, and skipped
 // material/bump dependencies when enabled.
 
+// [performance] shadow_defer_cold_actor_pose, a fix and defaulting to 0.
+//
+// Run 68 proved another exact root-mesh EnsureAvailable occurs earlier, while
+// GraphicsShadowMapDx11::RenderDirectional gathers actors: Actor::AddToScene
+// calls Actor::UpdateMeshInstance, which enters GraphicsMeshInstance::UpdatePose.
+// At 1, this switch queues a state-0 Actor root and defers that one pose update
+// while the root is state 0/1. It implies the complete later shadow-defer gate,
+// which then omits the still-cold caster until state 2. Other Actor update
+// callers, colour rendering, point shadows, and resident actors are unchanged.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 16384 reports the exact state/enqueue outcome when enabled.
+
 // [performance] terrain_preload_layers, a fix and defaulting to 0.
 //
 // Runtime TerrainRT::LoadRenderData creates each layer TerrainType's base,
@@ -205,13 +218,17 @@ bool wantsForTest(unsigned group);
 bool asyncLevelLoadForTest();
 bool shadowTransitionReuseForTest();
 bool shadowDeferColdAlphaForTest();
+bool shadowDeferColdActorPoseForTest();
 bool terrainPreloadLayersForTest();
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state);
 bool shouldDeferShadowMeshForTest(unsigned state);
+bool shadowActorPoseQueueConfirmedForTest(unsigned state, bool inQueue);
 void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
                                      bool failed);
 void countDeferredShadowMeshForTest(unsigned state, bool enqueued,
                                     bool failed);
+void countDeferredShadowActorPoseForTest(unsigned state, bool enqueued,
+                                         bool failed);
 // Drives the whole-map/matrix cache without patching an off-game synthetic
 // module. The production wrapper uses these same two helpers.
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix);

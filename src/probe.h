@@ -322,6 +322,14 @@ enum Counter {
     CounterEngineShadowMeshOmittedState1,
     CounterEngineShadowMeshOmittedEnqueued,
     CounterEngineShadowMeshOmittedEnqueueFailed,
+    // The still-earlier exact Actor::AddToScene call skipped before
+    // Actor::UpdateMeshInstance can enter GraphicsMeshInstance::UpdatePose.
+    // These are counts only: no engine work is charged to the mod.
+    CounterEngineShadowActorPoseDeferred,
+    CounterEngineShadowActorPoseState0,
+    CounterEngineShadowActorPoseState1,
+    CounterEngineShadowActorPoseEnqueued,
+    CounterEngineShadowActorPoseEnqueueFailed,
     // Cold material textures pulled by GraphicsMesh::SetShaderParameters
     // while rendering the directional map. `used` means the active shadow
     // shader reports a parameter with the material entry's Name; `unused`

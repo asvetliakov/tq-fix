@@ -86,4 +86,9 @@ through `Region::GetEntitiesInFrustum` / `World::GetEntitiesInFrustum` and that
 "selected entities are added to the temporary shadow scene together with their
 owning regions".  `findings.md` §2 establishes what that costs and, more
 importantly, that the *scene add* — not the query — is what can force a
-synchronous level load on the render thread.
+synchronous level load on the render thread. Run 68 later resolves the
+remaining marked cold-mesh class inside that same DX11 directional gather to
+`Actor::AddToScene -> Actor::UpdateMeshInstance ->
+GraphicsMeshInstance::UpdatePose -> Resource::EnsureAvailable`; the exact
+targets and Run 69's earlier call-patch boundary are indexed in
+`disassembly-targets.md`.

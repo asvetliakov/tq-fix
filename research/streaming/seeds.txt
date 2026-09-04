@@ -274,8 +274,12 @@ GraphicsSceneRenderer::AddRenderable
 AddRenderable@GraphicsSceneRenderer
 Actor::AddToScene
 AddToScene@Actor
+Actor::UpdateMeshInstance
+UpdateMeshInstance@Actor
 Entity::AddToScene
 AddToScene@Entity
+GraphicsMeshInstance::UpdatePose
+UpdatePose@GraphicsMeshInstance
 GraphicsMeshInstance::GetNumShadowRenderPasses
 GetNumShadowRenderPasses@GraphicsMeshInstance
 GraphicsMeshInstance::GetNumRenderPasses

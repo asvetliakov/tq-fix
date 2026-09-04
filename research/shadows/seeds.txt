@@ -14,6 +14,12 @@ GetSubFrustum@Camera
 GetFrustum@Camera
 SetViewer@GraphicsSceneRenderer
 AddRenderable@GraphicsSceneRenderer
+Actor::AddToScene
+AddToScene@Actor
+Actor::UpdateMeshInstance
+UpdateMeshInstance@Actor
+GraphicsMeshInstance::UpdatePose
+UpdatePose@GraphicsMeshInstance
 GetNumShadowRenderPasses
 GetShadowRenderStyle
 SetShaderParameters@GraphicsMeshInstance
