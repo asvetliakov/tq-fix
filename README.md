@@ -79,6 +79,7 @@ timer_period_ms=0
 pump_timer_min_ms=0
 shadow_transition_reuse=0
 shadow_defer_cold_alpha=0
+terrain_preload_layers=0
 
 [debug]
 frame_overlay=0
@@ -233,6 +234,18 @@ Run 59 then removed every directional-shadow texture load in play, leaving
 cold root meshes and GPU work as the marked burst. The root-mesh part remains
 an explicit temporary local-shadow quality trade under measurement; it is not
 claimed to remove the complete burst.
+
+`terrain_preload_layers=1` fixes the runtime terrain path's omitted semantic
+preload. `TerrainRT::LoadRenderData` creates each layer `TerrainType`'s base,
+bump, and grass texture Resources during loading, but `TerrainRT::PreLoad`
+never queues those layer Resources. The switch retargets the exact existing
+`LoadTextures` call: after the original returns, it calls the game's stock
+`TerrainType::PreLoad(true)` on that same object. That method uses the normal
+background ResourceLoaders and does not wait. The switch defaults to `0`,
+works with the performance probe off, and installs no trace group by itself.
+It does not omit colour or shadows, change culling, or replace resource
+loading; it moves the texture queue request from first colour use to the point
+where those Resources first exist.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
@@ -423,8 +436,59 @@ cross-check, not another bucket to add. State 0 means the shadow traversal
 demanded an unloaded resource; state 1 means it met resource work already in
 flight. `engine_shadow_res_mesh` / `shader` / `texture` / `type_other` and
 their `_us` partners partition those same nested loads by the filename suffix
-returned by the engine. `engine_shadow_mesh_cold` / `_us` is narrower and
-overlapping: a state-0 mesh at
+returned by the engine.
+
+The complementary `engine_res_outside_dir` pair counts every main-thread
+`ResourceLoader::LoadResource` call outside the directional build. Its
+`render` / `update` / `other` pairs and its `mesh` / `shader` / `texture` /
+`type_other` pairs are two independent partitions of that same population.
+When F12 is pressed, the trace also writes each such load from the preceding
+120 frames to `tqflicker-debug.log`, including its frame, duration, phase,
+pre-call state, filename class, engine filename, immediate caller, and a
+bounded upstream stack of call-shaped return candidates. Addresses are labeled
+by module and RVA only when they are inside a verified module and immediately
+follow a valid call instruction; the immediate caller is otherwise explicitly
+`unverified`. The upstream list is a raw stack superset rather than a claimed
+call stack because this engine omits frame pointers. The fixed 128-record
+rolling window is reported by `engine_res_outside_dir_marker_truncated` if it
+could not retain the whole marker window. Records are buffered during the
+candidate frame and formatted only after F12, so the diagnostic does not add
+logging work to the stutter it is measuring.
+
+The terrain diagnostic adds `engine_terrain_preload` / `_us`, its true/false
+argument counts, the two `TerrainType` shader-parameter entry counts, and
+`engine_terrain_ground` / `_us`. For each retained outside-directional load,
+the F12 log records the exact `TerrainType*`, material/grass path, material
+index, and that same object's preload counts and last-call frames as they
+stood before the load. `gpu_terrain_ground_ms` brackets the matching DX11
+`TerrainRenderInterfaceRT::RenderGround` work with non-blocking timestamp
+queries. `engine_terrain_preload_table_overflow` makes an exhausted identity
+table explicit rather than indistinguishable from “never preloaded.” This is
+passive instrumentation; it neither invokes `PreLoad` nor changes a missing
+texture's fallback.
+
+The same trace group also follows the shipping runtime terrain class rather
+than the exported editor `Terrain` class. `engine_terrain_rt_load` / `_us`,
+`engine_terrain_rt_load_render` / `_us`,
+`engine_terrain_rt_load_textures` / `_us`, and
+`engine_terrain_rt_preload` / `_us` time the runtime owner's load,
+render-data creation, exact per-layer `TerrainType::LoadTextures` call, and
+nearby-object preload. `engine_terrain_rt_preload_layers` records how many
+layer identities were associated with an owner preload, while
+`engine_terrain_rt_layer_overflow` makes the 64-layer diagnostic bound
+explicit. `engine_terrain_plug` / `_us` and `engine_terrain_block` / `_us`
+time the two unexported color-terrain render classes that call
+`TerrainType::SetShaderParams`. Runtime render-data construction retains the
+non-blocking game-time `gpu_terrain_rt_load_render_ms` span. TerrainPlug and
+TerrainBlock deliberately have CPU counters only: Run 66 proved that issuing
+hundreds of timestamp-query ends per frame for those high-frequency classes
+was intrusive. The F12 record for an exact cold terrain texture also
+retains the first, last, and count of layer attachment, texture admission, and
+runtime-owner preload for that same `TerrainType*`. The static identities and
+the wider shadow/resource chain are indexed in
+`research/streaming/disassembly-targets.md`.
+
+`engine_shadow_mesh_cold` / `_us` is narrower and overlapping: a state-0 mesh at
 `GraphicsMeshInstance::GetNumShadowRenderPasses`, before that caster enters the
 directional draw list. `engine_shadow_material_tex` / `_us` is another
 overlapping subset: state-0 texture getters reached from the generic material
@@ -453,6 +517,15 @@ build by the install state of the optional base-`GraphicsMeshInstance` context
 call patch; they make a missing dependency, one of three signature failures,
 a call-patch failure, or rollback after a material-hook failure visible in the
 CSV rather than only in an exit-time log.
+
+When F12 is pressed, the trace also writes state-0 mesh Resource loads from
+the preceding 120 frames of the directional build. Each delayed record carries
+the engine filename, pre-call queue state, immediate call-shaped caller, and a
+bounded list of verified call-shaped upstream candidates. The fixed
+128-record ring reports truncation. This is caller attribution only: it adds
+no GPU query, per-draw hook, queue operation, or behavior change, and performs
+no log formatting on the candidate frame.
+
 Independently, the `engine_shadow_tex_from_*` counter/duration pairs partition
 every shadow-nested texture load by the direct `GraphicsTexture::GetTexture`
 caller; `unresolved` includes indirect callers. All engine durations end in
@@ -510,7 +583,9 @@ main loop, `1024` the inside of the window message pump, `2048`
 block routine, `8192` everything in `Engine.dll` that can block -- so a run
 that misbehaves can be narrowed without a rebuild. `16384` brackets the direct
 directional-shadow build; combine it with `2` to populate both the nested-load
-totals and their loaded-state/queue lifecycle split.
+totals and their loaded-state/queue lifecycle split. `32768` enables the
+atomic `TerrainType`, runtime `TerrainRT`, both color-terrain render classes,
+and DX11 ground diagnostic group.
 
 `timer_period_ms` is an experiment attached to that trace rather than a
 setting to leave on. Three quarters of the slow message retrievals measured on

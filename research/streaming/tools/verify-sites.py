@@ -26,9 +26,15 @@ GAME = os.environ.get("TQ_GAME_DIR") or os.path.expanduser(
 SRC = os.environ.get("TQ_VERIFY_SRC") or os.path.join(
     HERE, "..", "..", "..", "src", "engine_probe.cpp")
 CACHE_H = os.path.join(HERE, "..", "..", "..", "src", "arc_cache.h")
+PROBE_CPP = os.environ.get("TQ_VERIFY_PROBE_CPP") or os.path.join(
+    HERE, "..", "..", "..", "src", "probe.cpp")
+PROBE_H = os.environ.get("TQ_VERIFY_PROBE_H") or os.path.join(
+    HERE, "..", "..", "..", "src", "probe.h")
 
 src = open(SRC).read()
 cache_src = open(CACHE_H).read()
+probe_src = open(PROBE_CPP).read()
+probe_h = open(PROBE_H).read()
 flat = re.sub(r'"\s*\n\s*"', '', src)          # joined string literals
 failures = []
 
@@ -458,6 +464,696 @@ def check_resource_lifecycle(engine):
     ok(engine.exports().get(cstr("kResourceFileNameName"))
        == const("kResourceFileNameRva"),
        "filename accessor export resolves to its recorded RVA")
+
+
+def check_terrain_diagnostics(engine):
+    """Run 63/64 terrain identity, lifecycle, and colour-render brackets."""
+    print("\nTerrainType/TerrainRT lifecycle and colour-render diagnostics")
+    preload = table("kTerrainPreloadBytes")
+    ground = table("kTerrainRenderGroundBytes")
+    shader = table("kTerrainSetShaderParamsBytes")
+    grass = table("kTerrainSetGrassShaderParamsBytes")
+    rt_load = table("kTerrainRtLoadBytes")
+    rt_render = table("kTerrainRtLoadRenderDataBytes")
+    rt_preload = table("kTerrainRtPreloadBytes")
+    plug = table("kTerrainPlugRenderBytes")
+    block = table("kTerrainBlockRenderBytes")
+    shared = [0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8]
+    ok(len(preload) == 24 and preload[:6] == shared
+       and len(ground) == 24 and ground[:6] == shared,
+       "both shared-prologue terrain targets verify 24 bytes")
+    ok(len(shader) == 21 and shader[:8] ==
+       [0xa1, 0, 0, 0, 0, 0x83, 0xec, 0x08]
+       and len(grass) == 21 and grass[:8] ==
+       [0xa1, 0, 0, 0, 0, 0x83, 0xec, 0x0c],
+       "both parameter targets verify 21 bytes and steal two instructions")
+    ok(len(rt_load) == 23 and rt_load[:6] == shared
+       and len(rt_preload) == 23 and rt_preload[:6] == shared
+       and len(plug) == 19 and plug[:6] == shared
+       and len(block) == 19 and block[:6] == shared,
+       "all four new shared-prologue targets verify 19-23 bytes")
+    ok(len(rt_render) == 20
+       and rt_render[:3] == [0x83, 0xec, 0x64]
+       and rt_render[3] == 0xa1,
+       "TerrainRT::LoadRenderData verifies 20 bytes and starts with two"
+       " complete instructions")
+
+    install_begin = src.find(
+        "bool installTerrain(HMODULE engine, bool traceTerrain,"
+        " bool preloadLayers)")
+    install_end = src.find("\n}\n\n// Brackets the renderer", install_begin)
+    install = src[install_begin:install_end]
+    ok(install_begin >= 0 and install_end > install_begin
+       and "kTerrainPreloadRelocs, 1),\n            6," in install
+       and "kTerrainRenderGroundRelocs, 1),\n            6," in install,
+       "shared-prologue terrain detours steal exactly six bytes")
+    ok("kTerrainSetShaderParamsRelocs, 1),\n            8," in install
+       and "kTerrainSetGrassShaderParamsRelocs, 1),\n            8," in install,
+       "parameter detours steal exactly their first eight bytes")
+    ok("kTerrainRtLoadRelocs, 1),\n            6," in install
+       and "kTerrainRtPreloadRelocs, 1),\n            6," in install
+       and "kTerrainPlugRenderRelocs, 1),\n            6," in install
+       and "kTerrainBlockRenderRelocs, 1),\n            6," in install,
+       "new shared-prologue terrain detours steal exactly six bytes")
+    ok("kTerrainRtLoadRenderDataRelocs, 2),\n            8," in install,
+       "LoadRenderData steals exactly its first eight bytes")
+    ok(install.count("tq::detour::attach(") == 9
+       and install.count("tq::detour::patchCall(") == 1
+       and "const bool traceOk = !traceTerrain" in install
+       and "const bool preloadOk = !preloadLayers" in install
+       and "&& loadTexturesPatched && g_terrainPlugRender"
+           " && g_terrainBlockRender" in install
+       and install.count("tq::detour::detach(") == 9
+       and install.count("tq::detour::restoreCall(") == 1,
+       "nine detours and one exact call patch install and roll back atomically")
+    ok(const("kGroupTerrain") == 0x8000
+       and "const bool traceTerrain = wants(kGroupTerrain);" in src
+       and "installTerrain(engine, traceTerrain, terrainPreload);" in src
+       and "bool wants(unsigned group)" in src
+       and "if (!g_tracing) return false;" in src,
+       "terrain diagnostics occupy only trace-mask group 32768")
+
+    # The game selects the unexported TerrainRT implementation through this
+    # exact vtable. Check the identities independently of each entry's bytes:
+    # a correct-looking prologue at the wrong implementation is still wrong.
+    vtable = engine.base + const("kTerrainRtVtableRva")
+    vslots = [
+        ("Load", "kTerrainRtLoadVtableOffset", "kTerrainRtLoadRva"),
+        ("LoadRenderData", "kTerrainRtLoadRenderDataVtableOffset",
+         "kTerrainRtLoadRenderDataRva"),
+        ("PreLoad", "kTerrainRtPreloadVtableOffset", "kTerrainRtPreloadRva"),
+        ("GetNumLayers", "kTerrainRtNumLayersVtableOffset",
+         "kTerrainRtNumLayersRva"),
+        ("GetLayerTerrainType", "kTerrainRtLayerTypeVtableOffset",
+         "kTerrainRtLayerTypeRva")]
+    for label, offset_name, target_name in vslots:
+        got = struct.unpack("<I", engine.read(
+            vtable + const(offset_name), 4))[0]
+        ok(got == engine.base + const(target_name),
+           "TerrainRT vtable+%#x selects %s at Engine+%#x"
+           % (const(offset_name), label, const(target_name)))
+
+    load_textures = table("kTerrainRtLoadTexturesWindowBytes")
+    load_textures_off = const("kTerrainRtLoadTexturesCallOffset")
+    load_textures_at = const("kTerrainRtLoadTexturesWindowRva")
+    load_textures_dest = (load_textures_at + load_textures_off + 5
+                          + struct.unpack_from(
+                              "<i", bytes(load_textures),
+                              load_textures_off + 1)[0])
+    ok(len(load_textures) == 23
+       and load_textures[load_textures_off] == 0xe8
+       and load_textures_dest == const("kTerrainLoadTexturesRva"),
+       "runtime LoadRenderData's exact call reaches"
+       " TerrainType::LoadTextures")
+    ok("patchCall(\n            g_terrainRtLoadTexturesPatch" in install
+       and "kTerrainRtLoadTexturesCallOffset, loadTextures" in install,
+       "the existing LoadTextures call is patched instead of its code entry")
+
+    num_layers = table("kTerrainRtNumLayersBytes")
+    layer_type = table("kTerrainRtLayerTypeBytes")
+    ok(len(num_layers) == 23
+       and num_layers[:12] == [0x8b, 0x91, 0x88, 0, 0, 0,
+                               0x2b, 0x91, 0x84, 0, 0, 0]
+       and num_layers[12:17] == [0xb8, 0xab, 0xaa, 0xaa, 0x2a],
+       "GetNumLayers subtracts TerrainRT+0x84 from +0x88 and divides by 12")
+    ok(len(layer_type) == 24
+       and layer_type[:16] == [0x8b, 0x44, 0x24, 0x04,
+                               0x8d, 0x14, 0x40,
+                               0x8b, 0x81, 0x84, 0, 0, 0,
+                               0x8b, 0x04, 0x90]
+       and layer_type[16:19] == [0xc2, 0x04, 0],
+       "GetLayerTerrainType indexes 12-byte records at TerrainRT+0x84")
+    ok(const("kTerrainRtLayerLimit") == 64
+       and "count < kTerrainRtLayerLimit" in src
+       and "CounterEngineTerrainRtLayerOverflow" in src,
+       "runtime layer enumeration is bounded at 64 and reports overflow")
+
+    for label, bytes_name, call_off in [
+            ("TerrainPlug", "kTerrainPlugShaderWindowBytes", 5),
+            ("TerrainBlock", "kTerrainBlockShaderWindowBytes", 7)]:
+        body = table(bytes_name)
+        dest = (const(bytes_name.replace("Bytes", "Rva")) + call_off + 5
+                + struct.unpack_from("<i", bytes(body), call_off + 1)[0])
+        ok(16 <= len(body) <= 24 and body[call_off] == 0xe8
+           and dest == const("kTerrainSetShaderParamsRva"),
+           "%s's unique body window calls TerrainType::SetShaderParams"
+           % label)
+
+    # Ghidra presents five parameters because it includes the implicit this.
+    # The machine-code return is decisive for an x86 detour wrapper: C2 10 00
+    # means four explicit stack arguments, not five. Run 64/65 used five and
+    # could corrupt the caller as soon as colour terrain first ran.
+    ok(engine.read(engine.base + const("kTerrainPlugRenderRva") + 0x504, 3)
+       == bytes([0xc2, 0x10, 0x00])
+       and engine.read(
+           engine.base + const("kTerrainBlockRenderRva") + 0x418, 3)
+           == bytes([0xc2, 0x10, 0x00]),
+       "TerrainPlug and TerrainBlock each return with four stack arguments")
+    colour_typedef = re.search(
+        r"typedef void \(__fastcall\* TerrainColourRenderFn\)\((.*?)\);",
+        src, re.S)
+    ok(colour_typedef
+       and colour_typedef.group(1).count("const void*") == 4
+       and "const void* e" not in colour_typedef.group(1)
+       and "g_terrainPlugRender(self, edx, a, b, c, d);" in src
+       and "g_terrainBlockRender(self, edx, a, b, c, d);" in src
+       and "const void* d, const void* e" not in src,
+       "both colour-render wrappers preserve exactly four explicit arguments")
+
+    # Re-read the body rather than trusting the function's name. A false bool
+    # skips to the epilogue; true walks base [+24,+28], bump [+30,+34], and
+    # grass [+88]. The latter two direct calls reach EnqueueResource.
+    gate = engine.read(const("kTerrainPreloadRva") + 0x32, 16)
+    gate_disp = struct.unpack_from("<i", gate, 6)[0] if len(gate) >= 10 else 0
+    gate_dest = const("kTerrainPreloadRva") + 0x32 + 10 + gate_disp
+    ok(gate[:6] == bytes([0x80, 0x7d, 0x08, 0x00, 0x0f, 0x84])
+       and gate_dest == const("kTerrainPreloadRva") + 0x1fe,
+       "PreLoad(false) jumps over all terrain resource queuing")
+    ok(engine.read(const("kTerrainPreloadRva") + 0x3c, 6)
+       == bytes([0x8b, 0x4e, 0x24, 0x8b, 0x46, 0x28]),
+       "PreLoad(true) walks TerrainType's base-texture vector")
+    ok(engine.read(const("kTerrainPreloadRva") + 0x1a1, 6)
+       == bytes([0x8b, 0x4e, 0x30, 0x8b, 0x46, 0x34]),
+       "PreLoad(true) walks TerrainType's bump-texture vector")
+    bump_call = const("kTerrainPreloadRva") + 0x1c7
+    bump_bytes = engine.read(bump_call, 5)
+    bump_dest = bump_call + 5 + struct.unpack_from("<i", bump_bytes, 1)[0]
+    ok(bump_bytes[0] == 0xe8 and bump_dest == const("kEnqueueRva"),
+       "PreLoad's bump resources call ResourceLoader::EnqueueResource")
+    ok(engine.read(const("kTerrainPreloadRva") + 0x1dc, 8)
+       == bytes([0x8b, 0x86, 0x88, 0x00, 0x00, 0x00, 0x85, 0xc0]),
+       "PreLoad(true) reads and null-checks TerrainType's grass texture")
+    grass_call = const("kTerrainPreloadRva") + 0x1f9
+    grass_bytes = engine.read(grass_call, 5)
+    grass_dest = grass_call + 5 + struct.unpack_from("<i", grass_bytes, 1)[0]
+    ok(grass_bytes[0] == 0xe8 and grass_dest == const("kEnqueueRva"),
+       "PreLoad's grass texture calls ResourceLoader::EnqueueResource")
+
+    slots = const("kTerrainPreloadStateSlots")
+    ok(slots == 2048 and slots & (slots - 1) == 0,
+       "TerrainType preload history is a fixed 2048-slot power-of-two table")
+    remember_begin = src.find("void rememberTerrainPreloadAtFrame(")
+    remember_end = src.find("\n}\n\nvoid rememberTerrainPreload(", remember_begin)
+    remember = src[remember_begin:remember_end]
+    ok("CounterEngineTerrainPreloadTableOverflow" in remember
+       and "if (!state)" in remember,
+       "a full TerrainType identity table is explicit in the CSV")
+    rt_event_begin = src.find("void rememberTerrainRtEventAtFrame(")
+    rt_event_end = src.find("\n}\n\nvoid rememberTerrainRtEvent(",
+                            rt_event_begin)
+    rt_event = src[rt_event_begin:rt_event_end]
+    ok(rt_event_begin >= 0 and rt_event_end > rt_event_begin
+       and "InterlockedCompareExchange(first, framePlusOne, 0);" in rt_event
+       and "InterlockedExchange(last, framePlusOne);" in rt_event
+       and "InterlockedIncrement(count);" in rt_event
+       and all(name in rt_event for name in [
+           "rtLoadAttachCount", "rtLoadTexturesCount",
+           "rtOwnerPreloadCount"]),
+       "each TerrainRT boundary retains independent first/last/count history")
+    report_begin = src.find("void reportOutsideDirResourcesAtMarker()")
+    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report = src[report_begin:report_end]
+    ok(report_begin >= 0 and report_end > report_begin
+       and '"Engine trace: outside-dir Resource %ld TerrainRT"' in report
+       and '" attach %u first %ld last %ld, LoadTextures %u"' in report
+       and '" first %ld last %ld, owner PreLoad %u first %ld"' in report
+       and "rtLoadAttachCount" in report
+       and "rtLoadTexturesCount" in report
+       and "rtOwnerPreloadCount" in report,
+       "F12 writes all three exact TerrainRT histories during the session")
+    load_begin = src.find("void __fastcall hookLoadResource(")
+    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load = src[load_begin:load_end]
+    original = load.find("g_loadResource(self, edx, resource);")
+    snapshot = load.find("terrainPreloadSnapshot(terrainType)")
+    retained = load.find("rememberOutsideDirResource(")
+    ok(snapshot >= 0 and snapshot < original and retained > original
+       and "g_activeTerrainThread == GetCurrentThreadId()" in load,
+       "each terrain load retains its exact pre-call preload snapshot")
+    render_begin = src.find("void __fastcall hookTerrainRenderGround(")
+    render_end = src.find("\n}\n\nvoid __fastcall hookLoadResource", render_begin)
+    render = src[render_begin:render_end]
+    original_ground = render.find("g_terrainRenderGround(")
+    ok("GpuTerrainGround" in render and "currentGpuContext()" in render
+       and original_ground >= 0
+       and "CounterEngineTerrainGroundUs" in render,
+       "RT RenderGround is bracketed by GPU timestamps and an engine _us span")
+
+    for label, hook_name, gpu_name, count_name, duration_name in [
+            ("LoadRenderData", "hookTerrainRtLoadRenderData",
+             "GpuTerrainRtLoadRender", "CounterEngineTerrainRtLoadRender",
+             "CounterEngineTerrainRtLoadRenderUs")]:
+        begin = src.find("__fastcall %s(" % hook_name)
+        end = src.find("\n}\n", begin)
+        hook = src[begin:end]
+        ok(begin >= 0 and end > begin and gpu_name in hook
+           and "currentGpuContext()" in hook and count_name in hook
+           and duration_name in hook,
+           "%s has a GPU timestamp bracket and engine _us CPU span" % label)
+
+    # Run 66 proved that per-call GPU timestamps are not passive at the colour
+    # terrain frequency. Keep CPU counts/spans, but reject any reintroduction
+    # of a GPU scope into either high-frequency wrapper.
+    for label, hook_name, count_name, duration_name in [
+            ("TerrainPlug", "hookTerrainPlugRender",
+             "CounterEngineTerrainPlug", "CounterEngineTerrainPlugUs"),
+            ("TerrainBlock", "hookTerrainBlockRender",
+             "CounterEngineTerrainBlock", "CounterEngineTerrainBlockUs")]:
+        begin = src.find("__fastcall %s(" % hook_name)
+        end = src.find("\n}\n", begin)
+        hook = src[begin:end]
+        ok(begin >= 0 and end > begin
+           and "GpuScope" not in hook and "currentGpuContext()" not in hook
+           and count_name in hook and duration_name in hook,
+           "%s retains CPU diagnostics without per-call GPU timestamps"
+           % label)
+
+    load_render_begin = src.find("int __fastcall hookTerrainRtLoadRenderData(")
+    load_render_end = src.find("\n}\n", load_render_begin)
+    load_render_hook = src[load_render_begin:load_render_end]
+    ok(load_render_begin >= 0 and load_render_end > load_render_begin
+       and "const bool main = onMainThread();" in load_render_hook
+       and "main ? tq::probe::currentGpuContext() : nullptr"
+           in load_render_hook
+       and "main\n        ? tq::probe::CounterEngineTerrainRtLoadRenderMain\n"
+           "        : tq::probe::CounterEngineTerrainRtLoadRenderOther);"
+           in load_render_hook
+       and "main\n        ? tq::probe::CounterEngineTerrainRtLoadRenderMainUs\n"
+           "        : tq::probe::CounterEngineTerrainRtLoadRenderOtherUs,"
+           " elapsed);" in load_render_hook
+       and all(name in load_render_hook for name in [
+           "CounterEngineTerrainRtLoadRenderMain",
+           "CounterEngineTerrainRtLoadRenderMainUs",
+           "CounterEngineTerrainRtLoadRenderOther",
+           "CounterEngineTerrainRtLoadRenderOtherUs"]),
+       "LoadRenderData timestamps only on the main thread and records an"
+       " exact main/other CPU partition")
+
+    gpu_context_begin = probe_src.find(
+        "ID3D11DeviceContext* currentGpuContext()")
+    gpu_context_end = probe_src.find("\n}", gpu_context_begin)
+    gpu_context = probe_src[gpu_context_begin:gpu_context_end]
+    ok(gpu_context_begin >= 0 and gpu_context_end > gpu_context_begin
+       and "g_gpuCurrent && isRenderThread()" in gpu_context,
+       "the shared GPU-context accessor rejects every non-render thread")
+
+    load_hook_begin = src.find("int __fastcall hookTerrainRtLoad(")
+    load_hook_end = src.find("\n}\n", load_hook_begin)
+    load_hook = src[load_hook_begin:load_hook_end]
+    texture_hook_begin = src.find(
+        "void __fastcall hookTerrainRtLoadTextures(")
+    texture_hook_end = src.find("\n}\n", texture_hook_begin)
+    texture_hook = src[texture_hook_begin:texture_hook_end]
+    preload_hook_begin = src.find("void __fastcall hookTerrainRtPreload(")
+    preload_hook_end = src.find("\n}\n", preload_hook_begin)
+    preload_hook = src[preload_hook_begin:preload_hook_end]
+    ok("if (result)" in load_hook
+       and "TerrainRtLoadAttach" in load_hook,
+       "successful TerrainRT::Load associates every admitted layer type")
+    ok("g_terrainRtLoadTextures(self, edx);" in texture_hook
+       and texture_hook.find(
+           "rememberTerrainRtEvent(self, TerrainRtLoadTextures)")
+           > texture_hook.find("g_terrainRtLoadTextures(self, edx);")
+       and "CounterEngineTerrainRtLoadTexturesUs" in texture_hook,
+       "LoadTextures completion is recorded after the exact original call")
+    original_pos = texture_hook.find("g_terrainRtLoadTextures(self, edx);")
+    preload_pos = texture_hook.find(
+        "g_terrainPreloadEntry(self, nullptr, 1);")
+    ok(original_pos >= 0 and preload_pos > original_pos
+       and "g_terrainPreloadLayersActive && g_terrainPreloadEntry"
+           in texture_hook,
+       "layer fix invokes stock TerrainType::PreLoad(true) only after"
+       " LoadTextures completes")
+    read_options_begin = src.find("void readOptions(const wchar_t* iniPath)")
+    read_options_end = src.find("\n}\n\nbool install(HMODULE engine)",
+                                read_options_begin)
+    read_options = src[read_options_begin:read_options_end]
+    public_install = src[read_options_end:]
+    ok('L"performance", L"terrain_preload_layers", 0' in read_options
+       and "const bool terrainPreload = g_terrainPreloadLayers;"
+           in public_install
+       and "!shadowDefer && !terrainPreload" in public_install
+       and "traceTerrain || terrainPreload" in public_install,
+       "terrain_preload_layers defaults off and independently reaches"
+       " install()")
+    ok("g_terrainPreloadEntry = preloadVerified" in install
+       and "kTerrainPreloadRelocs, 1" in install
+       and "g_terrainPreloadLayersActive = ok && preloadLayers;" in install,
+       "behavior requires the verified exported TerrainType::PreLoad entry"
+       " and activates only after the exact call patch succeeds")
+    ok("TerrainRtOwnerPreload" in preload_hook
+       and "CounterEngineTerrainRtPreloadLayers" in preload_hook
+       and "CounterEngineTerrainRtPreloadUs" in preload_hook,
+       "runtime owner PreLoad associates layers before calling through")
+
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok(shutdown_begin >= 0 and shutdown_end > shutdown_begin
+       and all(name in shutdown for name in [
+           "detach(g_terrainRtLoadDetour)",
+           "detach(g_terrainRtLoadRenderDataDetour)",
+           "detach(g_terrainRtPreloadDetour)",
+           "restoreCall(g_terrainRtLoadTexturesPatch)",
+           "detach(g_terrainPlugRenderDetour)",
+           "detach(g_terrainBlockRenderDetour)"])
+       and "memset(g_terrainPreloadStates, 0" in shutdown,
+       "shutdown restores every runtime terrain site and clears its history")
+    ok("g_terrainPreloadEntry = nullptr;" in shutdown
+       and "g_terrainPreloadLayersActive = false;" in shutdown
+       and "g_terrainTracing = false;" in shutdown,
+       "shutdown clears terrain layer-preload behavior and trace state")
+
+    # Runtime PreLoad's complete body has no direct calls to either semantic
+    # TerrainType preload routine. This does not claim that no virtual callee
+    # can eventually touch a texture; it proves the omission in this owner.
+    # The next function begins at 0x23d5c0, so 0x1c0 covers the complete
+    # contiguous function plus its trailing alignment and nothing after it.
+    rt_preload_body = engine.read(engine.base + const("kTerrainRtPreloadRva"),
+                                  0x1c0)
+    direct_targets = []
+    for i in range(len(rt_preload_body) - 4):
+        if rt_preload_body[i] == 0xe8:
+            disp = struct.unpack_from("<i", rt_preload_body, i + 1)[0]
+            direct_targets.append(const("kTerrainRtPreloadRva") + i + 5
+                                  + disp)
+    ok(const("kTerrainPreloadRva") not in direct_targets
+       and const("kTerrainLoadTexturesRva") not in direct_targets,
+       "TerrainRT::PreLoad directly calls neither TerrainType::PreLoad nor"
+       " LoadTextures")
+
+    required_counter_names = [
+        "engine_terrain_rt_load", "engine_terrain_rt_load_us",
+        "engine_terrain_rt_load_render", "engine_terrain_rt_load_render_us",
+        "engine_terrain_rt_load_render_main",
+        "engine_terrain_rt_load_render_main_us",
+        "engine_terrain_rt_load_render_other",
+        "engine_terrain_rt_load_render_other_us",
+        "engine_terrain_rt_load_textures",
+        "engine_terrain_rt_load_textures_us", "engine_terrain_rt_preload",
+        "engine_terrain_rt_preload_us", "engine_terrain_rt_preload_layers",
+        "engine_terrain_rt_layer_overflow", "engine_terrain_plug",
+        "engine_terrain_plug_us", "engine_terrain_block",
+        "engine_terrain_block_us"]
+    required_gpu_names = ["gpu_terrain_rt_load_render"]
+    ok(all(('"%s"' % name) in probe_src for name in required_counter_names)
+       and all(('"%s"' % name) in probe_src for name in required_gpu_names)
+       and all(re.search(r"\b%s\b" % re.escape(name), probe_h) for name in [
+           "CounterEngineTerrainRtLoad",
+           "CounterEngineTerrainRtLoadUs",
+           "CounterEngineTerrainRtLoadRender",
+           "CounterEngineTerrainRtLoadRenderUs",
+           "CounterEngineTerrainRtLoadRenderMain",
+           "CounterEngineTerrainRtLoadRenderMainUs",
+           "CounterEngineTerrainRtLoadRenderOther",
+           "CounterEngineTerrainRtLoadRenderOtherUs",
+           "CounterEngineTerrainRtLoadTextures",
+           "CounterEngineTerrainRtLoadTexturesUs",
+           "CounterEngineTerrainRtPreload",
+           "CounterEngineTerrainRtPreloadUs",
+           "CounterEngineTerrainRtPreloadLayers",
+           "CounterEngineTerrainRtLayerOverflow",
+           "CounterEngineTerrainPlug", "CounterEngineTerrainPlugUs",
+           "CounterEngineTerrainBlock", "CounterEngineTerrainBlockUs",
+           "GpuTerrainRtLoadRender"]),
+       "all Run 64 CPU and GPU fields have explicit CSV names")
+    ok("GpuTerrainPlug" not in probe_h and "GpuTerrainBlock" not in probe_h
+       and '"gpu_terrain_plug"' not in probe_src
+       and '"gpu_terrain_block"' not in probe_src,
+       "high-frequency colour classes have no GPU query fields")
+    duration_bases = ["engine_terrain_rt_load",
+                      "engine_terrain_rt_load_render",
+                      "engine_terrain_rt_load_render_main",
+                      "engine_terrain_rt_load_render_other",
+                      "engine_terrain_rt_load_textures",
+                      "engine_terrain_rt_preload", "engine_terrain_plug",
+                      "engine_terrain_block"]
+    ok(all(('"%s_us"' % name) in probe_src for name in duration_bases)
+       and all(('"%s_ms"' % name) not in probe_src for name in duration_bases),
+       "engine CPU durations use _us and no duplicate _ms field")
+    csv_line = re.search(r"const unsigned kCsvLineBytes\s*=\s*(\d+);",
+                         probe_src)
+    ok(csv_line and int(csv_line.group(1)) == 16384
+       and probe_src.count("char line[kCsvLineBytes];") == 2
+       and "char line[8192];" not in probe_src,
+       "the terrain-trace CSV header and rows share a 16 KiB audited bound")
+
+
+def check_outside_directional_resources():
+    """Prove run 61's passive complement and reaction-time report."""
+    print("\nOutside-directional Resource attribution")
+    slots = const("kOutsideDirResourceReportSlots")
+    frames = const("kOutsideDirResourceMarkerFrames")
+    chars = const("kOutsideDirResourceNameChars")
+    depth = const("kOutsideDirResourceCallerDepth")
+    ok(slots == 128 and frames == 120 and chars == 128 and depth == 24,
+       "marker ring is 128 records, 120 frames, 128 filename bytes, and"
+       " 24 upstream frames")
+
+    load_begin = src.find("void __fastcall hookLoadResource(")
+    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load = src[load_begin:load_end]
+    original = load.find("g_loadResource(self, edx, resource);")
+    copied = load.find("copyResourceName(resourceNameCopy, resourceName);")
+    retained = load.find("rememberOutsideDirResource(")
+    ok(load_begin >= 0 and load_end > load_begin
+       and "const bool outsideDir = g_outsideDirResourceTracing && main"
+           " && !inShadow;" in load
+       and "const bool classify = (inShadow || outsideDir)" in load,
+       "outside-directional loads require main thread and the live shadow bracket")
+    ok("const char* const resourceName = (inShadow || outsideDir)" in load
+       and "shadowResourceType(resourceName)" in load
+       and copied >= 0 and copied < original,
+       "the verified engine filename is classified and copied before loading")
+    ok("__builtin_return_address(0)" in load
+       and "caller, &resource, resourceNameCopy" in load
+       and "outsideDirResourcePhase()" in load
+       and "tq::probe::currentFrameIndex()" in load,
+       "each retained load carries its immediate caller, stack, Engine phase,"
+       " and frame")
+    ok(original >= 0 and load.count("g_loadResource(self, edx, resource);") == 1
+       and retained > original
+       and "countOutsideDirResource(resourceType, outsidePhase, elapsed);"
+           in load,
+       "the exact original call runs once before passive counting and retention")
+
+    remember_begin = src.find("void rememberOutsideDirResource(")
+    remember_end = src.find("\n}\n\nconst char* outsideDirResourcePhaseName",
+                            remember_begin)
+    remember = src[remember_begin:remember_end]
+    ok(remember_begin >= 0 and remember_end > remember_begin
+       and "% kOutsideDirResourceReportSlots" in remember
+       and "moduleOf(address)" in remember
+       and "precededByCall(address, *module)" in remember,
+       "the bounded ring labels only a call-shaped return in a verified module")
+    ok("VirtualQuery(stack, &info, sizeof(info))" in remember
+       and "info.State == MEM_COMMIT" in remember
+       and "i < kStackWords" in remember
+       and "words + i < limit" in remember
+       and "report.callerDepth < kOutsideDirResourceCallerDepth" in remember
+       and "const ChainModule* const module = moduleOf(value);" in remember
+       and "if (!module || !precededByCall(value, *module)) continue;"
+           in remember
+       and "report.callerFrames[report.callerDepth].rva = rva;" in remember
+       and "report.callerFrames[report.callerDepth].tag = module->tag;"
+           in remember
+       and "++report.callerDepth;" in remember,
+       "the retained upstream list is a bounded call-shaped verified-module"
+       " stack superset")
+    ok("report.callerFrames[report.callerDepth - 1].rva == rva" in remember
+       and "report.callerFrames[report.callerDepth - 1].tag"
+           in remember
+       and "== module->tag" in remember
+       and "continue;" in remember,
+       "the upstream list preserves stack order and collapses only consecutive"
+       " duplicate sites")
+    ok("copyResourceName(report.resource, resource);" in remember
+       and "InterlockedExchange(&report.ready, sequence + 1);" in remember,
+       "the bounded filename and all metadata are published last")
+
+    report_begin = src.find("void reportOutsideDirResourcesAtMarker(")
+    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report = src[report_begin:report_end]
+    window_begin = src.find("OutsideDirResourceWindow outsideDirResourceWindow(")
+    window_end = src.find("\n}\n\nbool outsideDirResourceInWindow", window_begin)
+    window = src[window_begin:window_end]
+    member_begin = src.find("bool outsideDirResourceInWindow(")
+    member_end = src.find("\n}\n\nvoid reportOutsideDirResourcesAtMarker",
+                          member_begin)
+    member = src[member_begin:member_end]
+    ok(report_begin >= 0 and report_end > report_begin
+       and "outsideDirResourceWindow(markerFrame)" in report
+       and "outsideDirResourceInWindow(report, sequence, markerFrame)" in report
+       and "g_outsideDirResourceReportedThrough" in report,
+       "F12 emits each retained event once from the exact 120-frame window")
+    ok(window_begin >= 0 and window_end > window_begin
+       and "window.total - (LONG)kOutsideDirResourceReportSlots" in window
+       and "markerFrame - oldest.frame <= kOutsideDirResourceMarkerFrames"
+           in window
+       and member_begin >= 0 and member_end > member_begin
+       and "report.ready == sequence + 1" in member
+       and "markerFrame - report.frame <= kOutsideDirResourceMarkerFrames"
+           in member,
+       "window membership and truncation use the same bounded ring metadata")
+    ok("report.callerVerified" in report
+       and '" %c+%#lx, resource %.*s' in report
+       and '" unverified, resource %.*s' in report
+       and "report.resource" in report
+       and "report.callerDepth" in report
+       and "appendFrame(at, chain + sizeof(chain) - 1" in report
+       and "outside-dir Resource %ld upstream %u" in report,
+       "the live report includes caller status, Resource name, and the"
+       " retained upstream candidates")
+    ok("CounterEngineResOutsideDirMarkerTruncated" in report
+       and "window.truncated ? 1u : 0u" in report,
+       "a marker reports rather than hides ring truncation")
+
+    update_begin = src.find("void __fastcall hookEngineUpdate(")
+    update_end = src.find("\n}\n\n// What the window", update_begin)
+    update = src[update_begin:update_end]
+    render_begin = src.find("void __fastcall hookEngineRender(")
+    render_end = src.find("\n}\n\ntypedef BOOL (WINAPI* GetMessageFn)",
+                          render_begin)
+    render = src[render_begin:render_end]
+    update_in = update.find("InterlockedIncrement(&g_insideEngineUpdate)")
+    update_call = update.find("g_engineUpdate(self, edx, frustum, flag);")
+    update_out = update.find("InterlockedDecrement(&g_insideEngineUpdate)")
+    render_in = render.find("InterlockedIncrement(&g_insideEngineRender)")
+    render_call = render.find("g_engineRender(self, edx);")
+    render_out = render.find("InterlockedDecrement(&g_insideEngineRender)")
+    ok(0 <= update_in < update_call < update_out
+       and 0 <= render_in < render_call < render_out,
+       "verified Engine Update and Render hooks bracket both phase classes")
+
+    marker_begin = src.find("BOOL __stdcall hookPeekMessage(")
+    marker_end = src.find("\n}\n\nvoid __stdcall hookDispatchMessage",
+                          marker_begin)
+    marker = src[marker_begin:marker_end]
+    emit = marker.find("reportOutsideDirResourcesAtMarker();")
+    mark = marker.find("tq::probe::markStutter();")
+    ok(emit >= 0 and mark > emit and "message->wParam == VK_F12" in marker,
+       "the existing F12 retrieval emits the pre-reaction records before marking")
+
+    install_begin = src.find("bool install(HMODULE engine)")
+    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install = src[install_begin:install_end]
+    ok("g_outsideDirResourceTracing = g_loadResource && g_engineUpdate"
+       in install
+       and "&& g_engineRender && g_shadowTracing && g_resourceStateVerified"
+           in install
+       and "&& g_resourceFileNameVerified;" in install,
+       "attribution activates only after every load, phase, shadow, and accessor hook")
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok("g_outsideDirResourceTracing = false;" in shutdown
+       and "InterlockedExchange(&g_insideEngineUpdate, 0);" in shutdown
+       and "InterlockedExchange(&g_insideEngineRender, 0);" in shutdown
+       and "memset(g_outsideDirResourceReports, 0," in shutdown,
+       "shutdown disables phase classification and clears the marker ring")
+
+
+def check_directional_mesh_resource_retention():
+    """Prove Run 68 retains only cold directional mesh-load evidence."""
+    print("\nDirectional cold-mesh Resource retention")
+    ok(const("kShadowMeshResourceReportSlots") == 128
+       and const("kShadowMeshResourceMarkerFrames") == 120,
+       "directional mesh ring is 128 records with a 120-frame horizon")
+
+    load_begin = src.find("void __fastcall hookLoadResource(")
+    load_end = src.find("\n}\n\nbool reusePreviousShadow", load_begin)
+    load = src[load_begin:load_end]
+    original = load.find("g_loadResource(self, edx, resource);")
+    retained = load.find("rememberShadowMeshResource(")
+    ok("const bool shadowMeshReport = g_shadowMeshResourceTracing && inShadow"
+       in load
+       and "&& classify && state == 0"
+           " && resourceType == ShadowResourceMesh;" in load,
+       "retention selects only verified state-0 directional mesh Resources")
+    ok("const void* const caller = outsideDir || shadowMeshReport" in load
+       and "const unsigned frame = outsideDir || shadowMeshReport" in load
+       and "if (outsideDir || shadowMeshReport)" in load
+       and load.find("copyResourceName(resourceNameCopy, resourceName);")
+           < original,
+       "candidate-frame work is bounded caller/frame/name capture before load")
+    ok(original >= 0 and retained > original
+       and "caller, &resource, resourceNameCopy, inQueue, frame" in load,
+       "the original load runs once before directional mesh retention")
+
+    remember_begin = src.find("void rememberShadowMeshResource(")
+    remember_end = src.find("\n}\n\nstruct ShadowMeshResourceWindow",
+                            remember_begin)
+    remember = src[remember_begin:remember_end]
+    ok(remember_begin >= 0 and remember_end > remember_begin
+       and "% kShadowMeshResourceReportSlots" in remember
+       and "moduleOf(address)" in remember
+       and "precededByCall(address, *module)" in remember
+       and "VirtualQuery(stack, &info, sizeof(info))" in remember
+       and "report.callerDepth < kOutsideDirResourceCallerDepth" in remember
+       and "copyResourceName(report.resource, resource);" in remember
+       and "InterlockedExchange(&report.ready, sequence + 1);" in remember,
+       "retention publishes a bounded verified caller-chain record last")
+
+    window_begin = src.find(
+        "ShadowMeshResourceWindow shadowMeshResourceWindow(")
+    window_end = src.find("\n}\n\nbool shadowMeshResourceInWindow",
+                          window_begin)
+    window = src[window_begin:window_end]
+    member_begin = src.find("bool shadowMeshResourceInWindow(")
+    member_end = src.find("\n}\n\nvoid reportShadowMeshResourcesAtMarker",
+                          member_begin)
+    member = src[member_begin:member_end]
+    ok("window.total - (LONG)kShadowMeshResourceReportSlots" in window
+       and "markerFrame - oldest.frame <= kShadowMeshResourceMarkerFrames"
+           in window
+       and "report.ready == sequence + 1" in member
+       and "markerFrame - report.frame <= kShadowMeshResourceMarkerFrames"
+           in member,
+       "mesh window membership and truncation share exact ring metadata")
+
+    report_begin = src.find("void reportShadowMeshResourcesAtMarker(")
+    report_end = src.find("\n}\n\nenum ShadowTextureCaller", report_begin)
+    report = src[report_begin:report_end]
+    ok(report_begin >= 0 and report_end > report_begin
+       and "directional mesh Resource %ld" in report
+       and "state 0, queued %u" in report
+       and '" %c+%#lx, resource %.*s' in report
+       and '" unverified, resource %.*s' in report
+       and "directional mesh Resource %ld upstream" in report
+       and "window.truncated ? 1u : 0u" in report
+       and "g_shadowMeshResourceReportedThrough" in report,
+       "F12 log emits exact mesh identity, queue state, caller chain and"
+       " truncation once")
+
+    marker_begin = src.find("BOOL __stdcall hookPeekMessage(")
+    marker_end = src.find("\n}\n\nvoid __stdcall hookDispatchMessage",
+                          marker_begin)
+    marker = src[marker_begin:marker_end]
+    outside = marker.find("reportOutsideDirResourcesAtMarker();")
+    mesh = marker.find("reportShadowMeshResourcesAtMarker();")
+    mark = marker.find("tq::probe::markStutter();")
+    ok(0 <= outside < mesh < mark and "message->wParam == VK_F12" in marker,
+       "the existing F12 path emits both delayed reports before marking")
+
+    install_begin = src.find("bool install(HMODULE engine)")
+    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install = src[install_begin:install_end]
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok("g_shadowMeshResourceTracing = g_loadResource && g_shadowTracing"
+       in install
+       and "&& g_resourceStateVerified && g_resourceFileNameVerified;"
+           in install,
+       "mesh retention activates only after load, shadow, state and name"
+       " dependencies")
+    ok("g_shadowMeshResourceTracing = false;" in shutdown
+       and "memset(g_shadowMeshResourceReports, 0," in shutdown
+       and "InterlockedExchange(&g_shadowMeshResourceSequence, 0);"
+           in shutdown
+       and "InterlockedExchange(&g_shadowMeshResourceReportedThrough, 0);"
+           in shutdown,
+       "shutdown disables and clears directional mesh retention")
 
 
 def check_shadow_mesh_boundary(engine):
@@ -1129,6 +1825,33 @@ def main():
              None),
             ("kShadowOutputArgumentBytes", "kShadowOutputArgumentRva", None),
             ("kShadowOutputCopyBytes", "kShadowOutputCopyRva", None),
+            ("kTerrainPreloadBytes", "kTerrainPreloadRva",
+             "kTerrainPreloadRelocs"),
+            ("kTerrainSetShaderParamsBytes", "kTerrainSetShaderParamsRva",
+             "kTerrainSetShaderParamsRelocs"),
+            ("kTerrainSetGrassShaderParamsBytes",
+             "kTerrainSetGrassShaderParamsRva",
+             "kTerrainSetGrassShaderParamsRelocs"),
+            ("kTerrainRenderGroundBytes", "kTerrainRenderGroundRva",
+             "kTerrainRenderGroundRelocs"),
+            ("kTerrainRtLoadBytes", "kTerrainRtLoadRva",
+             "kTerrainRtLoadRelocs"),
+            ("kTerrainRtLoadRenderDataBytes", "kTerrainRtLoadRenderDataRva",
+             "kTerrainRtLoadRenderDataRelocs"),
+            ("kTerrainRtPreloadBytes", "kTerrainRtPreloadRva",
+             "kTerrainRtPreloadRelocs"),
+            ("kTerrainRtLoadTexturesWindowBytes",
+             "kTerrainRtLoadTexturesWindowRva", None),
+            ("kTerrainRtNumLayersBytes", "kTerrainRtNumLayersRva", None),
+            ("kTerrainRtLayerTypeBytes", "kTerrainRtLayerTypeRva", None),
+            ("kTerrainPlugRenderBytes", "kTerrainPlugRenderRva",
+             "kTerrainPlugRenderRelocs"),
+            ("kTerrainPlugShaderWindowBytes", "kTerrainPlugShaderWindowRva",
+             "kTerrainPlugShaderWindowRelocs"),
+            ("kTerrainBlockRenderBytes", "kTerrainBlockRenderRva",
+             "kTerrainBlockRenderRelocs"),
+            ("kTerrainBlockShaderWindowBytes",
+             "kTerrainBlockShaderWindowRva", None),
             ("kShadowMeshPassCountBytes", "kShadowMeshPassCountRva", None),
             ("kGraphicsMeshSetShaderParametersFrameBytes",
              "kGraphicsMeshSetShaderParametersFrameRva", None),
@@ -1228,6 +1951,15 @@ def main():
             (engine, "Engine", "kSweepTargetName", "kSweepTargetRva"),
             (engine, "Engine", "kRenderDirectionalName",
              "kRenderDirectionalRva"),
+            (engine, "Engine", "kTerrainPreloadName", "kTerrainPreloadRva"),
+            (engine, "Engine", "kTerrainSetShaderParamsName",
+             "kTerrainSetShaderParamsRva"),
+            (engine, "Engine", "kTerrainSetGrassShaderParamsName",
+             "kTerrainSetGrassShaderParamsRva"),
+            (engine, "Engine", "kTerrainRenderGroundName",
+             "kTerrainRenderGroundRva"),
+            (engine, "Engine", "kTerrainLoadTexturesName",
+             "kTerrainLoadTexturesRva"),
             (engine, "Engine", "kShadowMeshPassCountName",
              "kShadowMeshPassCountRva"),
             (engine, "Engine", "kEnsureAvailableName",
@@ -1269,11 +2001,22 @@ def main():
         ok(b[off] == 0xe8, "sweep window B, offset %d, E8" % off)
     inflate = table("kArchiveInflateWindowBytes")
     ok(inflate[20] == 0xe8, "archive inflate window, offset 20, E8")
+    terrain_load_textures = table("kTerrainRtLoadTexturesWindowBytes")
+    ok(terrain_load_textures[const("kTerrainRtLoadTexturesCallOffset")]
+       == 0xe8,
+       "TerrainRT LoadTextures window, recorded offset, E8")
+    ok(table("kTerrainPlugShaderWindowBytes")[5] == 0xe8,
+       "TerrainPlug shader window, offset 5, E8")
+    ok(table("kTerrainBlockShaderWindowBytes")[7] == 0xe8,
+       "TerrainBlock shader window, offset 7, E8")
 
     check_archive_cache(engine)
     check_async_level_load(engine, sites)
     check_directional_shadow(engine)
     check_resource_lifecycle(engine)
+    check_terrain_diagnostics(engine)
+    check_outside_directional_resources()
+    check_directional_mesh_resource_retention()
     check_shadow_mesh_boundary(engine)
     check_shadow_material_textures(engine)
     check_shadow_alpha_defer(engine)

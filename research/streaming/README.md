@@ -18,6 +18,9 @@ evidence from a local installation.
   symbols of `Engine.dll`, the per-family counts, the classes they resolve to,
   and what was deliberately left out.
 - `seeds.txt` lists the entry points that start the call-graph walk.
+- `disassembly-targets.md` is the durable RVA map for the measured resource,
+  runtime-terrain, color-terrain, and directional-shadow chains. It separates
+  exported identities from working names assigned to unexported functions.
 - `tools/run-audit.sh` is a thin caller over the shared `research/tools/audit.sh`.
 - `arc-format.md` decodes the `.arc` container and records what was checked
   across every archive in the installation — whether anything is stored
@@ -53,8 +56,10 @@ The script refuses binaries whose hashes do not match
 The first run imports and analyzes `Engine.dll` into
 `build/streaming-audit/ghidra` as project `tq-engine`; later runs reuse that
 project with `-noanalysis` and only re-export.  The reviewed export was produced
-with Ghidra 12.1.3 and OpenJDK 21 and contains **1363 `Engine.dll` functions
-rooted at 155 seed matches**.
+with Ghidra 12.1.3 and OpenJDK 21 and contains **1,483 `Engine.dll` functions
+rooted at 189 seed matches**. The later runtime-terrain roots are explicit, so
+the vtable-only `TerrainRT` methods remain in the export even when no direct
+call graph discovers them.
 
 ## Shared tooling
 

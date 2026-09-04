@@ -73,6 +73,17 @@ namespace engineprobe {
 //      independently partition all shadow-nested texture loads. Select group 2 as well when
 //      using a mask so ResourceLoader::LoadResource and the verified Resource
 //      layout are present to populate all splits.
+//32768 TerrainType::PreLoad and the exact DX11 terrain consumers found by run
+//      62: SetShaderParams, SetGrassShaderParams, and
+//      TerrainRenderInterfaceRT::RenderGround. The first three associate each
+//      retained terrain load with that exact TerrainType's preload history;
+//      the last adds whole-call CPU and GPU spans.
+// With groups 2, 128, and 16384 all installed, the same verified load hook
+// also measures the main-thread complement outside RenderDirectional. Phase
+// (Engine::Render/Update/other) and engine filename type independently
+// partition it. F12 emits the preceding 120 frames' retained load identities,
+// call-shaped immediate return sites, and bounded call-shaped upstream stack
+// candidates; no log formatting runs on the candidate frame.
 void readOptions(const wchar_t* iniPath);
 
 // [performance] timer_period_ms, an experiment rather than a fix.
@@ -157,6 +168,19 @@ void readOptions(const wchar_t* iniPath);
 // group. Group 16384 reports omitted states, enqueue outcomes, and skipped
 // material/bump dependencies when enabled.
 
+// [performance] terrain_preload_layers, a fix and defaulting to 0.
+//
+// Runtime TerrainRT::LoadRenderData creates each layer TerrainType's base,
+// bump, and grass texture Resources by calling TerrainType::LoadTextures, but
+// TerrainRT::PreLoad never calls the semantic TerrainType::PreLoad method that
+// queues those Resources. At 1, the already verified LoadTextures call site is
+// retargeted to a wrapper that calls the original and then the stock
+// TerrainType::PreLoad(true) on that exact object. It queues through the game's
+// existing ResourceLoaders and does not wait, omit colour, or invent a loader.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 32768 observes the same stock calls when enabled.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
@@ -181,6 +205,7 @@ bool wantsForTest(unsigned group);
 bool asyncLevelLoadForTest();
 bool shadowTransitionReuseForTest();
 bool shadowDeferColdAlphaForTest();
+bool terrainPreloadLayersForTest();
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state);
 bool shouldDeferShadowMeshForTest(unsigned state);
 void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
@@ -194,6 +219,30 @@ bool reuseShadowForTest(void* region, void* surface, void* matrix);
 void countShadowResourceStateForTest(unsigned state, bool inQueue,
                                      unsigned elapsedUs);
 void countShadowResourceTypeForTest(const char* name, unsigned elapsedUs);
+void countOutsideDirResourceForTest(unsigned type, unsigned phase,
+                                    unsigned elapsedUs);
+void outsideDirResourceResetForTest();
+void outsideDirResourceRememberForTest(unsigned frame);
+unsigned outsideDirResourceWindowForTest(unsigned markerFrame,
+                                         bool* truncated);
+void shadowMeshResourceResetForTest();
+void shadowMeshResourceRememberForTest(unsigned frame);
+unsigned shadowMeshResourceWindowForTest(unsigned markerFrame,
+                                         bool* truncated);
+void terrainPreloadResetForTest();
+void terrainPreloadRememberForTest(const void* terrain, bool includeTextures,
+                                   unsigned frame);
+void terrainPreloadSnapshotForTest(const void* terrain, unsigned* trueCount,
+                                   unsigned* falseCount,
+                                   unsigned* lastTrueFramePlusOne,
+                                   unsigned* lastFalseFramePlusOne);
+void terrainRtEventRememberForTest(const void* terrain, unsigned event,
+                                   unsigned frame);
+void terrainRtEventSnapshotForTest(
+    const void* terrain, unsigned* attachCount, unsigned* attachFirst,
+    unsigned* attachLast, unsigned* texturesCount, unsigned* texturesFirst,
+    unsigned* texturesLast, unsigned* preloadCount, unsigned* preloadFirst,
+    unsigned* preloadLast);
 void countShadowMaterialTextureForTest(bool known, bool used,
                                        unsigned elapsedUs);
 void countShadowMaterialUsedContextForTest(bool callKnown, bool context,

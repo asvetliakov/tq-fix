@@ -219,6 +219,30 @@ enum Counter {
     CounterEngineResLoadUs,
     CounterEngineResLoadMain,
     CounterEngineResLoadMainUs,
+    // Main-thread ResourceLoader calls outside the one global directional
+    // shadow-map build. The phase and file-suffix dimensions each partition
+    // this same population independently; their durations are the complete
+    // game LoadResource calls and therefore remain `_us` engine counters.
+    CounterEngineResOutsideDir,
+    CounterEngineResOutsideDirUs,
+    CounterEngineResOutsideDirRender,
+    CounterEngineResOutsideDirRenderUs,
+    CounterEngineResOutsideDirUpdate,
+    CounterEngineResOutsideDirUpdateUs,
+    CounterEngineResOutsideDirOther,
+    CounterEngineResOutsideDirOtherUs,
+    CounterEngineResOutsideDirMesh,
+    CounterEngineResOutsideDirMeshUs,
+    CounterEngineResOutsideDirShader,
+    CounterEngineResOutsideDirShaderUs,
+    CounterEngineResOutsideDirTexture,
+    CounterEngineResOutsideDirTextureUs,
+    CounterEngineResOutsideDirTypeOther,
+    CounterEngineResOutsideDirTypeOtherUs,
+    // Set on the F12 row if more recent outside-directional loads existed
+    // than the fixed diagnostic ring could retain. Zero proves the emitted
+    // caller/name list covers the marker's complete retained 120-frame window.
+    CounterEngineResOutsideDirMarkerTruncated,
     // The one global directional-shadow build, timed at its direct call site.
     // The resource pair is the main-thread ResourceLoader work nested inside
     // that call, not a second population to add to engine_res_load_main_us.
@@ -670,6 +694,36 @@ enum Counter {
     // level change. Sharing a column with them would hide exactly that.
     CounterEnginePortalAsyncLoad,
     CounterEnginePortalAsyncSync,
+    // TerrainType's own semantic preload and draw entry points. These are
+    // diagnostic engine work, so durations remain `_us`; the GPU ground
+    // span below is the matching device-side interval.
+    CounterEngineTerrainPreload,
+    CounterEngineTerrainPreloadUs,
+    CounterEngineTerrainPreloadTrue,
+    CounterEngineTerrainPreloadFalse,
+    CounterEngineTerrainPreloadTableOverflow,
+    CounterEngineTerrainShaderParams,
+    CounterEngineTerrainGrassParams,
+    CounterEngineTerrainGround,
+    CounterEngineTerrainGroundUs,
+    CounterEngineTerrainRtLoad,
+    CounterEngineTerrainRtLoadUs,
+    CounterEngineTerrainRtLoadRender,
+    CounterEngineTerrainRtLoadRenderUs,
+    CounterEngineTerrainRtLoadRenderMain,
+    CounterEngineTerrainRtLoadRenderMainUs,
+    CounterEngineTerrainRtLoadRenderOther,
+    CounterEngineTerrainRtLoadRenderOtherUs,
+    CounterEngineTerrainRtLoadTextures,
+    CounterEngineTerrainRtLoadTexturesUs,
+    CounterEngineTerrainRtPreload,
+    CounterEngineTerrainRtPreloadUs,
+    CounterEngineTerrainRtPreloadLayers,
+    CounterEngineTerrainRtLayerOverflow,
+    CounterEngineTerrainPlug,
+    CounterEngineTerrainPlugUs,
+    CounterEngineTerrainBlock,
+    CounterEngineTerrainBlockUs,
     // A human observation, not an inferred hitch class. With
     // [debug] stutter_marker=1, an F12 key-down returned by the game's message
     // pump marks the Present interval in which it was retrieved.
@@ -690,6 +744,8 @@ enum GpuPhase {
     GpuGrass,
     GpuSmaa,
     GpuBloom,
+    GpuTerrainGround,
+    GpuTerrainRtLoadRender,
     GpuPhaseCount
 };
 
@@ -764,6 +820,11 @@ inline void count(Counter counter, uint32_t amount = 1) {
 // so a call site that branches on this behaves the same way count() does.
 bool isRenderThread();
 
+// Index of the frame currently accumulating. The stutter-marker resource
+// diagnostic uses it to retain pre-reaction events without logging on the
+// slow frame itself. Meaningful only while the probe is enabled.
+unsigned currentFrameIndex();
+
 // The counting channel for the game's own threads. Accumulates into an
 // interlocked side array and folds into the frame record at endFrame, so the
 // column, its median and the `unusual` attribution all work unchanged -- but
@@ -791,6 +852,10 @@ bool createResources(ID3D11Device* device);
 void releaseResources();
 void gpuBegin(ID3D11DeviceContext* context, GpuPhase phase);
 void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase);
+// Borrowed for the duration of a render-thread scope. Null off the thread that
+// opened the frame, before beginFrame, or when timestamp resources are
+// unavailable; callers must not retain it.
+ID3D11DeviceContext* currentGpuContext();
 
 // Scoped form, so a function with several returns cannot leave a region open
 // -- an unclosed region is never resolved and its column silently reads blank.

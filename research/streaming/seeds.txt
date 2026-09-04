@@ -301,6 +301,33 @@ GetIsReadyToUse
 GetThreadInfos
 
 # ---------------------------------------------------------------------------
+# Runtime terrain lifecycle and the two colour-terrain renderers reached by
+# run 63's exact Resource stacks. TerrainRT is not exported; address roots are
+# required for its vtable-selected implementations. The exported Terrain
+# class is an editor implementation and must not be substituted for these.
+# ---------------------------------------------------------------------------
+TerrainType::LoadTextures
+LoadTextures@TerrainType
+TerrainType::PreLoad
+PreLoad@TerrainType
+TerrainType::SetShaderParams
+SetShaderParams@TerrainType
+TerrainType::SetGrassShaderParams
+SetGrassShaderParams@TerrainType
+TerrainRenderInterfaceRT::RenderGround
+RenderGround@TerrainRenderInterfaceRT
+TerrainRenderInterfaceRT::RenderGrass
+RenderGrass@TerrainRenderInterfaceRT
+@0x10236240
+@0x1023d020
+@0x1023d060
+@0x1023d400
+@0x1023d6d0
+@0x1023d8d0
+@0x1023ded0
+@0x1023e1e0
+
+# ---------------------------------------------------------------------------
 # Address seeds: the two file-source vtable slots the mod already patches
 # (src/visual.cpp:578 reads slot 2, src/visual.cpp:641 replaces slot 4), given
 # here as preferred virtual addresses because the mod knows them only by RVA.

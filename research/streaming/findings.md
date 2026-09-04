@@ -5700,6 +5700,850 @@ and `shadow_split` must remain unchanged. No visual observation accompanied
 the completion message, so run 59 supplies no new artifact-safety claim.
 
 
+## 80. Run 68 setup: retain exact caller chains for the remaining directional cold meshes
+
+Run 67 leaves a specific class, not a reason to broaden the current shadow
+omission blindly: its marked **play** frame 6974 synchronously loads 26
+state-0 meshes / 23.583 ms inside
+`GraphicsShadowMapDx11::RenderDirectional`, after the exact base
+`GraphicsMeshInstance` root behavior has already omitted twelve other casters.
+The next question is which verified caller/dependency owns those 26 meshes.
+
+Run 68 adds a bounded delayed report to the already installed Resource-load
+and directional-shadow trace. Only a main-thread Resource whose pre-call state
+is 0, whose engine filename class is mesh, and whose call occurs inside the
+verified directional bracket is retained. Each record carries the filename,
+pre-call queue flag, frame, duration, immediate return address only when it is
+call-shaped inside a verified module, and at most 24 likewise verified
+call-shaped upstream stack candidates. A fixed 128-record ring covers the 120
+frames before F12 and explicitly reports truncation. The existing F12
+retrieval writes the records before placing its CSV marker.
+
+This is passive and low-frequency. The candidate frame performs a bounded
+copy and stack scan only on a cold mesh load; filename/caller formatting and
+log locking occur later at F12. There is no new GPU query, per-draw hook,
+Resource operation, behavior setting, culling change, shadow change, or
+`shadow_split` change. Both accepted behaviors, including
+`terrain_preload_layers=1`, remain unchanged.
+
+`verify-sites.py` passes 439 checks. All 71 relevant one-at-a-time mutations
+are rejected, including the ring size, marker horizon, exact state/type/shadow
+predicates, F12 emission, dependency activation, every terrain-layer behavior
+constant, and both forbidden high-frequency colour GPU scopes. Doctor, release
+build, and the full off-game self-test pass, including the directional-mesh
+window boundary/overwrite tests and GPU timestamp retirement.
+
+Run 68 is installed from `cache/runs/run68-directional-mesh-callers.ini`.
+The 709,120-byte installed DLL is byte-identical to the build at SHA-256
+`bec80cafbdc9fae6845ba24b1653b9b7cced2a6d86bc6d55a07d28f863f1ebc7`.
+The installed INI is byte-identical to the run record at SHA-256
+`d92bfd247b6edd7eeeff4595f2dc3d13b1c145dc644e060f56d878593376e12a`.
+Run 67's live CSV/log matched their archives before removal; both stale live
+names are absent. The game was not launched.
+
+Run the same normal route and press F12 after the reduced **play** transition.
+Also report whether the **first world frame** loading burst again feels
+unusually long. The primary Run 68 result is the exact directional mesh
+resource/caller population at the marker; do not choose a frame by maximum.
+
+
+## 79. Run 67 removes eleven of thirteen marked colour-terrain loads; the remaining burst is directional cold meshes plus GPU submission
+
+Run 67 completed with 7,605 contiguous frames, 0--7604, totaling 98.045 s.
+Its five session parts are **menu** 0--2074 (19.422 s), **load-game frame**
+2075 (1,386.5 ms), **loading screen** 2076--3441 (11.686 s), **first world
+frame** 3442 (1,352.9 ms), and **play** 3443--7604 (64.199 s). The user ran
+the same normal route used more than fifty times and reported that the old
+stutter felt much smaller.
+
+The behavior executed at the intended point. During the **loading screen**,
+144 exact `TerrainRT::LoadRenderData -> TerrainType::LoadTextures` calls are
+paired one-for-one with 144 semantic `TerrainType::PreLoad(true)` calls and
+zero false calls. Another 150/150 pair occurs as new terrain is admitted in
+**play**. The save loads and no visual fault was reported.
+
+F12 at **play** frame 7013 anchors a two-frame transition. Frame 6974 is
+73.472 ms and ends 887 ms before the marker; frame 6975 is 83.720 ms and ends
+803 ms before it. The first frame has 29 main-thread Resource loads /
+29.284 ms. Only two / 5.094 ms are outside directional shadow, both render-
+phase terrain textures. Run 66's corresponding marked colour-terrain class
+had 13 / 47.359 ms on its onset and another nine textures / 29.075 ms two
+frames later. No such second colour-load frame follows Run 67's onset. This
+does not make the submitted scenes identical, but the exact mechanism and the
+reporter's observation agree: the new stock preload removed eleven of the
+thirteen onset loads and roughly 42 ms from that nested colour class.
+
+The two survivors are
+`XPack3\\terraintextures\\gadir\\gadir_rockypebbles01.tex` and its
+`normal.tex`, together costing 5.094 ms. Both belong to the same exact
+`TerrainType*`. Its runtime layer was attached in **loading screen** frame
+2598; `LoadTextures` and the new `PreLoad(true)` both completed at frame 2631;
+runtime-owner `TerrainRT::PreLoad` then enumerated it 4,397 times through
+**play** frame 6973. Nevertheless both Resources enter ordinary colour use in
+state 0. This proves one early semantic call is not a lifetime residency
+guarantee, but the current trace cannot distinguish never serviced from loaded
+then evicted. Periodically walking every layer would be a broad, high-volume
+response to a remaining 5.094 ms and is not supported.
+
+The dominant remainder is already separate. Frame 6974 performs 27 state-0
+directional-shadow loads / 24.190 ms: 26 meshes / 23.583 ms and one shader /
+0.607 ms, inside a 26.166 ms `GraphicsShadowMapDx11::RenderDirectional` CPU
+class. Twelve exact base `GraphicsMeshInstance` root casters are omitted and
+eight state-0 roots are newly queued, so these 26 loads are reached through
+some other shadow dependency/class. The directional GPU interval is 59.807 ms
+and the whole-frame GPU interval is 104.808 ms. Frame 6975 has no Resource
+load, but spends 50.607 ms in the game's `DrawIndexed` submission after that
+work; its whole frame is 83.720 ms. These nested/adjacent numbers must not be
+added as independent costs.
+
+Removing the high-frequency colour GPU scopes also fixes the reported general
+slowness. Against Run 63, using only collision-active full-scene **play**
+frames under 60 ms with no Resource load or shadow-region change, Run 67 minus
+Run 63 mean frame time is -0.109 ms at 500--999 indexed draws (1,168 versus
+1,177 frames), +0.078 ms at 1,500--1,999 (751 versus 751), and -0.002 ms at
+2,000-plus (227 versus 240). Corresponding GPU differences are -0.108,
++0.095, and -0.037 ms. No across-run p50 is used. Run 66's +8.266 and
++13.184 ms regressions in the latter two bands were observer cost.
+
+One caution remains in a different session part. Run 67's **first world
+frame** is 1,352.9 ms versus Run 66's 581.6 ms. Main-thread Resource counts
+are similar (148 versus 143), but their durations are 810.286 versus
+215.114 ms, texture creation is 352.090 versus 73.707 ms, and whole-GPU time
+is 1,339.844 versus 560.602 ms. One frame in each run cannot attribute that
+variance to the new preload, and it is not the reported **play** transition,
+but a later acceptance run must not silently ignore the loading regression if
+it repeats.
+
+The next passive trace should retain only state-0 mesh Resource loads inside
+`GraphicsShadowMapDx11::RenderDirectional` for the preceding F12 window, with
+their engine filename, immediate verified caller, and bounded call-shaped
+upstream candidates. That directly identifies the 26-load class before any
+wider caster omission or mesh-prefetch behavior. Re-running terrain preload
+or adding more high-frequency GPU scopes is not justified.
+
+The archived CSV is `tqflicker-frames.run67.csv`, SHA-256
+`b146a9a0238514d15fddb2bbec61c3d843f79aac103d8c9d4e93a21ee4604f47`.
+The during-session log is `tqflicker-debug.run67.log`, SHA-256
+`1f5cc7b4b6c8ffc1e1bb13f5a54289909125b8f7dcd0598e91341d915043be5a`;
+the live files were byte-identical to those archives at capture.
+
+
+## 78. Run 67: queue runtime layer textures at the exact post-LoadTextures boundary
+
+Run 66 does not point to a terrain, shadow, culling, or resource-loader
+rewrite. Its exact lifecycle says the layer `TerrainType` and its base, bump,
+and grass texture Resources already exist during the **loading screen**; the
+missing operation is the stock semantic preload that queues those Resources.
+Run 67 adds only that operation.
+
+`[performance] terrain_preload_layers=1` retargets the already verified E8 in
+runtime `TerrainRT::LoadRenderData` with `detour::patchCall`. The wrapper first
+calls the exact original `TerrainType::LoadTextures`, then calls the verified
+exported `TerrainType::PreLoad(true)` on the same `this`. The latter's machine
+body walks the base and bump vectors plus grass Resource and reaches the
+game's existing `ResourceLoader::EnqueueResource` path. It does not wait,
+construct a custom loader, omit a colour or shadow draw, alter frustum
+culling, or change `shadow_split`.
+
+The behavior defaults off. It reaches `engineprobe::install()` with the
+performance probe off and, by itself, installs only the exact call patch; it
+cannot open trace group 32768 or any other instrument. With the terrain trace
+active, the behavior deliberately enters the exported `PreLoad` entry rather
+than its trampoline, so the existing true/false counters prove the call ran.
+The behavior becomes active only after the call site, original target, export
+RVA, complete 24-byte signature, and relocation have all verified. Shutdown
+restores the call and clears both behavior and diagnostic state.
+
+The two high-frequency TerrainPlug/TerrainBlock GPU phases and CSV fields are
+removed before this run. Their CPU call counts and engine `_us` spans remain.
+This corrects Run 66's demonstrated observer overhead; it is not a game or fix
+effect and steady-state Run 66 timing must not be used as the baseline.
+
+`verify-sites.py` passes 429 checks. All 64 one-at-a-time terrain mutations are
+rejected, including every runtime/preload RVA, signature byte and relocation,
+the option name and default, the `true` argument, the post-LoadTextures order,
+the activation endpoint, independent install route, and reintroduction of a
+GPU scope into either colour wrapper. Doctor, release build, and the full
+off-game self-test pass, including GPU timestamp retirement.
+
+Run 67 is installed from `cache/runs/run67-terrain-layer-preload.ini`. The
+705,024-byte installed DLL is byte-identical to the build at SHA-256
+`3171d5301076962d41c67659444d50e1e873eb2bae5d730f6c45510d51c5dd07`.
+The installed INI is byte-identical to the run record at SHA-256
+`e57b0537009088cf6b061322da2b118d4f94a75871e45a619672d194be99fd52`.
+Before removal, both Run 66 live files were byte-identical to their archives;
+the stale live CSV/log are absent. The game was not launched.
+
+For the result, use the same normal route and press F12 after the old **play**
+loading transition. The primary outcome is not an across-run maximum: require
+the fix's `TerrainType::PreLoad(true)` calls during loading, then inspect the
+F12-anchored transition for the 13 outside-directional colour-terrain texture
+loads that cost 47.359 ms in Run 66. A load freeze rejects thread-context
+safety; missing or visibly incorrect terrain rejects behavior even if those
+loads disappear.
+
+
+## 77. Run 66 loads successfully and exposes missing runtime-layer preload; its high-frequency GPU scopes were intrusive
+
+Run 66 validates §76's ABI correction. The CSV has 7,047 contiguous frames,
+0--7046, totaling 94.061 s. Its five session parts are **menu** 0--1936
+(17.383 s), **load-game frame** 1937 (1,302.6 ms), **loading screen**
+1938--3208 (10.932 s), **first world frame** 3209 (581.6 ms), and **play**
+3210--7046 (63.862 s). The save loaded, the character appeared, and the normal
+route completed. Therefore the two five-explicit-argument colour wrappers,
+not the game or a loader-thread GPU query, caused the Run 64/65 freeze.
+
+F12 marks **play** frame 6618. Frame 6601 is the old loading-transition class:
+109.223 ms, beginning 642 ms before the key was retrieved and ending 533 ms
+before it. Frame 6617 is a separate 61.014 ms `Engine::Update` class only 29 ms
+before the marker and has no Resource load. Do not substitute the closer frame
+for the reported transition.
+
+The transition frame spends 102.921 ms in the `Engine::Render` class. It has
+36 main-thread Resource loads / 62.355 ms: 23 / 14.996 ms in one 16.679 ms
+`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 47.359 ms outside
+directional shadow. All 13 outside-directional loads are textures in the
+render phase. Exact colour-terrain CPU classes are 137 TerrainPlug calls /
+45.531 ms and 59 TerrainBlock calls / 17.627 ms. These CPU spans and Resource
+loads are nested and must not be added.
+
+The whole-frame GPU interval is 87.644 ms. Nested first-entry-to-last-exit GPU
+classes include 12.579 ms directional shadow, 15.689 ms enhanced grass,
+21.809 ms DX11 `TerrainRenderInterfaceRT::RenderGround`, 76.484 ms TerrainPlug,
+and 76.624 ms TerrainBlock. TerrainPlug and TerrainBlock overlap and cannot be
+added. Frame 6602 has no Resource load and falls to 32.304 ms. Frame 6603 is
+54.590 ms with ten outside-directional loads / 30.042 ms, including nine
+textures / 29.075 ms.
+
+The exact per-type lifecycle resolves the missing link. The affected
+`TerrainType` records were attached by runtime `TerrainRT::Load` during the
+**loading screen**, and their `TerrainType::LoadTextures` calls completed
+during the **loading screen**. Runtime-owner `TerrainRT::PreLoad` subsequently
+visited those owners and enumerated their layers through **play** frame 6600,
+immediately before the transition. Nevertheless, exact semantic
+`TerrainType::PreLoad` counts are zero for both `true` and `false`. The
+Resources therefore existed long before frame 6601, but the runtime preload
+path never queued the layer base, bump, and grass textures; ordinary colour
+rendering synchronously first-used them. This is a missing runtime-layer
+preload call, not a need to rewrite terrain, frustum culling, shadows, or the
+resource system.
+
+The user also reported general slowness and confirmed this was the same normal
+route used for prior runs. A controlled comparison against Run 63 uses only
+collision-active, full-scene **play** frames under 60 ms, excludes Resource
+loads and shadow-region changes, and bands by indexed-draw count. Run 66 minus
+Run 63 mean frame time is +0.574 ms for 500--999 draws (1,089 versus 1,177
+frames), +8.266 ms for 1,500--1,999 (512 versus 751), and +13.184 ms for
+2,000-plus (152 versus 240). The corresponding GPU deltas are +0.570,
++8.279, and +13.141 ms; `present_call` changes by only +0.013, +0.005, and
+-0.009 ms. No across-run p50 is used.
+
+This scaling identifies observer cost. `gpuBegin` records the first entry for
+a phase, but `gpuEnd` deliberately records every exit so its timestamp becomes
+the last exit. In Run 66 that meant about 221 immediate-context `End(query)`
+calls per frame in the 1,500--1,999 band and 377 above 2,000 draws from the
+new TerrainPlug and TerrainBlock scopes alone. Their diagnostic result is now
+captured, so the scopes and their CSV columns are removed. The CPU call counts
+and `_us` spans remain. The verifier rejects either high-frequency GPU scope
+being restored.
+
+The next supported behavior is narrow: immediately after the already verified
+`TerrainRT::LoadRenderData -> TerrainType::LoadTextures` call completes, invoke
+the stock `TerrainType::PreLoad(true)` on that exact layer type. Its disassembly
+walks base, bump, and grass Resources and enqueues them without waiting. This
+uses the game's existing queue at the point Resources first exist, during the
+**loading screen**, rather than inventing a parallel loader or deferring colour
+correctness. It must be a default-off behavior switch that installs with the
+performance probe off; the trace only verifies that frame-6601-class colour
+loads disappear.
+
+The archived CSV is `tqflicker-frames.run66.csv`, SHA-256
+`515cdb29ffd35d1a7fa35f014da6a4b3c2586ad6c6f93386712515e11eec8951`.
+The during-session log is `tqflicker-debug.run66.log`, SHA-256
+`91a46af9bd67d423a46f10ca126d3605db41d0de5c9bf1c3b137f9eacd585686`;
+both live files were byte-identical to their archives.
+
+
+## 76. Run 65 rejects the GPU-thread diagnosis; both colour-terrain wrappers had the wrong x86 argument count
+
+Run 65 repeated the failure after the GPU-context guard. It is archived as
+`tqflicker-frames.run65.csv`, SHA-256
+`8132aab1179af8b96df72ca510ac4e8e983a0a6464b878f8239ae3cafce55b27`;
+the during-session log is `tqflicker-debug.run65.log`, SHA-256
+`43074682b369e49851a7b2f1039132fdad7ecf55629239b7f57e6a50dadb12f4`.
+The CSV has 3,200 contiguous completed frames, 0--3199, totaling 30.260581 s.
+Every completed row is **menu**. The **load-game frame** again never closed,
+so Run 65 has no **loading screen**, **first world frame**, or **play** data.
+
+The new partition is decisive about §75's first diagnosis. All 17 completed
+calls to the exact runtime `TerrainRT::LoadRenderData` class were in the
+non-main class: 17 / 37,318 us in
+`engine_terrain_rt_load_render_other` / `_other_us`, zero in the main class.
+The corrected shared accessor returned null there, so none of those calls
+issued a GPU timestamp. Save loading nevertheless froze. Cross-thread GPU
+timestamping was a real unsafe defect in Run 64, but it was not the cause of
+this reproducible load-game freeze. Do not carry §75's causal hypothesis
+forward.
+
+The fresh ABI audit then found a second, concrete defect in the two unexported
+colour-terrain hooks. Ghidra decompiled both functions with five parameters,
+and the Run 64/65 `TerrainColourRenderFn` mistakenly treated all five as
+explicit stack arguments in addition to `this`. The decompiler's count already
+included the implicit `this` pointer. Machine code resolves the ambiguity:
+both *TerrainPlug colour render* at Engine RVA `0x236240` and *TerrainBlock
+colour render* at `0x23e1e0` end in `c2 10 00` (`ret 0x10`). Each therefore
+has exactly four explicit stack arguments.
+
+The bad fastcall wrappers accepted and forwarded five explicit arguments and
+would return by popping 20 bytes where the engine caller provides 16. The
+first call corrupts the caller's stack. Both classes have zero completed calls
+in the Run 65 **menu** rows, which is consistent with the first colour-terrain
+call occurring in the unfinished **load-game frame**; because that frame never
+reached `Present`, its counters cannot appear in the CSV. This makes the ABI
+defect a substantially stronger freeze explanation than the rejected GPU
+hypothesis, but the causal link remains a prediction until the corrected DLL
+successfully reaches the **loading screen**.
+
+Run 66 changes only those two wrapper declarations and forwards: `this` plus
+four explicit arguments, matching both `ret 0x10` bodies. It changes no game
+rendering, loading, resource, terrain, culling, or shadow behavior. The durable
+disassembly map now states the implicit/explicit distinction so a later reader
+cannot repeat the prototype-count error.
+
+`verify-sites.py` now passes 424 checks. It reads both concrete return sites
+from the pinned Engine binary, requires `c2 10 00` at each, and requires both
+wrapper types and forwards to carry exactly four explicit arguments. All 56
+one-at-a-time terrain-chain mutations are rejected, including the typedef and
+each individual forward call. Doctor, release build, and the complete off-game
+self-test pass, including GPU timestamp retirement.
+
+The Run 66 DLL is installed: source and installed copies are byte-identical,
+704,000 bytes, SHA-256
+`97149c6b2d1caeb1f131511c9d1279e63fee2364dc15b8500858bc6982f9ce28`.
+Per the user's instruction, the INI was not recopied; the already installed
+Run 65 INI remains byte-identical to its source at SHA-256
+`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`
+and requests the same trace settings recorded in
+`cache/runs/run66-terrain-colour-abi.ini`. The Run 65 live CSV/log were
+verified against their archives before the stale live names were removed. The
+game was not launched.
+
+
+## 75. Run 64 aborted in the load-game frame: the first GPU-thread diagnosis is withdrawn by §76
+
+Run 64 is not a performance run and does not revise Run 63's game diagnosis.
+It wrote 2,162 contiguous presented frames, 0--2161, totaling 21.607161 s,
+before the user selected a save. Those completed rows are all **menu**. The
+game then froze while the next **load-game frame** was in progress; that frame
+never reached `Present` and therefore never entered the CSV. There is no Run
+64 **loading screen**, **first world frame**, or **play** data. In particular,
+no maximum from the partial file is a candidate for the reported freeze.
+
+The partial CSV is archived as `tqflicker-frames.run64.csv`, SHA-256
+`c5016c2057b254636624b04e78fde08101e8b7e9a4b0b6d84d954005bd817419`;
+the during-session debug log is `tqflicker-debug.run64.log`, SHA-256
+`75b82e5b9be13d3eb3f7935d7207e5ad903a1baba703d32414b6545380297cec`.
+All ten runtime-terrain sites reported installed. In the completed **menu**
+rows, exact runtime `TerrainRT::Load` ran 18 times / 163,193 us,
+`TerrainRT::LoadRenderData` ran 17 times / 23,921 us, its exact calls to
+`TerrainType::LoadTextures` ran 134 times / 545 us, and
+`TerrainRT::PreLoad` ran 6,454 times / 24,195 us while enumerating 51,848
+layer associations. These values establish only that the new ABIs and hooks
+were live before the freeze; they do not classify the unfinished load-game
+frame or support a game-performance conclusion.
+
+Fresh review found one unsafe operation in the instrument. The Run 64
+`TerrainRT::LoadRenderData` hook unconditionally constructed a GPU timestamp
+scope using the active frame's D3D11 immediate context. The active timestamp
+slot and immediate context belong to the thread that opened the render frame,
+but `LoadRenderData` can be reached by save loading. If that call is on a
+loader thread, the hook issues `ID3D11DeviceContext::End` concurrently with
+the render thread and can deadlock the device. The successful **menu** calls
+do not clear the bug: they can have been main-thread calls, while the first
+save-load call takes the different thread path. The aborted trace did not yet
+record a main/other split, so this is the leading instrumentation diagnosis,
+not a claim that Run 64 directly proved the thread identity.
+
+This failure is specific to the mod's new instrumentation. It is not an
+explanation of the game's native Windows stutter, does not make the host the
+cause, and is not evidence that `TerrainRT::LoadRenderData` itself hangs. A
+trace-off abort configuration was installed immediately, retaining only the
+already accepted exact `GraphicsMeshInstance` cold-root shadow deferral.
+
+Run 65 makes the smallest falsifiable correction. The shared
+`probe::currentGpuContext` accessor now returns null off the thread that opened
+the frame, so no current or future diagnostic class can borrow the immediate
+context from a loader. The exact `TerrainRT::LoadRenderData` hook also gates
+its GPU scope on the verified game main thread. Its CPU interval is preserved
+and partitioned exactly into
+`engine_terrain_rt_load_render_main` / `_main_us` and
+`engine_terrain_rt_load_render_other` / `_other_us`; the common
+`engine_terrain_rt_load_render` / `_us` population remains their sum. Only the
+main-thread class can contribute `gpu_terrain_rt_load_render_ms`. This adds no
+behavior switch and changes no game loading, terrain, culling, or shadow code.
+If Run 65 passes save loading, it validates removal of the unsafe operation;
+if it freezes again, the whole new runtime-terrain trace group must be bisected
+rather than treating the hypothesis as fact.
+
+The added fields moved the 317-field CSV schema just beyond its former 8 KiB
+line buffer. The first off-game test correctly rejected that build for a
+truncated header. Header and data rows now share one audited 16 KiB bound.
+`verify-sites.py` passes 422 checks, and all 53 one-at-a-time terrain-chain
+mutations are rejected, including removal of either thread gate, either side
+of the count/duration partition, each new CSV identity, and the line bound.
+Doctor, release build, and the complete off-game self-test pass. The self-test
+opens a real timestamp frame, proves the render thread receives its immediate
+context, and proves a worker thread receives null; timestamp retirement also
+passes.
+
+Run 65 is installed from
+`cache/runs/run65-terrain-runtime-chain-threadsafe.ini`. Source and installed
+DLLs are byte-identical: 704,000 bytes, SHA-256
+`d0cc1c760309372f5ef5b50b0aab2e9e384fe231120716c4e305ea18730c5f98`.
+Source and installed INIs are byte-identical at SHA-256
+`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`.
+The stale live Run 64 CSV and debug log were rechecked byte-identical to their
+archives before only those two live names were removed. The game was not
+launched. First establish whether the save reaches the **loading screen**;
+then complete the normal route and press F12 after the felt **play** loading
+burst. A freeze before the loading screen rejects the thread-gate diagnosis
+and requires trace-group bisection.
+
+
+## 74. Run 63: `TerrainType::PreLoad` is absent; the runtime `TerrainRT` owner admits layer textures only in render-data construction
+
+Run 63 is archived as `tqflicker-frames.run63.csv`, SHA-256
+`884de918c81327c838b61c5288a4a231faa57ad2020ab9d260d893a0a734390c`;
+its live-written debug log is `tqflicker-debug.run63.log`, SHA-256
+`0abd6cfd64cdc7b44d84c306962160eaf9824b58f24ffe4f54c110ee61ac70d5`.
+The CSV contains 7,162 contiguous presented frames, 0--7161, and 313 fields.
+The five session parts are **menu** 0--1831 (17.560 s), **load-game frame**
+1832 (1.492884 s), **loading screen** 1833--2970 (10.244389 s), **first
+world frame** 2971 (845.355 ms), and **play** 2972--7161 (63.970227 s).
+
+F12 at **play** frame 6565 is a reaction anchor. The full-scene,
+collision-active **play** loading candidate is frame 6544 at 180.607 ms,
+beginning 688.157 ms before the marker and followed by a 50.615 ms recovery at
+frame 6545. Frame 6564 at 77.565 ms is a separate `Engine::Update`-class
+candidate with no Resource load. It is closer to F12 but must not be merged
+with the loading transition merely because the reaction key followed it.
+
+**Play** frame 6544 spends 170.045 ms in the `Engine::Render` class, 5.754 ms
+in the `Engine::Update` class, 1.323 ms in the message-pump class, and 3.170 ms
+in the game's `present_call` class. It carries 35 main-thread
+`ResourceLoader::LoadResource` calls / 101.715 ms. The
+`GraphicsShadowMapDx11::RenderDirectional` class owns 22 / 22.238 ms; the
+color-terrain path outside that class owns 13 / 79.477 ms, all state-0 texture
+Resources. The game's D3D calls take 43.020 ms in `Draw`/`DrawIndexed` and
+1.818 ms in `Map`. Its whole-GPU interval is 185.804 ms. Named, nested GPU
+classes include 33.244 ms directional shadow, 0.923 ms point shadow, 26.341 ms
+enhanced grass, 0.433 ms SMAA, 0.278 ms bloom, and exactly 54.213 ms in the
+DX11 `TerrainRenderInterfaceRT::RenderGround` class. These CPU and GPU spans
+overlap and are not additive. The ground class itself made only six calls and
+used 556 CPU microseconds, so the 54.213 ms is device work, not a hidden
+54 ms CPU function.
+
+The exact 13 color-terrain Resources belong to six `TerrainType` identities.
+`TerrainType::PreLoad` ran zero times in **menu**, **load-game frame**,
+**loading screen**, **first world frame**, and **play**. This is not a missing
+trace hook: in the same session `TerrainType::SetShaderParams` ran 235,861
+times, `TerrainType::SetGrassShaderParams` ran 54,722 times, and
+`TerrainRenderInterfaceRT::RenderGround` ran 9,159 times. All four Run 63
+terrain hooks installed atomically. Every retained cold texture record
+therefore has true=0 and false=0 for the exact owning `TerrainType*`; the
+semantic layer preloader was not merely called with the wrong bool or a few
+frames late.
+
+### The static correction: the game uses runtime `TerrainRT`, not exported editor `Terrain`
+
+Fresh static analysis corrected the class boundary. The shipped object writes
+the unexported vtable at Engine RVA `0x2f8820`; constructors at `0x23dde0` and
+`0x23ded0` write that identity. Its slots select *runtime* `Load` at
+`0x23d8d0` (`+0x24`), `LoadRenderData` at `0x23d6d0` (`+0x28`), `PreLoad` at
+`0x23d400` (`+0x34`), layer count at `0x23d060` (`+0x44`), and layer lookup at
+`0x23d020` (`+0x48`). The similarly named exported `Terrain` methods are the
+editor-capable implementation and must not be substituted for this class.
+
+The runtime `TerrainRT::Load` class creates 12-byte layer records in the vector
+at owner `+0x84..+0x88`; the first dword of each record is the exact
+`TerrainType*`. It does not call `TerrainType::LoadTextures` or
+`TerrainType::PreLoad`. Runtime `TerrainRT::LoadRenderData` later walks those
+records and, at the exact `E8` at RVA `0x23d742`, directly calls exported
+`TerrainType::LoadTextures` (`0x240160`) before it creates opacity textures,
+terrain buffers, and geometry. Runtime `TerrainRT::PreLoad` walks nearby
+`TerrainObject`s, but its complete body directly calls neither
+`TerrainType::PreLoad` nor `TerrainType::LoadTextures`. This is the concrete
+omission Run 63 exposed: layer texture admission is tied to render-data
+construction, while the runtime owner's ordinary nearby-object preload omits
+the layer `TerrainType`s.
+
+Run 63's upstream addresses also identify both later color classes.
+The unexported five-argument function at RVA `0x236240`, named *TerrainPlug
+color render* by behavior rather than a missing symbol, calls
+`TerrainType::SetShaderParams` at `0x2366cd`. The corresponding unexported
+*TerrainBlock color render* at `0x23e1e0` calls the same setter at `0x23e73f`.
+The 24-byte body windows around both calls make those identities independent
+of their identical 19-byte entry shapes. All runtime terrain, color-terrain,
+resource, root-mesh, and shadow material/caster targets are now indexed in
+`disassembly-targets.md`; both reproducible Ghidra seed sets were extended and
+regenerated. The streaming audit contains 1,483 Engine functions from 189
+roots; the shadow audit contains 695 Engine functions from 70 roots.
+
+### Withdrawn Run 64 setup: §75 found its GPU scope was not passive
+
+This is the pre-run setup record, retained for history and corrected forward
+by §75. Its claim that Run 64 was passive is withdrawn: the exact
+`TerrainRT::LoadRenderData` GPU scope could touch the immediate D3D11 context
+from a non-render thread. The intended trace-only terrain group is atomic across ten
+sites: it retains the four Run 63 exports, detours runtime `TerrainRT::Load`,
+`TerrainRT::LoadRenderData`, and `TerrainRT::PreLoad`, patches only the exact
+existing `LoadRenderData -> TerrainType::LoadTextures` call, and brackets the
+unexported TerrainPlug and TerrainBlock color-render classes. It changes no
+texture admission, preload, rendering, culling, or shadow behavior.
+
+For the runtime owner, the CSV adds `engine_terrain_rt_load` / `_us`,
+`engine_terrain_rt_load_render` / `_us`,
+`engine_terrain_rt_load_textures` / `_us`, and
+`engine_terrain_rt_preload` / `_us`. Layer enumeration is bounded at 64, with
+`engine_terrain_rt_preload_layers` and an explicit
+`engine_terrain_rt_layer_overflow`. The color functions add
+`engine_terrain_plug` / `_us` and `engine_terrain_block` / `_us`. Non-blocking
+game-time timestamps add `gpu_terrain_rt_load_render_ms`,
+`gpu_terrain_plug_ms`, and `gpu_terrain_block_ms`; like draw submission,
+mapping, and the existing GPU columns, these are not charged to the mod.
+
+The fixed 2,048-slot identity table now retains, per exact `TerrainType*`, the
+count and first/last frame for three runtime-owner events: layer attachment by
+successful runtime `Load`, Resource creation completed by the exact
+`LoadTextures` call, and enumeration by runtime-owner `PreLoad`. F12 formats
+this beside the existing exact cold texture record after the candidate. The
+result can distinguish “never admitted until first render,” “admitted during
+render-data construction but never queued,” and “owner preload ran but omitted
+its layer types” without another trace build.
+
+The four new shared `55 8b ec 83 e4 f8` entries verify 19--23 bytes and steal
+six. Runtime `LoadRenderData` verifies 20 bytes and steals its first two
+complete instructions, eight bytes. The direct texture-admission site uses
+`detour::patchCall`; all ten sites roll back if any dependency fails.
+`verify-sites.py` now passes 419 independent checks. Its extension caught and
+corrected two decompiler transcription errors before installation: one opcode
+in each layer accessor and an accidental byte from the following function.
+All 46 one-at-a-time mutations of the new RVAs, export name, vtable slots,
+relocations, signature bytes, call offset, layer bound, event endpoints,
+counter/GPU identities, and `_us` unit are rejected. Doctor, release build,
+and the complete off-game self-test pass, including GPU timestamp retirement.
+
+Run 64 is installed from `cache/runs/run64-terrain-runtime-chain.ini`. Source
+and installed DLLs are byte-identical: 703,488 bytes, SHA-256
+`d1e9edd8a15bac0145cac6fd2e29d2ad92f66227aad8e1d7416fb2c5a7ac7a9f`.
+Source and installed INIs are byte-identical at SHA-256
+`3368b138e9d935716a236f330dde5fbeb0aab5912d707cb60ecfb0bf3c6d025b`.
+The stale live Run 63 CSV and debug log were byte-checked against their
+archives before removal. The game was not launched. Run the normal route and
+press F12 after the felt **play** loading transition; multiple or late presses
+are safe.
+
+
+## 73. Run 62: the marked play burst is a resource/first-use submission followed by GPU queue backpressure; the colour-terrain owner is exact
+
+Run 62 is archived as `tqflicker-frames.run62.csv`, SHA-256
+`33a1bc8eda5e59984c1803c2e34d5dd3fa191c751071a4726c16edcd62379912`;
+its live-written debug log is `tqflicker-debug.run62.log`, SHA-256
+`97d64a35c58e5bfea9eda5f7a2fa113df35eefeed36ec9ff8602dd564653b1ea`.
+The CSV contains 7,202 contiguous presented frames, 0--7201. The five session
+parts are **menu** 0--1734 (16.507 s), **load-game frame** 1735 (1.540 s),
+**loading screen** 1736--2900 (10.053 s), **first world frame** 2901
+(758.028 ms), and **play** 2902--7201 (66.877 s).
+
+F12 at **play** frame 6455 is a reaction anchor. The large full-scene,
+collision-active **play** transition is the contiguous pair 6441/6442 at
+219.289/125.131 ms. It begins 641 ms before the marker and ends 296 ms before
+it. A separate frame 6454 is 56.144 ms and ends only 20 ms before F12, but its
+37.696 ms is in the `Engine::Update` class, it has no Resource load, and its
+17.140 ms render is ordinary. Preserve that as a separate small update-class
+candidate; proximity to the reaction key does not license merging it with the
+large loading pair.
+
+Frame 6441 spends 212.181 ms in `Engine::Render`, 3.943 ms in
+`Engine::Update`, 0.686 ms in the message-pump class, and 2.300 ms in
+`present_call`. Its 33 main-thread Resource loads / 66.163 ms partition
+exactly into 20 / 17.973 ms inside the
+`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 48.190 ms outside
+it. All 13 outside calls are state-0 render-phase terrain texture Resources.
+The frame creates 15 textures, 172 buffers, and 10 shaders, while submitting
+302.910 ms of whole-frame GPU work. Named GPU spans are 90.649 ms in the
+`GraphicsShadowMapDx11` directional class, 0.901 ms in the point-shadow class,
+20.324 ms in the enhanced-grass class, 0.423 ms in SMAA, and 0.269 ms in
+bloom. Those CPU calls and nested GPU intervals are not additive, and the
+current named spans do not classify most of the whole-GPU interval.
+
+Frame 6442 proves the coupled second half. It has nearly the same scene load
+(121 non-indexed and 1,498 indexed draws, versus 121/1,485 on frame 6441), no
+main-thread Resource load at all, only 3.034 ms in the directional-shadow CPU
+class, and only 22.267 ms of its own GPU work. Nevertheless it spends 104.021
+ms inside the game's D3D11 `Draw`/`DrawIndexed` calls and 117.343 ms in
+`Engine::Render`. Across the pair, draw submission consumes 123.531 + 104.021
+ms. The first CPU frame finishes after 219.289 ms despite having placed
+302.910 ms on the GPU queue; the following frame then blocks in D3D draw calls
+while that prior work retires. Frame 6443 returns to 18.824 ms with 8.488 ms
+of draw submission and 19.966 ms of GPU work. This is the same mechanism
+measured in §37, now tied to the user's marked **play** transition rather than
+selected by `max()`.
+
+This does not require a Wine-only explanation. D3D11 resource creation,
+first-use work, command submission, and queue backpressure exist on native
+Windows as well. CrossOver/DXMT may change their exact cost, but the measured
+class is not “a host round trip,” and the game's native-Windows stutter is
+compatible with it. Conversely, the frame does not prove that every one of
+the 302.910 GPU milliseconds is texture upload; the exact ground renderer is
+still unnamed.
+
+Run 62's upstream capture resolves the 13 colour-terrain texture requests.
+For the ordinary base/bump layers, the leading verified return is
+`E+0x23fc4e` or `E+0x23fcca`: each is immediately after a call to
+`Resource::EnsureAvailable` inside exported
+`TerrainType::SetShaderParams` (RVA 0x23fb90). The grass mask begins at
+`E+0x23faf7`, immediately after the same call inside exported
+`TerrainType::SetGrassShaderParams` (RVA 0x23fa40); the verified caller
+`E+0x23b1f7` is inside the DX11
+`TerrainRenderInterfaceRT::RenderGrass` class. These are exact class names,
+not an inference from filenames. The rest of each raw stack remains a
+call-shaped superset and is not promoted to a call stack.
+
+Skipping either `EnsureAvailable` is not yet a safe fix. Immediately after the
+call, `SetShaderParams` reads the Resource's resident render-texture fields and
+binds the selected layer. The empty-vector path can bind null, but that does
+not prove that a cold non-empty entry has an acceptable fallback. More
+importantly, the entire observed colour-terrain CPU part is 48.190 ms of the
+344.420 ms pair; it cannot remove the larger first-use/GPU component by
+itself.
+
+The engine already exports the more promising semantic boundary:
+`TerrainType::PreLoad(bool)` at RVA 0x23fe80. Re-reading its body shows that
+`false` skips all work, while `true` walks that same object's base-texture
+vector at +0x24/+0x28, bump vector at +0x30/+0x34, and optional grass texture
+at +0x88. Bump and grass entries call the exported
+`ResourceLoader::EnqueueResource`; the base path performs the engine's
+equivalent queue/touch logic. This is not a return to §23's generic bounded
+prefetch proposal: it is the engine's own type-specific preloader for the
+exact Resources forced by run 62. Static code alone cannot say whether it was
+called for the exact `TerrainType` objects, or whether it ran too late.
+
+Run 63 therefore changes no behavior. One atomic trace group detours the exact
+four exports `TerrainType::PreLoad`, `TerrainType::SetShaderParams`,
+`TerrainType::SetGrassShaderParams`, and
+`TerrainRenderInterfaceRT::RenderGround`. The two shared-prologue targets
+verify 24 bytes and steal six; the two parameter methods verify 21 bytes and
+steal their first two complete instructions, eight bytes. A fixed 2,048-slot
+identity table records true/false preload history. When an existing retained
+outside-directional load occurs inside either parameter method, its record
+copies the exact `TerrainType*`, material/grass path, material index, counts,
+and last preload frames before calling the original loader. F12 formats it
+later. An exhausted identity table has an explicit CSV counter rather than
+silently reading as “never preloaded.” No allocator or log write runs on the
+candidate frame.
+
+The fourth hook adds `engine_terrain_ground` / `_us` and a non-blocking
+`gpu_terrain_ground_ms` timestamp around the DX11
+`TerrainRenderInterfaceRT::RenderGround` class. It always forwards the same
+arguments and neither calls `PreLoad` nor changes texture fallback. All new
+engine duration columns end in `_us`; the GPU result remains game time and is
+not charged to the mod. The group installs only with the performance trace.
+The accepted `shadow_defer_cold_alpha=1` behavior remains unchanged and
+`shadow_split` is untouched.
+
+`verify-sites.py` passes 377 checks. Fourteen independent changes to the four
+target RVAs, relocation operands, trace group, table size, and signature bytes,
+plus eight changes to the stolen widths, group installation, main-thread
+association gate, preload snapshot, and GPU phase, plus the explicit full-table
+signal are all rejected (23/23).
+`npm run doctor`, the release build, and the complete off-game self-test pass,
+including GPU timestamp retirement. The 697,344-byte run-63 DLL has SHA-256
+`8d44db8931aa8eee9b68bf2ca75496b26e0e55d3202d94ac10ed30b3df80860a`.
+
+Run 63 is installed from `cache/runs/run63-terrain-preload-ground.ini`.
+Installed and source DLLs are byte-identical at the hash above; installed and
+source INIs are byte-identical at SHA-256
+`8fdbe65f72d77da088150b43189462f65b617dae0bdcc2d0ab6b164bfb5fb303`.
+The stale live run-62 CSV and debug log were byte-compared with their archives
+before removal. The game was not launched. Run the normal route and press F12
+after the felt **play** loading transition; multiple or late presses are safe.
+
+
+## 72. Run 61: the marked burst is two frames, terrain loads are only one part,
+and the recorded caller is a generic wrapper
+
+Run 61 is archived as `tqflicker-frames.run61.csv`, SHA-256
+`18465ad1ce602ee43195b45ef7247812f933d72cb09664990ea2b2cdc40efaff`;
+its live-written debug log is `tqflicker-debug.run61.log`, SHA-256
+`c92d7b205b5680dfd9d883074515034769556906ae854207f88fd83cbed43412`.
+Both archives were byte-compared with their live names. The CSV contains 7,135
+contiguous presented frames, 0--7134. The five session parts are **menu**
+0--1768 (17.088 s), **load-game frame** 1769 (1.565 s), **loading screen**
+1770--2909 (10.129 s), **first world frame** 2910 (686.861 ms), and **play**
+2911--7134 (64.397 s).
+
+F12 at **play** frame 6560 is a late reaction anchor. It follows a contiguous
+two-frame, full-scene, collision-active **play** burst: frame 6522 is 175.182
+ms and frame 6523 is 127.451 ms. The burst begins 1.034 s before the marker
+and ends 731 ms before it. Treating only the largest of those rows as the felt
+event would discard almost half of the pause; the marked event is the pair.
+
+The first frame spends 166.108 ms in `Engine::Render`, 5.462 ms in
+`Engine::Update`, and 1.157 ms in the message-pump class. Its 33 main-thread
+`ResourceLoader::LoadResource` calls / 49.683 ms partition exactly into 20 /
+22.772 ms inside `GraphicsShadowMapDx11::RenderDirectional` and 13 / 26.911 ms
+outside it. Every outside-directional call is in `Engine::Render`, entered in
+state 0, and is a texture Resource. Their engine filenames are terrain layers:
+river bed, mud, grass, swamp, forest, rock, normal, and grass-mask textures.
+The longest one is 6.814 ms and the other twelve are 1.003--2.052 ms.
+
+That is a real synchronous colour-render dependency, but it is not the whole
+burst and it does not reproduce run 60's 79.135 ms complement. On frame 6522,
+the complete GPU interval is 254.833 ms, including 90.117 ms in the
+`GraphicsShadowMapDx11` directional class and 23.490 ms in the enhanced-grass
+class. The CPU resource calls, enclosing CPU render interval, and GPU intervals
+overlap and are not added.
+
+The second frame is the sharper exclusion. Frame 6523 spends 119.320 ms in
+`Engine::Render`, but has no outside-directional main-thread Resource load and
+only one 7.194 ms texture load inside the `GraphicsShadowMapDx11` directional
+class. Its own GPU interval is 28.272 ms, including 15.434 ms directional and
+0.684 ms enhanced grass. This has the same shape as the queue-drain row proved
+in §37: a large GPU submission on frame N and CPU time surfacing inside
+`DrawIndexed` on N+1. Run 61 did not enable `draw_timing`, so that is a
+well-founded hypothesis for this particular pair, not yet a measurement.
+
+The immediate-caller field also failed to answer one part of its question.
+All 13 terrain loads report `E+0x213137`. Re-reading the pinned `Engine.dll`
+(SHA-256 `0aedbb1805b4a5616f74e34d4f609f392e2c2dd4561c64c118f4772ab4f694f6`)
+shows that RVA is the instruction after the `E8` at 0x213132 inside exported
+`Resource::EnsureAvailable` at RVA 0x2130f0; that call resolves to exported
+`ResourceLoader::LoadResource` at RVA 0x213ed0. So the label is verified but
+generic. It proves the normal EnsureAvailable path, not which terrain-renderer
+class requested it. Calling it a terrain-renderer call site would repeat the
+same immediate-versus-upstream mistake that earlier sections made with nested
+durations.
+
+The diagnostic itself is internally consistent: on all 7,135 frames, main
+load count/duration equals directional plus outside-directional, and both the
+phase and filename-type partitions independently sum to the outside pair.
+The F12 report retained all 13 records and says `truncated=0`. The accepted
+`GraphicsMeshInstance` root behavior also remained active on frame 6522,
+omitting five state-0 roots, while the alpha-tested-caster behavior omitted 19;
+neither enqueue-failure counter fired. This run makes no new visual-safety
+claim because the reporter did not report one either way.
+
+The supported next move is not to defer terrain textures yet. Even a perfect
+elimination of the measured synchronous part is bounded by 26.911 ms on a
+302.633 ms marked burst, and colour terrain has a visible fallback/popping
+question that directional-shadow textures did not. Run 62 keeps all behavior
+fixed, retains up to 24 verified-module call-shaped upstream stack candidates
+for each marked outside-directional load, and enables the already validated
+`draw_timing=1` instrument. The raw stack is explicitly a superset because the
+engine omits frame pointers; repetition plus static disassembly must identify
+the real increasing-order caller subsequence. This will name the class that
+forces the terrain Resources and directly test whether frame 6523 is
+`DrawIndexed` queue backpressure.
+
+The new capture adds no patch site. It extends the existing fixed 128-record
+ring and performs one bounded committed-stack scan while retaining a matching
+load; formatting and live logging still occur only at F12. `verify-sites.py`
+passes 353 checks. All 16 one-at-a-time changes to the new depth, stack handoff,
+committed-range gates, two bounds, module/call filters, ordered stores,
+duplicate collapse, rendering, and log identity are rejected; together with
+run 61 this is 150/150 relevant mutations rejected. Doctor, the release build,
+and the full off-game self-test pass, including GPU timestamp retirement.
+
+Run 62 is installed from
+`cache/runs/run62-outside-directional-upstream-draw.ini`. The 692,736-byte DLL
+and installed copy are byte-identical at SHA-256
+`790fb0e57280a7486d8ee75123084603222fece16c407cfeacbd3994f95382b0`.
+The source and installed INIs are byte-identical at SHA-256
+`1838456d57220419d652bcb78201358e3223c0847963e92d418768825e048786`.
+The old live CSV and debug log were rechecked byte-identical to their run-61
+archives before removal. The game was not launched. Run the normal route and
+press F12 after the felt **play** burst; a late press like run 61's is within
+the retained window, and multiple presses remain safe.
+
+
+## 71. Run 61: name the main-thread Resource loads outside directional shadow
+
+Run 60's F12 anchor identifies full-scene, collision-active **play** frame
+6461 at 260.847 ms. Its 30 main-thread `ResourceLoader::LoadResource` calls
+carry 102.518 ms of summed complete-call duration, but only 17 / 23.383 ms are
+inside `GraphicsShadowMapDx11::RenderDirectional`. The arithmetic complement
+is 13 calls / 79.135 ms outside that directional bracket. Those calls could
+still be in `Engine::Render`, `Engine::Update`, or neither, and the existing
+CSV supplies neither their Resource class nor their immediate caller. Calling
+all 79.135 ms "render loading" would therefore be another inference from a
+frame total. Run 61 measures the missing dimensions before choosing a lever.
+
+The instrument reuses existing verified hooks rather than adding a new patch
+site. `ResourceLoader::LoadResource` already verifies 22 bytes and steals
+seven; `Engine::Update` and `Engine::Render` each verify 24 bytes and steal
+six; the directional call uses the existing 23-byte `patchCall` window. The
+loaded-state and filename accessors each verify 16 bytes and are called only
+after their export/RVA identities match. The outside-directional attribution
+becomes active only when all of those load, phase, directional, and accessor
+dependencies are live. A missing dependency produces zeroes, not a falsely
+large outside class.
+
+For every main-thread LoadResource call outside the live directional bracket,
+the CSV records one common count / `_us` duration pair. Render, update, and
+other phase pairs partition it once; mesh, shader, texture, and other filename
+classes partition it independently. These are complete game-call durations,
+which can nest, and they are not added to their enclosing Engine phase. All
+duration columns end in `_us`, so `tools/frames.py` does not charge them to the
+mod. On every frame with the full instrument active, the expected count and
+duration invariants are:
+
+`engine_res_load_main = engine_shadow_res_load + engine_res_outside_dir`
+
+`outside_dir = render + update + other = mesh + shader + texture + type_other`
+
+F12 supplies the identities without making the candidate frame write a log.
+Each outside-directional call copies its frame index, pre-call loaded state,
+phase, filename class, at most 128 filename bytes, and immediate return address
+into a 128-record rolling ring. On the existing F12 key-down retrieved by the
+game's own `PeekMessageA`, the preceding 120 frames are formatted and handed
+to the already asynchronous debug logger. A caller is labeled `E`, `G`, or
+`T` plus RVA only when it lies in the verified Engine.dll, Game.dll, or TQ.exe
+text and immediately follows one of the accepted call encodings; otherwise it
+is explicitly `unverified`. Already emitted records are not repeated on a
+later press. If 128 records cannot cover the retained pre-reaction window, the
+F12 row sets `engine_res_outside_dir_marker_truncated` and the live log says so.
+
+This is passive relative to run 60. The exact original LoadResource trampoline
+runs once with unchanged arguments. During the candidate frame the added work
+is bounded metadata copying and counters; filename formatting and log locking
+happen only after F12. The accepted cold-root and texture omissions remain
+enabled through `shadow_defer_cold_alpha=1`; colour rendering, all shadow-map
+settings, culling, resource behavior, and `shadow_split` are unchanged.
+
+`verify-sites.py` now passes 351 checks. All 25 one-at-a-time changes to the
+three ring/window/name constants, outside-directional and classification
+gates, filename/caller/phase/frame capture, ring bound and publish order,
+window capacity/membership, one-shot reporting, caller label, truncation
+counter, update/render brackets, F12 emission, dependency activation, and
+shutdown are rejected: 25/25 new and 134/134 cumulative relevant mutations.
+The off-game self-test additionally proves both independent partitions sum to
+the common population, includes the exact 120-frame boundary, excludes future
+events, and reports a one-record overflow. Doctor, release build, and the full
+self-test pass, including GPU timestamp retirement.
+
+Run 61 is installed from
+`cache/runs/run61-outside-directional-resources.ini`. The 692,224-byte DLL and
+installed copy are byte-identical at SHA-256
+`47fbd6acff07fd4b97598edb8e448f181fca9f10cbf2512def30e1a162a2f20b`.
+The source and installed INIs are byte-identical at SHA-256
+`ed7a07f068851749af8f0b558188502cf6a83583fe63f7cd87625365c17513f7`.
+The old live CSV and debug log were rechecked byte-identical to their run-60
+archives before removal. The game was not launched. Run the normal route and
+press F12 after the felt **play** loading burst; multiple presses are safe and
+emit only new retained events.
+
+
 ## 70. Run 60 result: the narrow root-mesh omission is visually safe, but the
 marked burst is mostly outside it
 

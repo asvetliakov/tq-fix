@@ -82,6 +82,16 @@ const char* const kCounterNames[] = {
     "engine_level_load_main_us",
     "engine_res_load", "engine_res_load_us", "engine_res_load_main",
     "engine_res_load_main_us",
+    "engine_res_outside_dir", "engine_res_outside_dir_us",
+    "engine_res_outside_dir_render", "engine_res_outside_dir_render_us",
+    "engine_res_outside_dir_update", "engine_res_outside_dir_update_us",
+    "engine_res_outside_dir_other", "engine_res_outside_dir_other_us",
+    "engine_res_outside_dir_mesh", "engine_res_outside_dir_mesh_us",
+    "engine_res_outside_dir_shader", "engine_res_outside_dir_shader_us",
+    "engine_res_outside_dir_texture", "engine_res_outside_dir_texture_us",
+    "engine_res_outside_dir_type_other",
+    "engine_res_outside_dir_type_other_us",
+    "engine_res_outside_dir_marker_truncated",
     "engine_shadow_render", "engine_shadow_render_us",
     "engine_shadow_region_change", "engine_shadow_reuse",
     "engine_shadow_res_load",
@@ -207,6 +217,22 @@ const char* const kCounterNames[] = {
     "engine_sleep_main", "engine_sleep_main_us", "engine_sleep_main_req_us",
     "engine_async_load", "engine_async_sync",
     "engine_portal_async_load", "engine_portal_async_sync",
+    "engine_terrain_preload", "engine_terrain_preload_us",
+    "engine_terrain_preload_true", "engine_terrain_preload_false",
+    "engine_terrain_preload_table_overflow",
+    "engine_terrain_shader_params", "engine_terrain_grass_params",
+    "engine_terrain_ground", "engine_terrain_ground_us",
+    "engine_terrain_rt_load", "engine_terrain_rt_load_us",
+    "engine_terrain_rt_load_render", "engine_terrain_rt_load_render_us",
+    "engine_terrain_rt_load_render_main",
+    "engine_terrain_rt_load_render_main_us",
+    "engine_terrain_rt_load_render_other",
+    "engine_terrain_rt_load_render_other_us",
+    "engine_terrain_rt_load_textures", "engine_terrain_rt_load_textures_us",
+    "engine_terrain_rt_preload", "engine_terrain_rt_preload_us",
+    "engine_terrain_rt_preload_layers", "engine_terrain_rt_layer_overflow",
+    "engine_terrain_plug", "engine_terrain_plug_us",
+    "engine_terrain_block", "engine_terrain_block_us",
     "stutter_marker"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
@@ -227,7 +253,7 @@ static_assert(sizeof(kPhaseShortNames) / sizeof(kPhaseShortNames[0])
 
 const char* const kGpuNames[] = {
     "gpu_frame", "gpu_shadow_dir", "gpu_shadow_point", "gpu_grass", "gpu_smaa",
-    "gpu_bloom"
+    "gpu_bloom", "gpu_terrain_ground", "gpu_terrain_rt_load_render"
 };
 static_assert(sizeof(kGpuNames) / sizeof(kGpuNames[0]) == GpuPhaseCount,
               "every GPU phase needs a CSV column name");
@@ -297,6 +323,10 @@ HANDLE g_logStop;
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
 volatile LONG g_logStarted;
 bool g_headerWritten;
+// Both schema and rows use the same audited bound. The Run 65 main/other
+// names moved the 317-field header just beyond 8 KiB; truncating it also
+// shifts every apparent data column for downstream readers.
+const unsigned kCsvLineBytes = 16384;
 #ifdef TQ_SELFTEST
 unsigned g_logFileOpens;
 #endif
@@ -399,7 +429,7 @@ void writeHeader() {
     // written, so `n += snprintf(...)` walks past the end and the header is
     // emitted truncated and unterminated, with no error anywhere. The self-test
     // asserts the header's comma count against a row's for exactly this reason.
-    char line[8192];
+    char line[kCsvLineBytes];
     // Named so the summarizer knows whether these rows are the whole session
     // or only its hitches, instead of guessing from index contiguity.
     snprintf(line, sizeof(line), "# performance_trace=%s\r\n",
@@ -506,7 +536,7 @@ void describeUnusual(const FrameRecord& record, char* out, size_t size,
 }
 
 void emitRecord(const FrameRecord& record, bool flushWhenFull = false) {
-    char line[8192];
+    char line[kCsvLineBytes];
     int n = snprintf(line, sizeof(line), "%u,%.3f", record.index,
                      record.milliseconds);
     for (unsigned i = 0; i < PhaseCount && n > 0 && n < (int)sizeof(line); ++i)
@@ -691,6 +721,8 @@ bool isRenderThread() {
     return !g_renderThread || GetCurrentThreadId() == g_renderThread;
 }
 
+unsigned currentFrameIndex() { return detail::active ? g_frameIndex : 0; }
+
 void engineCountInternal(Counter counter, uint32_t amount) {
     if (!detail::active || counter >= CounterCount || !amount) return;
     InterlockedExchangeAdd(&g_engineCounters[counter], (LONG)amount);
@@ -759,6 +791,14 @@ void gpuEnd(ID3D11DeviceContext* context, GpuPhase phase) {
     // whatever ran between them, which the CSV column name has to admit.
     context->End(g_gpuCurrent->end[phase]);
     g_gpuCurrent->closed[phase] = true;
+}
+
+ID3D11DeviceContext* currentGpuContext() {
+    // The immediate context and current query slot belong to the thread that
+    // opened the frame. A diagnostic hook may itself be reached by a loader;
+    // never let that hook issue End(query) concurrently with rendering.
+    return detail::active && g_gpuCurrent && isRenderThread()
+        ? g_gpuContext : nullptr;
 }
 
 void beginFrame(ID3D11DeviceContext* context) {

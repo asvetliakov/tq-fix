@@ -25,6 +25,9 @@ evidence from a local installation.
 - `constants.md` records constants that materially affect the shadow path.
 - `object-layouts.md` records only object offsets proven by reads or writes.
 - `cpu-path.md` follows setup, fitting, caster selection, and rendering.
+- `../streaming/disassembly-targets.md` indexes the exact Engine RVAs shared by
+  the shadow and stutter investigations, including the later root-mesh,
+  material-texture, and runtime-terrain targets.
 - `backend.md` records the D3D11 resource and state configuration.
 - `shaders.md` classifies caster and receiver shaders.
 - `shaders/` contains representative runtime captures, a generated
@@ -51,8 +54,10 @@ TQ_GAME_DIR='/path/to/Titan Quest - Anniversary Edition' \
 The script refuses binaries whose hashes do not match `supported-build.md`.
 
 The reviewed export was produced with Ghidra 12.1.3 and OpenJDK 21. It
-contains 433 Engine.dll functions rooted at 63 shadow-related entry points and
-43 Direct3D11.dll functions rooted at 13 backend entry points.
+contains 695 Engine.dll functions rooted at 70 shadow-related entry points and
+43 Direct3D11.dll functions rooted at 13 backend entry points. The later
+root-mesh and material/resource dependency targets are explicit roots rather
+than incidental callees.
 
 ## Shader archive inventory
 

@@ -935,6 +935,32 @@ void testEngineProbe() {
           "re-reading no INI puts shadow_defer_cold_alpha back off");
     DeleteFileW(ini);
 
+    // The eighth independent way in queues runtime terrain-layer textures at
+    // their exact post-LoadTextures boundary. It is a behavior fix: default
+    // off, reachable with the probe off, and unable to bring a trace group.
+    check(!tq::engineprobe::terrainPreloadLayersForTest(),
+          "terrain_preload_layers is off with no INI at all");
+    WritePrivateProfileStringW(L"performance", L"terrain_preload_layers",
+                               L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::terrainPreloadLayersForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "terrain_preload_layers reaches install() with the probe off, and"
+          " still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(32768),
+          "a terrain-layer-preload-only boot installs no trace group");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::terrainPreloadLayersForTest(),
+          "re-reading no INI puts terrain_preload_layers back off");
+    DeleteFileW(ini);
+
     // The slow-LoadLevel caller table. Five calls a session decide where
     // Stage 5.1 should point, so a slot bug costs a boot rather than a build;
     // this drives the aggregator directly.
@@ -1434,6 +1460,14 @@ DWORD WINAPI engineChannelWorker(void*) {
     tq::probe::count(tq::probe::CounterDrawIndexed, 5);
     tq::probe::engineCount(tq::probe::CounterEngineTexCreateOff, 3);
     tq::probe::engineCount(tq::probe::CounterEngineTexCreateOffUs, 900);
+    return 0;
+}
+
+volatile LONG g_offThreadGpuContextResult;
+
+DWORD WINAPI gpuContextWorker(void*) {
+    InterlockedExchange(&g_offThreadGpuContextResult,
+                        tq::probe::currentGpuContext() ? 2 : 1);
     return 0;
 }
 
@@ -2009,6 +2043,147 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
               0, tq::probe::CounterEngineShadowResTypeOtherUs) == 4400,
           "shadow resource filename classes partition calls and durations");
 
+    // Run 61's complement of the directional-shadow population. Phase and
+    // filename type are two independent partitions of the same main-thread
+    // LoadResource calls, so each must add back to the common total.
+    tq::engineprobe::countOutsideDirResourceForTest(0, 0, 1100);
+    tq::engineprobe::countOutsideDirResourceForTest(1, 1, 2200);
+    tq::engineprobe::countOutsideDirResourceForTest(2, 2, 3300);
+    tq::engineprobe::countOutsideDirResourceForTest(3, 0, 4400);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDir) == 4
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirUs) == 11000,
+          "outside-directional resource calls retain one common population");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirRender) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirRenderUs) == 5500
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirUpdate) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirUpdateUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirOtherUs) == 3300,
+          "outside-directional resource phases partition calls and durations");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirMesh) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirMeshUs) == 1100
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirShader) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirShaderUs) == 2200
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirTexture) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirTextureUs) == 3300
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirTypeOther) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineResOutsideDirTypeOtherUs) == 4400,
+          "outside-directional resource types partition calls and durations");
+
+    tq::engineprobe::outsideDirResourceResetForTest();
+    tq::engineprobe::outsideDirResourceRememberForTest(10);
+    tq::engineprobe::outsideDirResourceRememberForTest(50);
+    tq::engineprobe::outsideDirResourceRememberForTest(251);
+    bool resourceWindowTruncated = true;
+    check(tq::engineprobe::outsideDirResourceWindowForTest(
+              130, &resourceWindowTruncated) == 2
+          && !resourceWindowTruncated,
+          "the reaction window includes its 120-frame boundary and rejects"
+          " future loads");
+    tq::engineprobe::outsideDirResourceResetForTest();
+    for (unsigned i = 0; i < 129; ++i)
+        tq::engineprobe::outsideDirResourceRememberForTest(100);
+    check(tq::engineprobe::outsideDirResourceWindowForTest(
+              100, &resourceWindowTruncated) == 128
+          && resourceWindowTruncated,
+          "the reaction window reports when one recent Resource load was"
+          " overwritten");
+    tq::engineprobe::outsideDirResourceResetForTest();
+
+    tq::engineprobe::shadowMeshResourceResetForTest();
+    tq::engineprobe::shadowMeshResourceRememberForTest(10);
+    tq::engineprobe::shadowMeshResourceRememberForTest(50);
+    tq::engineprobe::shadowMeshResourceRememberForTest(251);
+    resourceWindowTruncated = true;
+    check(tq::engineprobe::shadowMeshResourceWindowForTest(
+              130, &resourceWindowTruncated) == 2
+          && !resourceWindowTruncated,
+          "the directional-mesh reaction window includes its boundary and"
+          " rejects future loads");
+    tq::engineprobe::shadowMeshResourceResetForTest();
+    for (unsigned i = 0; i < 129; ++i)
+        tq::engineprobe::shadowMeshResourceRememberForTest(100);
+    check(tq::engineprobe::shadowMeshResourceWindowForTest(
+              100, &resourceWindowTruncated) == 128
+          && resourceWindowTruncated,
+          "the directional-mesh window reports a recent overwritten load");
+    tq::engineprobe::shadowMeshResourceResetForTest();
+
+    // Run 63's TerrainType association retains per-object preload history,
+    // including frame zero without confusing it with "never".
+    const void* const terrainA = (const void*)0x12340000;
+    const void* const terrainB = (const void*)0x12348000;
+    tq::engineprobe::terrainPreloadResetForTest();
+    tq::engineprobe::terrainPreloadRememberForTest(terrainA, true, 0);
+    tq::engineprobe::terrainPreloadRememberForTest(terrainA, false, 17);
+    tq::engineprobe::terrainPreloadRememberForTest(terrainA, true, 22);
+    unsigned preloadTrue = 0, preloadFalse = 0;
+    unsigned lastPreloadTrue = 0, lastPreloadFalse = 0;
+    tq::engineprobe::terrainPreloadSnapshotForTest(
+        terrainA, &preloadTrue, &preloadFalse, &lastPreloadTrue,
+        &lastPreloadFalse);
+    check(preloadTrue == 2 && preloadFalse == 1
+          && lastPreloadTrue == 23 && lastPreloadFalse == 18,
+          "TerrainType preload history is identity-specific and preserves"
+          " frame zero");
+    tq::engineprobe::terrainPreloadSnapshotForTest(
+        terrainB, &preloadTrue, &preloadFalse, &lastPreloadTrue,
+        &lastPreloadFalse);
+    check(preloadTrue == 0 && preloadFalse == 0
+          && lastPreloadTrue == 0 && lastPreloadFalse == 0,
+          "an unseen TerrainType cannot inherit another object's preload");
+
+    // Run 64 distinguishes the runtime terrain owner's three relevant
+    // boundaries for each layer TerrainType. Counts and both endpoints are
+    // retained because a later owner preload must not erase an earlier attach
+    // or texture-admission event.
+    tq::engineprobe::terrainRtEventRememberForTest(terrainA, 0, 4);
+    tq::engineprobe::terrainRtEventRememberForTest(terrainA, 0, 9);
+    tq::engineprobe::terrainRtEventRememberForTest(terrainA, 1, 12);
+    tq::engineprobe::terrainRtEventRememberForTest(terrainA, 2, 15);
+    tq::engineprobe::terrainRtEventRememberForTest(terrainA, 2, 18);
+    unsigned attachCount = 0, attachFirst = 0, attachLast = 0;
+    unsigned texturesCount = 0, texturesFirst = 0, texturesLast = 0;
+    unsigned ownerPreloadCount = 0, ownerPreloadFirst = 0;
+    unsigned ownerPreloadLast = 0;
+    tq::engineprobe::terrainRtEventSnapshotForTest(
+        terrainA, &attachCount, &attachFirst, &attachLast,
+        &texturesCount, &texturesFirst, &texturesLast,
+        &ownerPreloadCount, &ownerPreloadFirst, &ownerPreloadLast);
+    check(attachCount == 2 && attachFirst == 5 && attachLast == 10
+          && texturesCount == 1 && texturesFirst == 13
+          && texturesLast == 13 && ownerPreloadCount == 2
+          && ownerPreloadFirst == 16 && ownerPreloadLast == 19,
+          "TerrainRT layer history retains each boundary's first, last, and"
+          " count independently");
+    tq::engineprobe::terrainRtEventSnapshotForTest(
+        terrainB, &attachCount, &attachFirst, &attachLast,
+        &texturesCount, &texturesFirst, &texturesLast,
+        &ownerPreloadCount, &ownerPreloadFirst, &ownerPreloadLast);
+    check(attachCount == 0 && attachFirst == 0 && attachLast == 0
+          && texturesCount == 0 && texturesFirst == 0 && texturesLast == 0
+          && ownerPreloadCount == 0 && ownerPreloadFirst == 0
+          && ownerPreloadLast == 0,
+          "an unseen TerrainType cannot inherit TerrainRT owner history");
+    tq::engineprobe::terrainPreloadResetForTest();
+
     // Run 52's texture-load caller split. The raw word scan stops at the
     // nearest exact E8 return address, and an out-of-range semantic value is
     // retained in the explicit unresolved bucket rather than indexing past
@@ -2282,6 +2457,25 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
         check(tq::probe::createResources(device),
               "probe builds its timestamp queries on the live device");
 
+        // Run 64 reached TerrainRT::LoadRenderData from save loading while a
+        // render-frame query slot was live. The immediate context is owned by
+        // the render thread: exposing it to a loader can deadlock the device.
+        tq::probe::beginFrame(context);
+        check(tq::probe::currentGpuContext() == context,
+              "the render thread can borrow its current GPU context");
+        InterlockedExchange(&g_offThreadGpuContextResult, 0);
+        HANDLE gpuWorker = CreateThread(nullptr, 0, &gpuContextWorker,
+                                        nullptr, 0, nullptr);
+        if (gpuWorker) {
+            WaitForSingleObject(gpuWorker, 5000);
+            CloseHandle(gpuWorker);
+        }
+        check(gpuWorker != nullptr
+              && InterlockedCompareExchange(&g_offThreadGpuContextResult,
+                                            0, 0) == 1,
+              "a loader thread cannot borrow the render thread GPU context");
+        tq::probe::endFrame(16.7f);
+
         // Drive frames with real GPU work in them until a timestamp comes
         // back. Two eight-thousand-frame runs reported no GPU timing at all
         // because the frame's disjoint query was begun and never ended, and
@@ -2339,6 +2533,42 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     check(header, "the probe writes its mode and a header naming every column");
     check(csvText && strstr(csvText, "engine_tex_create_off_us") != nullptr,
           "the header carries the engine channel's columns");
+    check(csvText && strstr(csvText, "engine_terrain_preload_us") != nullptr
+          && strstr(csvText, "engine_terrain_preload_true") != nullptr
+          && strstr(csvText, "engine_terrain_preload_false") != nullptr
+          && strstr(csvText, "engine_terrain_preload_table_overflow") != nullptr
+          && strstr(csvText, "engine_terrain_shader_params") != nullptr
+          && strstr(csvText, "engine_terrain_grass_params") != nullptr
+          && strstr(csvText, "engine_terrain_ground_us") != nullptr
+          && strstr(csvText, "gpu_terrain_ground_ms") != nullptr,
+          "the header carries TerrainType preload and RT ground diagnostics");
+    check(csvText && strstr(csvText, "engine_terrain_rt_load_us") != nullptr
+          && strstr(csvText, "engine_terrain_rt_load_render_us") != nullptr
+          && strstr(csvText, "engine_terrain_rt_load_render_main_us")
+                 != nullptr
+          && strstr(csvText, "engine_terrain_rt_load_render_other_us")
+                 != nullptr
+          && strstr(csvText, "engine_terrain_rt_load_textures_us") != nullptr
+          && strstr(csvText, "engine_terrain_rt_preload_us") != nullptr
+          && strstr(csvText, "engine_terrain_rt_preload_layers") != nullptr
+          && strstr(csvText, "engine_terrain_rt_layer_overflow") != nullptr
+          && strstr(csvText, "engine_terrain_plug_us") != nullptr
+          && strstr(csvText, "engine_terrain_block_us") != nullptr
+          && strstr(csvText, "gpu_terrain_rt_load_render_ms") != nullptr
+          && strstr(csvText, "gpu_terrain_plug_ms") == nullptr
+          && strstr(csvText, "gpu_terrain_block_ms") == nullptr,
+          "the header carries the TerrainRT load and colour-render chain");
+    check(csvText && strstr(csvText, "engine_res_outside_dir_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_render_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_update_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_other_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_mesh_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_shader_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_texture_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_type_other_us") != nullptr
+          && strstr(csvText, "engine_res_outside_dir_marker_truncated")
+                 != nullptr,
+          "the header carries outside-directional Resource attribution");
     check(csvText && strstr(csvText, "engine_shadow_render_us") != nullptr
           && strstr(csvText, "engine_shadow_region_change") != nullptr
           && strstr(csvText, "engine_shadow_reuse") != nullptr

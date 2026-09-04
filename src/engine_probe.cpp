@@ -6,6 +6,7 @@
 #include "probe.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 namespace tq {
@@ -647,6 +648,202 @@ const BYTE kShadowOutputCopyBytes[] = {
     0x8b, 0xf0,                                // source matrix
     0xb9, 0x10, 0x00, 0x00, 0x00,              // 16 dwords
     0xf3, 0xa5                                 // rep movsd
+};
+
+// --- TerrainType's own semantic preload and its two parameter binders.
+// Run 62 resolved every cold terrain texture in the marked play burst to
+// SetShaderParams or SetGrassShaderParams. PreLoad(true) walks precisely the
+// base, bump and grass resources those functions consume. These entry hooks
+// are diagnostic only: they preserve every argument and always call through.
+const DWORD kTerrainPreloadRva = 0x23fe80;
+const char kTerrainPreloadName[] = "?PreLoad@TerrainType@GAME@@QAEX_N@Z";
+const BYTE kTerrainPreloadBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x83, 0xec, 0x28,
+    0x53
+};
+const Relocation kTerrainPreloadRelocs[] = {{9, 0x2a4e08}};
+
+const DWORD kTerrainLoadTexturesRva = 0x240160;
+const char kTerrainLoadTexturesName[] =
+    "?LoadTextures@TerrainType@GAME@@QAEXXZ";
+
+const DWORD kTerrainSetShaderParamsRva = 0x23fb90;
+const char kTerrainSetShaderParamsName[] =
+    "?SetShaderParams@TerrainType@GAME@@QBEXPBVGraphicsShader2@2@H@Z";
+const BYTE kTerrainSetShaderParamsBytes[] = {
+    0xa1, 0, 0, 0, 0,
+    0x83, 0xec, 0x08,
+    0x53,
+    0x8b, 0x5c, 0x24, 0x10,
+    0x56, 0x57,
+    0x8b, 0xf1,
+    0xa8, 0x01,
+    0x75, 0x49
+};
+const Relocation kTerrainSetShaderParamsRelocs[] = {{1, 0x41c280}};
+
+const DWORD kTerrainSetGrassShaderParamsRva = 0x23fa40;
+const char kTerrainSetGrassShaderParamsName[] =
+    "?SetGrassShaderParams@TerrainType@GAME@@QBEXPBVGraphicsShader2@2@@Z";
+const BYTE kTerrainSetGrassShaderParamsBytes[] = {
+    0xa1, 0, 0, 0, 0,
+    0x83, 0xec, 0x0c,
+    0x53,
+    0x8b, 0x5c, 0x24, 0x14,
+    0x56, 0x57,
+    0x8b, 0xf9,
+    0xa8, 0x01,
+    0x75, 0x49
+};
+const Relocation kTerrainSetGrassShaderParamsRelocs[] = {{1, 0x41c2a4}};
+
+// The DX11 terrain ground class. Like the three other shared-prologue
+// targets, identity is 24 bytes and the detour steals only the first six.
+const DWORD kTerrainRenderGroundRva = 0x23a530;
+const char kTerrainRenderGroundName[] =
+    "?RenderGround@TerrainRenderInterfaceRT@GAME@@EBEXABVName@2@"
+    "AAVGraphicsCanvas@2@ABVGraphicsSceneRenderer@2@"
+    "ABURenderablePass@2@_N@Z";
+const BYTE kTerrainRenderGroundBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x81, 0xec, 0x08, 0x01
+};
+const Relocation kTerrainRenderGroundRelocs[] = {{9, 0x2a4b7b}};
+
+// The shipped game uses the unexported runtime TerrainRT implementation, not
+// the exported editor Terrain above. Its constructor writes vtable
+// Engine+0x2f8820; these are the exact runtime overrides selected by that
+// table. Load attaches 12-byte layer records, LoadRenderData turns their
+// TerrainType filenames into GraphicsTexture Resources, and PreLoad traverses
+// nearby TerrainObjects but omits the layer TerrainTypes themselves. Run 64
+// observes all three boundaries without changing that behaviour.
+const DWORD kTerrainRtVtableRva = 0x2f8820;
+const unsigned kTerrainRtLoadVtableOffset = 0x24;
+const unsigned kTerrainRtLoadRenderDataVtableOffset = 0x28;
+const unsigned kTerrainRtPreloadVtableOffset = 0x34;
+const unsigned kTerrainRtNumLayersVtableOffset = 0x44;
+const unsigned kTerrainRtLayerTypeVtableOffset = 0x48;
+
+const DWORD kTerrainRtLoadRva = 0x23d8d0;
+const BYTE kTerrainRtLoadBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x83, 0xec, 0x58
+};
+const Relocation kTerrainRtLoadRelocs[] = {{9, 0x2a4cd2}};
+
+const DWORD kTerrainRtLoadRenderDataRva = 0x23d6d0;
+const BYTE kTerrainRtLoadRenderDataBytes[] = {
+    0x83, 0xec, 0x64,
+    0xa1, 0, 0, 0, 0,
+    0x33, 0xc4,
+    0x89, 0x44, 0x24, 0x60,
+    0xa1, 0, 0, 0, 0,
+    0x55
+};
+const Relocation kTerrainRtLoadRenderDataRelocs[] = {
+    {4, 0x36f000}, {15, 0x3743f0}
+};
+
+const DWORD kTerrainRtPreloadRva = 0x23d400;
+const BYTE kTerrainRtPreloadBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x83, 0xec, 0x28
+};
+const Relocation kTerrainRtPreloadRelocs[] = {{9, 0x2a4caf}};
+
+// This exact E8 is the earliest existing point at which each admitted runtime
+// layer's texture Resource objects are complete. Prefer a call patch here to
+// another entry detour; a later behaviour fix can reuse the same narrow site.
+const DWORD kTerrainRtLoadTexturesWindowRva = 0x23d730;
+const unsigned kTerrainRtLoadTexturesCallOffset = 18;
+const BYTE kTerrainRtLoadTexturesWindowBytes[] = {
+    0x8b, 0xb7, 0x84, 0x00, 0x00, 0x00,
+    0x03, 0xf1,
+    0x8b, 0x0e,
+    0x85, 0xc9,
+    0x0f, 0x84, 0x2b, 0x01, 0x00, 0x00,
+    0xe8, 0x19, 0x2a, 0x00, 0x00
+};
+
+const DWORD kTerrainRtNumLayersRva = 0x23d060;
+const BYTE kTerrainRtNumLayersBytes[] = {
+    0x8b, 0x91, 0x88, 0x00, 0x00, 0x00,
+    0x2b, 0x91, 0x84, 0x00, 0x00, 0x00,
+    0xb8, 0xab, 0xaa, 0xaa, 0x2a,
+    0xf7, 0xea,
+    0xd1, 0xfa,
+    0x8b, 0xc2
+};
+
+const DWORD kTerrainRtLayerTypeRva = 0x23d020;
+const BYTE kTerrainRtLayerTypeBytes[] = {
+    0x8b, 0x44, 0x24, 0x04,
+    0x8d, 0x14, 0x40,
+    0x8b, 0x81, 0x84, 0x00, 0x00, 0x00,
+    0x8b, 0x04, 0x90,
+    0xc2, 0x04, 0x00,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+};
+const unsigned kTerrainRtLayerLimit = 64;
+
+// Run 63's retained stacks identify the two colour-terrain render functions
+// that force ordinary layer textures. Their common entry is verified for the
+// detour, and a separate unique 24-byte body window proves the class-specific
+// TerrainType::SetShaderParams call before either entry is touched.
+const DWORD kTerrainPlugRenderRva = 0x236240;
+const BYTE kTerrainPlugRenderBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x81, 0xec, 0x9c, 0x00, 0x00, 0x00,
+    0xa1, 0, 0, 0, 0,
+    0x33, 0xc4
+};
+const Relocation kTerrainPlugRenderRelocs[] = {{13, 0x36f000}};
+const DWORD kTerrainPlugShaderWindowRva = 0x2366c8;
+const BYTE kTerrainPlugShaderWindowBytes[] = {
+    0x6a, 0x00, 0x53, 0x8b, 0xce,
+    0xe8, 0xbe, 0x94, 0x00, 0x00,
+    0x8b, 0x74, 0x24, 0x1c,
+    0x6a, 0x02,
+    0x8b, 0x76, 0x1c,
+    0x68, 0xbc, 0x09, 0x37, 0x10
+};
+const Relocation kTerrainPlugShaderWindowRelocs[] = {{20, 0x3709bc}};
+
+const DWORD kTerrainBlockRenderRva = 0x23e1e0;
+const BYTE kTerrainBlockRenderBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x81, 0xec, 0x9c, 0x00, 0x00, 0x00,
+    0xa1, 0, 0, 0, 0,
+    0x33, 0xc4
+};
+const Relocation kTerrainBlockRenderRelocs[] = {{13, 0x36f000}};
+const DWORD kTerrainBlockShaderWindowRva = 0x23e738;
+const BYTE kTerrainBlockShaderWindowBytes[] = {
+    0x75, 0x1c,
+    0x6a, 0x00,
+    0x57,
+    0x8b, 0xc8,
+    0xe8, 0x4c, 0x14, 0x00, 0x00,
+    0xe9, 0x84, 0xfe, 0xff, 0xff,
+    0x80, 0xb9, 0x61, 0x09, 0x00, 0x00,
+    0x00
 };
 
 // --- Region::UnloadLevel.
@@ -1324,6 +1521,7 @@ const unsigned kGroupHeap = 0x800;
 const unsigned kGroupArcIo = 0x1000;
 const unsigned kGroupBlocking = 0x2000;
 const unsigned kGroupShadow = 0x4000;
+const unsigned kGroupTerrain = 0x8000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
@@ -1369,12 +1567,27 @@ bool g_shadowTransitionReuse;
 // resident casters are untouched.
 bool g_shadowDeferColdAlpha;
 bool g_shadowDeferActive;
+// [performance] terrain_preload_layers. After runtime LoadRenderData creates
+// one TerrainType's texture Resources, call the engine's own semantic
+// PreLoad(true) so those resources enter the ordinary background queue before
+// first colour use. This is a fix, not an instrument.
+bool g_terrainPreloadLayers;
+bool g_terrainPreloadLayersActive;
+bool g_terrainTracing;
 // Whether this install() is installing the trace at all. archive_cache_mb can
 // reach install() with the performance probe off, and without this every
 // wants() below would read the trace mask -- which defaults to 1 -- and put
 // the whole instrument in on a boot that asked only for the cache.
 bool g_tracing;
 bool g_pumpTracing;
+// True only when the load, frame, and directional-shadow trace brackets all
+// installed. Without all three, "outside directional" or update/render phase
+// would be an inference from a missing hook rather than an observed class.
+bool g_outsideDirResourceTracing;
+// True only when the shared load hook, directional bracket, and Resource
+// state/name accessors all installed. Retains rare cold directional mesh
+// loads until F12; it never formats on the candidate frame.
+bool g_shadowMeshResourceTracing;
 
 LONG g_installed;
 unsigned g_installedHooks;
@@ -1419,6 +1632,31 @@ typedef void* (__fastcall* ResourceLoaderAccessorFn)(void* self, void* edx);
 typedef int (__fastcall* RenderDirectionalFn)(
     void* self, void* edx, void* canvas, const void* camera,
     const void* frustum, int algorithm, void* surface, void* matrix);
+typedef void (__fastcall* TerrainPreloadFn)(void* self, void* edx,
+                                            int includeTextures);
+typedef void (__fastcall* TerrainSetShaderParamsFn)(
+    const void* self, void* edx, const void* shader, int materialIndex);
+typedef void (__fastcall* TerrainSetGrassShaderParamsFn)(
+    const void* self, void* edx, const void* shader);
+typedef void (__fastcall* TerrainRenderGroundFn)(
+    const void* self, void* edx, const void* name, void* canvas,
+    const void* sceneRenderer, const void* pass, int flag);
+typedef int (__fastcall* TerrainRtLoadFn)(void* self, void* edx,
+                                         void* reader, int version);
+typedef int (__fastcall* TerrainRtLoadRenderDataFn)(void* self, void* edx);
+typedef void (__fastcall* TerrainRtPreloadFn)(
+    void* self, void* edx, int priority, const void* frustum,
+    unsigned flags);
+typedef unsigned (__fastcall* TerrainRtNumLayersFn)(const void* self,
+                                                     void* edx);
+typedef void* (__fastcall* TerrainRtLayerTypeFn)(const void* self, void* edx,
+                                                 unsigned layer);
+typedef void (__fastcall* TerrainTypeLoadTexturesFn)(void* self, void* edx);
+// The decompiler's five parameters include the implicit this pointer. Both
+// concrete functions end in `ret 0x10`: exactly four explicit stack args.
+typedef void (__fastcall* TerrainColourRenderFn)(
+    void* self, void* edx, const void* a, const void* b, const void* c,
+    const void* d);
 typedef void (__fastcall* UnloadLevelFn)(void* self, void* edx, int a, int b);
 typedef void (__fastcall* EnqueueFn)(void* self, void* edx, const void* resource,
                                      int priority, int a, int b);
@@ -1465,6 +1703,22 @@ MeshGetTextureFn g_meshGetTexture;
 ResourceLoaderAccessorFn g_resourceLoaderAccessor;
 EnqueueFn g_shadowEnqueue;
 RenderDirectionalFn g_renderDirectional;
+TerrainPreloadFn g_terrainPreload;
+// The exported entry, retained separately from g_terrainPreload's trace
+// trampoline. Calling this makes behavior invocations visible to the trace
+// when its entry detour is installed, and calls stock code directly otherwise.
+TerrainPreloadFn g_terrainPreloadEntry;
+TerrainSetShaderParamsFn g_terrainSetShaderParams;
+TerrainSetGrassShaderParamsFn g_terrainSetGrassShaderParams;
+TerrainRenderGroundFn g_terrainRenderGround;
+TerrainRtLoadFn g_terrainRtLoad;
+TerrainRtLoadRenderDataFn g_terrainRtLoadRenderData;
+TerrainRtPreloadFn g_terrainRtPreload;
+TerrainRtNumLayersFn g_terrainRtNumLayers;
+TerrainRtLayerTypeFn g_terrainRtLayerType;
+TerrainTypeLoadTexturesFn g_terrainRtLoadTextures;
+TerrainColourRenderFn g_terrainPlugRender;
+TerrainColourRenderFn g_terrainBlockRender;
 UnloadLevelFn g_unloadLevel;
 EnqueueFn g_enqueue;
 ReadFromFileFn g_readFromFile;
@@ -1494,6 +1748,16 @@ Detour g_waitForLoadingDetour;
 Detour g_engineUpdateDetour;
 Detour g_engineRenderDetour;
 Detour g_gameUpdateDetour;
+Detour g_terrainPreloadDetour;
+Detour g_terrainSetShaderParamsDetour;
+Detour g_terrainSetGrassShaderParamsDetour;
+Detour g_terrainRenderGroundDetour;
+Detour g_terrainRtLoadDetour;
+Detour g_terrainRtLoadRenderDataDetour;
+Detour g_terrainRtPreloadDetour;
+Detour g_terrainPlugRenderDetour;
+Detour g_terrainBlockRenderDetour;
+CallPatch g_terrainRtLoadTexturesPatch;
 CallPatch g_newArrayPatch;
 CallPatch g_deleteArrayPatch;
 CallPatch g_seekPatch;
@@ -1514,6 +1778,8 @@ CallPatch g_shadowMeshParameterPatch;
 CallPatch g_shadowInstanceBumpEnsurePatch;
 CallPatch g_shadowRecordPatch;
 LONG g_insideDirectional;
+LONG g_insideEngineUpdate;
+LONG g_insideEngineRender;
 void* g_lastShadowRegion;
 void* g_cachedShadowSurface;
 DWORD g_cachedShadowMatrix[kShadowMatrixDwords];
@@ -2148,6 +2414,685 @@ void countShadowResourceType(ShadowResourceType type, uint32_t elapsed) {
     }
     tq::probe::engineCount(count);
     tq::probe::engineCount(duration, elapsed);
+}
+
+// Run 60's marked full-scene, collision-active play frame has 30 main-thread
+// ResourceLoader calls / 102.518 ms, but only 17 / 23.383 ms are inside the
+// directional-shadow bracket. This independently partitions the remainder by
+// Engine phase and engine-native filename suffix. It is diagnostic only: the
+// exact LoadResource trampoline is still called once with unchanged arguments.
+enum OutsideDirResourcePhase {
+    OutsideDirResourceRender,
+    OutsideDirResourceUpdate,
+    OutsideDirResourceOther,
+    OutsideDirResourcePhaseCount
+};
+
+OutsideDirResourcePhase outsideDirResourcePhase() {
+    if (InterlockedCompareExchange(&g_insideEngineRender, 0, 0) > 0)
+        return OutsideDirResourceRender;
+    if (InterlockedCompareExchange(&g_insideEngineUpdate, 0, 0) > 0)
+        return OutsideDirResourceUpdate;
+    return OutsideDirResourceOther;
+}
+
+void countOutsideDirResource(ShadowResourceType type,
+                             OutsideDirResourcePhase phase,
+                             uint32_t elapsed) {
+    tq::probe::engineCount(tq::probe::CounterEngineResOutsideDir);
+    tq::probe::engineCount(tq::probe::CounterEngineResOutsideDirUs, elapsed);
+
+    tq::probe::Counter phaseCount =
+        tq::probe::CounterEngineResOutsideDirOther;
+    tq::probe::Counter phaseDuration =
+        tq::probe::CounterEngineResOutsideDirOtherUs;
+    if (phase == OutsideDirResourceRender) {
+        phaseCount = tq::probe::CounterEngineResOutsideDirRender;
+        phaseDuration = tq::probe::CounterEngineResOutsideDirRenderUs;
+    } else if (phase == OutsideDirResourceUpdate) {
+        phaseCount = tq::probe::CounterEngineResOutsideDirUpdate;
+        phaseDuration = tq::probe::CounterEngineResOutsideDirUpdateUs;
+    }
+    tq::probe::engineCount(phaseCount);
+    tq::probe::engineCount(phaseDuration, elapsed);
+
+    tq::probe::Counter typeCount =
+        tq::probe::CounterEngineResOutsideDirTypeOther;
+    tq::probe::Counter typeDuration =
+        tq::probe::CounterEngineResOutsideDirTypeOtherUs;
+    if (type == ShadowResourceMesh) {
+        typeCount = tq::probe::CounterEngineResOutsideDirMesh;
+        typeDuration = tq::probe::CounterEngineResOutsideDirMeshUs;
+    } else if (type == ShadowResourceShader) {
+        typeCount = tq::probe::CounterEngineResOutsideDirShader;
+        typeDuration = tq::probe::CounterEngineResOutsideDirShaderUs;
+    } else if (type == ShadowResourceTexture) {
+        typeCount = tq::probe::CounterEngineResOutsideDirTexture;
+        typeDuration = tq::probe::CounterEngineResOutsideDirTextureUs;
+    }
+    tq::probe::engineCount(typeCount);
+    tq::probe::engineCount(typeDuration, elapsed);
+}
+
+enum TerrainParameterPath {
+    TerrainParameterNone,
+    TerrainParameterMaterial,
+    TerrainParameterGrass
+};
+
+// PreLoad can be called off the render thread, while its consumers are on the
+// main thread. Keep a fixed, allocation-free identity table and copy a
+// snapshot into each retained load record. That preserves the state as it was
+// at the load rather than accidentally crediting a later preload before F12.
+const unsigned kTerrainPreloadStateSlots = 2048;
+static_assert((kTerrainPreloadStateSlots
+               & (kTerrainPreloadStateSlots - 1)) == 0,
+              "terrain preload table must be a power of two");
+
+struct TerrainPreloadState {
+    void* volatile terrain;
+    LONG trueCount;
+    LONG falseCount;
+    LONG lastTrueFramePlusOne;
+    LONG lastFalseFramePlusOne;
+    LONG rtLoadAttachCount;
+    LONG rtLoadAttachFirstFramePlusOne;
+    LONG rtLoadAttachLastFramePlusOne;
+    LONG rtLoadTexturesCount;
+    LONG rtLoadTexturesFirstFramePlusOne;
+    LONG rtLoadTexturesLastFramePlusOne;
+    LONG rtOwnerPreloadCount;
+    LONG rtOwnerPreloadFirstFramePlusOne;
+    LONG rtOwnerPreloadLastFramePlusOne;
+};
+
+struct TerrainPreloadSnapshot {
+    unsigned trueCount;
+    unsigned falseCount;
+    unsigned lastTrueFramePlusOne;
+    unsigned lastFalseFramePlusOne;
+    unsigned rtLoadAttachCount;
+    unsigned rtLoadAttachFirstFramePlusOne;
+    unsigned rtLoadAttachLastFramePlusOne;
+    unsigned rtLoadTexturesCount;
+    unsigned rtLoadTexturesFirstFramePlusOne;
+    unsigned rtLoadTexturesLastFramePlusOne;
+    unsigned rtOwnerPreloadCount;
+    unsigned rtOwnerPreloadFirstFramePlusOne;
+    unsigned rtOwnerPreloadLastFramePlusOne;
+};
+
+enum TerrainRtEvent {
+    TerrainRtLoadAttach,
+    TerrainRtLoadTextures,
+    TerrainRtOwnerPreload
+};
+
+TerrainPreloadState g_terrainPreloadStates[kTerrainPreloadStateSlots];
+const void* g_activeTerrainType;
+DWORD g_activeTerrainThread;
+TerrainParameterPath g_activeTerrainPath;
+int g_activeTerrainMaterialIndex;
+
+unsigned terrainPreloadHash(const void* terrain) {
+    uintptr_t value = (uintptr_t)terrain;
+    value ^= value >> 11;
+    value ^= value >> 21;
+    return (unsigned)value & (kTerrainPreloadStateSlots - 1);
+}
+
+TerrainPreloadState* terrainPreloadState(const void* terrain, bool create) {
+    if (!terrain) return nullptr;
+    unsigned slot = terrainPreloadHash(terrain);
+    for (unsigned probe = 0; probe < kTerrainPreloadStateSlots; ++probe) {
+        TerrainPreloadState& state = g_terrainPreloadStates[slot];
+        void* const found = (void*)InterlockedCompareExchangePointer(
+            &state.terrain, create ? (void*)terrain : nullptr, nullptr);
+        if (!found || found == terrain) return &state;
+        slot = (slot + 1) & (kTerrainPreloadStateSlots - 1);
+    }
+    return nullptr;
+}
+
+void rememberTerrainPreloadAtFrame(const void* terrain, bool includeTextures,
+                                   unsigned frame) {
+    TerrainPreloadState* const state = terrainPreloadState(terrain, true);
+    if (!state) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineTerrainPreloadTableOverflow);
+        return;
+    }
+    const LONG framePlusOne = (LONG)frame + 1;
+    if (includeTextures) {
+        InterlockedExchange(&state->lastTrueFramePlusOne, framePlusOne);
+        InterlockedIncrement(&state->trueCount);
+    } else {
+        InterlockedExchange(&state->lastFalseFramePlusOne, framePlusOne);
+        InterlockedIncrement(&state->falseCount);
+    }
+}
+
+void rememberTerrainPreload(const void* terrain, bool includeTextures) {
+    rememberTerrainPreloadAtFrame(terrain, includeTextures,
+                                  tq::probe::currentFrameIndex());
+}
+
+void rememberTerrainRtEventAtFrame(const void* terrain, TerrainRtEvent event,
+                                   unsigned frame) {
+    TerrainPreloadState* const state = terrainPreloadState(terrain, true);
+    if (!state) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineTerrainPreloadTableOverflow);
+        return;
+    }
+    LONG* count = nullptr;
+    LONG* first = nullptr;
+    LONG* last = nullptr;
+    if (event == TerrainRtLoadAttach) {
+        count = &state->rtLoadAttachCount;
+        first = &state->rtLoadAttachFirstFramePlusOne;
+        last = &state->rtLoadAttachLastFramePlusOne;
+    } else if (event == TerrainRtLoadTextures) {
+        count = &state->rtLoadTexturesCount;
+        first = &state->rtLoadTexturesFirstFramePlusOne;
+        last = &state->rtLoadTexturesLastFramePlusOne;
+    } else {
+        count = &state->rtOwnerPreloadCount;
+        first = &state->rtOwnerPreloadFirstFramePlusOne;
+        last = &state->rtOwnerPreloadLastFramePlusOne;
+    }
+    const LONG framePlusOne = (LONG)frame + 1;
+    InterlockedCompareExchange(first, framePlusOne, 0);
+    InterlockedExchange(last, framePlusOne);
+    InterlockedIncrement(count);
+}
+
+void rememberTerrainRtEvent(const void* terrain, TerrainRtEvent event) {
+    rememberTerrainRtEventAtFrame(terrain, event,
+                                  tq::probe::currentFrameIndex());
+}
+
+TerrainPreloadSnapshot terrainPreloadSnapshot(const void* terrain) {
+    TerrainPreloadSnapshot result = {};
+    TerrainPreloadState* const state = terrainPreloadState(terrain, false);
+    if (!state) return result;
+    result.trueCount = (unsigned)InterlockedCompareExchange(
+        &state->trueCount, 0, 0);
+    result.falseCount = (unsigned)InterlockedCompareExchange(
+        &state->falseCount, 0, 0);
+    result.lastTrueFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->lastTrueFramePlusOne, 0, 0);
+    result.lastFalseFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->lastFalseFramePlusOne, 0, 0);
+    result.rtLoadAttachCount = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadAttachCount, 0, 0);
+    result.rtLoadAttachFirstFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadAttachFirstFramePlusOne, 0, 0);
+    result.rtLoadAttachLastFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadAttachLastFramePlusOne, 0, 0);
+    result.rtLoadTexturesCount = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadTexturesCount, 0, 0);
+    result.rtLoadTexturesFirstFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadTexturesFirstFramePlusOne, 0, 0);
+    result.rtLoadTexturesLastFramePlusOne = (unsigned)InterlockedCompareExchange(
+        &state->rtLoadTexturesLastFramePlusOne, 0, 0);
+    result.rtOwnerPreloadCount = (unsigned)InterlockedCompareExchange(
+        &state->rtOwnerPreloadCount, 0, 0);
+    result.rtOwnerPreloadFirstFramePlusOne =
+        (unsigned)InterlockedCompareExchange(
+            &state->rtOwnerPreloadFirstFramePlusOne, 0, 0);
+    result.rtOwnerPreloadLastFramePlusOne =
+        (unsigned)InterlockedCompareExchange(
+            &state->rtOwnerPreloadLastFramePlusOne, 0, 0);
+    return result;
+}
+
+unsigned rememberTerrainRtOwnerLayers(const void* owner,
+                                      TerrainRtEvent event) {
+    if (!owner || !g_terrainRtNumLayers || !g_terrainRtLayerType) return 0;
+    const unsigned count = g_terrainRtNumLayers(owner, nullptr);
+    const unsigned bounded = count < kTerrainRtLayerLimit
+        ? count : kTerrainRtLayerLimit;
+    if (count > kTerrainRtLayerLimit)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineTerrainRtLayerOverflow);
+    for (unsigned layer = 0; layer < bounded; ++layer)
+        rememberTerrainRtEvent(
+            g_terrainRtLayerType(owner, nullptr, layer), event);
+    return bounded;
+}
+
+const unsigned kOutsideDirResourceReportSlots = 128;
+const unsigned kOutsideDirResourceMarkerFrames = 120;
+const unsigned kOutsideDirResourceNameChars = 128;
+const unsigned kOutsideDirResourceCallerDepth = 24;
+
+struct OutsideDirResourceReport {
+    LONG ready;
+    unsigned frame;
+    uint32_t us;
+    unsigned state;
+    OutsideDirResourcePhase phase;
+    ShadowResourceType type;
+    bool stateKnown;
+    bool callerVerified;
+    char callerTag;
+    DWORD callerRva;
+    unsigned callerDepth;
+    ChainFrame callerFrames[kOutsideDirResourceCallerDepth];
+    const void* terrainType;
+    TerrainParameterPath terrainPath;
+    int terrainMaterialIndex;
+    TerrainPreloadSnapshot terrainPreload;
+    char resource[kOutsideDirResourceNameChars + 1];
+};
+
+OutsideDirResourceReport
+    g_outsideDirResourceReports[kOutsideDirResourceReportSlots];
+LONG g_outsideDirResourceSequence;
+LONG g_outsideDirResourceReportedThrough;
+
+void copyResourceName(char out[kOutsideDirResourceNameChars + 1],
+                      const char* name) {
+    unsigned length = 0;
+    if (name) {
+        while (length < kOutsideDirResourceNameChars && name[length]) {
+            out[length] = name[length];
+            ++length;
+        }
+    }
+    out[length] = 0;
+}
+
+void rememberOutsideDirResource(const void* caller, const void* stack,
+                                const char* resource,
+                                bool stateKnown, unsigned state,
+                                ShadowResourceType type,
+                                OutsideDirResourcePhase phase,
+                                unsigned frame, uint32_t elapsed,
+                                const void* terrainType,
+                                TerrainParameterPath terrainPath,
+                                int terrainMaterialIndex,
+                                TerrainPreloadSnapshot terrainPreload) {
+    const LONG sequence = InterlockedIncrement(&g_outsideDirResourceSequence)
+        - 1;
+    if (sequence < 0) return;
+    OutsideDirResourceReport& report = g_outsideDirResourceReports[
+        (unsigned)sequence % kOutsideDirResourceReportSlots];
+    InterlockedExchange(&report.ready, 0);
+    report.frame = frame;
+    report.us = elapsed;
+    report.state = state;
+    report.phase = phase;
+    report.type = type;
+    report.stateKnown = stateKnown;
+    report.callerVerified = false;
+    report.callerTag = '?';
+    report.callerRva = 0;
+    report.callerDepth = 0;
+    report.terrainType = terrainType;
+    report.terrainPath = terrainPath;
+    report.terrainMaterialIndex = terrainMaterialIndex;
+    report.terrainPreload = terrainPreload;
+    if (caller) {
+        const BYTE* const address = (const BYTE*)caller;
+        const ChainModule* const module = moduleOf(address);
+        if (module && precededByCall(address, *module)) {
+            report.callerVerified = true;
+            report.callerTag = module->tag;
+            report.callerRva = (DWORD)(address - module->base);
+        }
+    }
+    if (stack && g_chainModuleCount) {
+        MEMORY_BASIC_INFORMATION info = {};
+        if (VirtualQuery(stack, &info, sizeof(info))
+            && info.State == MEM_COMMIT) {
+            const uintptr_t* const words = (const uintptr_t*)stack;
+            const uintptr_t* const limit = (const uintptr_t*)(
+                (const BYTE*)info.BaseAddress + info.RegionSize);
+            for (unsigned i = 0;
+                 i < kStackWords && words + i < limit
+                 && report.callerDepth < kOutsideDirResourceCallerDepth;
+                 ++i) {
+                const BYTE* const value = (const BYTE*)words[i];
+                const ChainModule* const module = moduleOf(value);
+                if (!module || !precededByCall(value, *module)) continue;
+                const DWORD rva = (DWORD)(value - module->base);
+                if (report.callerDepth
+                    && report.callerFrames[report.callerDepth - 1].rva == rva
+                    && report.callerFrames[report.callerDepth - 1].tag
+                        == module->tag)
+                    continue;
+                report.callerFrames[report.callerDepth].rva = rva;
+                report.callerFrames[report.callerDepth].tag = module->tag;
+                ++report.callerDepth;
+            }
+        }
+    }
+    copyResourceName(report.resource, resource);
+    // sequence+1 makes zero an unambiguous unpublished slot. The marker runs
+    // on this same main thread, but publishing last also makes the invariant
+    // explicit if the game's threading changes.
+    InterlockedExchange(&report.ready, sequence + 1);
+}
+
+const char* outsideDirResourcePhaseName(OutsideDirResourcePhase phase) {
+    return phase == OutsideDirResourceRender ? "render"
+         : phase == OutsideDirResourceUpdate ? "update" : "other";
+}
+
+const char* outsideDirResourceTypeName(ShadowResourceType type) {
+    return type == ShadowResourceMesh ? "mesh"
+         : type == ShadowResourceShader ? "shader"
+         : type == ShadowResourceTexture ? "texture" : "other";
+}
+
+const char* terrainParameterPathName(TerrainParameterPath path) {
+    return path == TerrainParameterMaterial ? "material"
+         : path == TerrainParameterGrass ? "grass" : "none";
+}
+
+// F12 is deliberately a reaction anchor. Keep the loads in memory while the
+// slow frame is running, then emit them only when the user marks what they
+// felt. This avoids putting formatting or log-lock work into the candidate
+// frame. The 120-frame horizon comfortably covers the measured 0.3--0.7 s
+// reaction delay; the CSV remains authoritative for time-based candidate
+// selection.
+struct OutsideDirResourceWindow {
+    LONG first;
+    LONG total;
+    bool truncated;
+};
+
+OutsideDirResourceWindow outsideDirResourceWindow(unsigned markerFrame) {
+    OutsideDirResourceWindow window = {};
+    window.total = InterlockedCompareExchange(
+        &g_outsideDirResourceSequence, 0, 0);
+    window.first = window.total > (LONG)kOutsideDirResourceReportSlots
+        ? window.total - (LONG)kOutsideDirResourceReportSlots : 0;
+    const LONG reported = InterlockedCompareExchange(
+        &g_outsideDirResourceReportedThrough, 0, 0);
+    if (reported < window.first && window.first < window.total) {
+        const OutsideDirResourceReport& oldest = g_outsideDirResourceReports[
+            (unsigned)window.first % kOutsideDirResourceReportSlots];
+        if (oldest.ready == window.first + 1 && oldest.frame <= markerFrame
+            && markerFrame - oldest.frame <= kOutsideDirResourceMarkerFrames)
+            window.truncated = true;
+    }
+    if (reported > window.first) window.first = reported;
+    return window;
+}
+
+bool outsideDirResourceInWindow(const OutsideDirResourceReport& report,
+                                LONG sequence, unsigned markerFrame) {
+    return report.ready == sequence + 1 && report.frame <= markerFrame
+        && markerFrame - report.frame <= kOutsideDirResourceMarkerFrames;
+}
+
+void reportOutsideDirResourcesAtMarker() {
+    if (!g_outsideDirResourceTracing) return;
+    const unsigned markerFrame = tq::probe::currentFrameIndex();
+    const OutsideDirResourceWindow window =
+        outsideDirResourceWindow(markerFrame);
+
+    unsigned emitted = 0;
+    for (LONG sequence = window.first; sequence < window.total; ++sequence) {
+        const OutsideDirResourceReport& report = g_outsideDirResourceReports[
+            (unsigned)sequence % kOutsideDirResourceReportSlots];
+        if (!outsideDirResourceInWindow(report, sequence, markerFrame))
+            continue;
+        char state[16];
+        if (report.stateKnown)
+            snprintf(state, sizeof(state), "%u", report.state);
+        else
+            lstrcpyA(state, "unknown");
+        state[sizeof(state) - 1] = 0;
+        if (report.callerVerified) {
+            tq::hdr::log("Engine trace: outside-dir Resource %ld, frame %u,"
+                         " %u us, phase %s, state %s, type %s,"
+                         " caller %c+%#lx, resource %.*s\r\n",
+                         sequence, report.frame, report.us,
+                         outsideDirResourcePhaseName(report.phase),
+                         state,
+                         outsideDirResourceTypeName(report.type),
+                         report.callerTag, (unsigned long)report.callerRva,
+                         (int)kOutsideDirResourceNameChars,
+                         report.resource[0] ? report.resource : "(unknown)");
+        } else {
+            tq::hdr::log("Engine trace: outside-dir Resource %ld, frame %u,"
+                         " %u us, phase %s, state %s, type %s,"
+                         " caller unverified, resource %.*s\r\n",
+                         sequence, report.frame, report.us,
+                         outsideDirResourcePhaseName(report.phase),
+                         state,
+                         outsideDirResourceTypeName(report.type),
+                         (int)kOutsideDirResourceNameChars,
+                         report.resource[0] ? report.resource : "(unknown)");
+        }
+        char chain[kOutsideDirResourceCallerDepth * 14 + 1];
+        char* at = chain;
+        for (unsigned i = 0; i < report.callerDepth; ++i)
+            at = appendFrame(at, chain + sizeof(chain) - 1,
+                             report.callerFrames[i]);
+        *at = 0;
+        tq::hdr::log("Engine trace: outside-dir Resource %ld upstream %u"
+                     " frames:%s\r\n",
+                     sequence, report.callerDepth, chain);
+        const long lastTrue = report.terrainPreload.lastTrueFramePlusOne
+            ? (long)report.terrainPreload.lastTrueFramePlusOne - 1 : -1;
+        const long lastFalse = report.terrainPreload.lastFalseFramePlusOne
+            ? (long)report.terrainPreload.lastFalseFramePlusOne - 1 : -1;
+        tq::hdr::log("Engine trace: outside-dir Resource %ld TerrainType %p,"
+                     " path %s, material %d, preload true %u last %ld,"
+                     " false %u last %ld\r\n",
+                     sequence, report.terrainType,
+                     terrainParameterPathName(report.terrainPath),
+                     report.terrainMaterialIndex,
+                     report.terrainPreload.trueCount, lastTrue,
+                     report.terrainPreload.falseCount, lastFalse);
+        const long attachFirst =
+            report.terrainPreload.rtLoadAttachFirstFramePlusOne
+            ? (long)report.terrainPreload.rtLoadAttachFirstFramePlusOne - 1
+            : -1;
+        const long attachLast =
+            report.terrainPreload.rtLoadAttachLastFramePlusOne
+            ? (long)report.terrainPreload.rtLoadAttachLastFramePlusOne - 1
+            : -1;
+        const long texturesFirst =
+            report.terrainPreload.rtLoadTexturesFirstFramePlusOne
+            ? (long)report.terrainPreload.rtLoadTexturesFirstFramePlusOne - 1
+            : -1;
+        const long texturesLast =
+            report.terrainPreload.rtLoadTexturesLastFramePlusOne
+            ? (long)report.terrainPreload.rtLoadTexturesLastFramePlusOne - 1
+            : -1;
+        const long ownerFirst =
+            report.terrainPreload.rtOwnerPreloadFirstFramePlusOne
+            ? (long)report.terrainPreload.rtOwnerPreloadFirstFramePlusOne - 1
+            : -1;
+        const long ownerLast =
+            report.terrainPreload.rtOwnerPreloadLastFramePlusOne
+            ? (long)report.terrainPreload.rtOwnerPreloadLastFramePlusOne - 1
+            : -1;
+        tq::hdr::log("Engine trace: outside-dir Resource %ld TerrainRT"
+                     " attach %u first %ld last %ld, LoadTextures %u"
+                     " first %ld last %ld, owner PreLoad %u first %ld"
+                     " last %ld\r\n",
+                     sequence, report.terrainPreload.rtLoadAttachCount,
+                     attachFirst, attachLast,
+                     report.terrainPreload.rtLoadTexturesCount,
+                     texturesFirst, texturesLast,
+                     report.terrainPreload.rtOwnerPreloadCount,
+                     ownerFirst, ownerLast);
+        ++emitted;
+    }
+    InterlockedExchange(&g_outsideDirResourceReportedThrough, window.total);
+    if (window.truncated)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineResOutsideDirMarkerTruncated);
+    tq::hdr::log("Engine trace: F12 frame %u emitted %u outside-dir Resource"
+                 " loads from the preceding %u frames; truncated=%u\r\n",
+                 markerFrame, emitted, kOutsideDirResourceMarkerFrames,
+                 window.truncated ? 1u : 0u);
+}
+
+// The remaining Run 67 play transition has 26 state-0 mesh loads inside the
+// directional build after the exact base GraphicsMeshInstance root gate has
+// already omitted 12 other casters. Preserve the same bounded, delayed caller
+// evidence used for outside-directional loads, but only for that narrow class.
+const unsigned kShadowMeshResourceReportSlots = 128;
+const unsigned kShadowMeshResourceMarkerFrames = 120;
+
+struct ShadowMeshResourceReport {
+    LONG ready;
+    unsigned frame;
+    uint32_t us;
+    bool inQueue;
+    bool callerVerified;
+    char callerTag;
+    DWORD callerRva;
+    unsigned callerDepth;
+    ChainFrame callerFrames[kOutsideDirResourceCallerDepth];
+    char resource[kOutsideDirResourceNameChars + 1];
+};
+
+ShadowMeshResourceReport
+    g_shadowMeshResourceReports[kShadowMeshResourceReportSlots];
+LONG g_shadowMeshResourceSequence;
+LONG g_shadowMeshResourceReportedThrough;
+
+void rememberShadowMeshResource(const void* caller, const void* stack,
+                                const char* resource, bool inQueue,
+                                unsigned frame, uint32_t elapsed) {
+    const LONG sequence = InterlockedIncrement(&g_shadowMeshResourceSequence)
+        - 1;
+    if (sequence < 0) return;
+    ShadowMeshResourceReport& report = g_shadowMeshResourceReports[
+        (unsigned)sequence % kShadowMeshResourceReportSlots];
+    InterlockedExchange(&report.ready, 0);
+    report.frame = frame;
+    report.us = elapsed;
+    report.inQueue = inQueue;
+    report.callerVerified = false;
+    report.callerTag = '?';
+    report.callerRva = 0;
+    report.callerDepth = 0;
+    if (caller) {
+        const BYTE* const address = (const BYTE*)caller;
+        const ChainModule* const module = moduleOf(address);
+        if (module && precededByCall(address, *module)) {
+            report.callerVerified = true;
+            report.callerTag = module->tag;
+            report.callerRva = (DWORD)(address - module->base);
+        }
+    }
+    if (stack && g_chainModuleCount) {
+        MEMORY_BASIC_INFORMATION info = {};
+        if (VirtualQuery(stack, &info, sizeof(info))
+            && info.State == MEM_COMMIT) {
+            const uintptr_t* const words = (const uintptr_t*)stack;
+            const uintptr_t* const limit = (const uintptr_t*)(
+                (const BYTE*)info.BaseAddress + info.RegionSize);
+            for (unsigned i = 0;
+                 i < kStackWords && words + i < limit
+                 && report.callerDepth < kOutsideDirResourceCallerDepth;
+                 ++i) {
+                const BYTE* const value = (const BYTE*)words[i];
+                const ChainModule* const module = moduleOf(value);
+                if (!module || !precededByCall(value, *module)) continue;
+                const DWORD rva = (DWORD)(value - module->base);
+                if (report.callerDepth
+                    && report.callerFrames[report.callerDepth - 1].rva == rva
+                    && report.callerFrames[report.callerDepth - 1].tag
+                        == module->tag)
+                    continue;
+                report.callerFrames[report.callerDepth].rva = rva;
+                report.callerFrames[report.callerDepth].tag = module->tag;
+                ++report.callerDepth;
+            }
+        }
+    }
+    copyResourceName(report.resource, resource);
+    InterlockedExchange(&report.ready, sequence + 1);
+}
+
+struct ShadowMeshResourceWindow {
+    LONG first;
+    LONG total;
+    bool truncated;
+};
+
+ShadowMeshResourceWindow shadowMeshResourceWindow(unsigned markerFrame) {
+    ShadowMeshResourceWindow window = {};
+    window.total = InterlockedCompareExchange(
+        &g_shadowMeshResourceSequence, 0, 0);
+    window.first = window.total > (LONG)kShadowMeshResourceReportSlots
+        ? window.total - (LONG)kShadowMeshResourceReportSlots : 0;
+    const LONG reported = InterlockedCompareExchange(
+        &g_shadowMeshResourceReportedThrough, 0, 0);
+    if (reported < window.first && window.first < window.total) {
+        const ShadowMeshResourceReport& oldest = g_shadowMeshResourceReports[
+            (unsigned)window.first % kShadowMeshResourceReportSlots];
+        if (oldest.ready == window.first + 1 && oldest.frame <= markerFrame
+            && markerFrame - oldest.frame <= kShadowMeshResourceMarkerFrames)
+            window.truncated = true;
+    }
+    if (reported > window.first) window.first = reported;
+    return window;
+}
+
+bool shadowMeshResourceInWindow(const ShadowMeshResourceReport& report,
+                                LONG sequence, unsigned markerFrame) {
+    return report.ready == sequence + 1 && report.frame <= markerFrame
+        && markerFrame - report.frame <= kShadowMeshResourceMarkerFrames;
+}
+
+void reportShadowMeshResourcesAtMarker() {
+    if (!g_shadowMeshResourceTracing) return;
+    const unsigned markerFrame = tq::probe::currentFrameIndex();
+    const ShadowMeshResourceWindow window =
+        shadowMeshResourceWindow(markerFrame);
+    unsigned emitted = 0;
+    for (LONG sequence = window.first; sequence < window.total; ++sequence) {
+        const ShadowMeshResourceReport& report = g_shadowMeshResourceReports[
+            (unsigned)sequence % kShadowMeshResourceReportSlots];
+        if (!shadowMeshResourceInWindow(report, sequence, markerFrame))
+            continue;
+        if (report.callerVerified) {
+            tq::hdr::log("Engine trace: directional mesh Resource %ld,"
+                         " frame %u, %u us, state 0, queued %u, caller"
+                         " %c+%#lx, resource %.*s\r\n",
+                         sequence, report.frame, report.us,
+                         report.inQueue ? 1u : 0u, report.callerTag,
+                         (unsigned long)report.callerRva,
+                         (int)kOutsideDirResourceNameChars,
+                         report.resource[0] ? report.resource : "(unknown)");
+        } else {
+            tq::hdr::log("Engine trace: directional mesh Resource %ld,"
+                         " frame %u, %u us, state 0, queued %u, caller"
+                         " unverified, resource %.*s\r\n",
+                         sequence, report.frame, report.us,
+                         report.inQueue ? 1u : 0u,
+                         (int)kOutsideDirResourceNameChars,
+                         report.resource[0] ? report.resource : "(unknown)");
+        }
+        char chain[kOutsideDirResourceCallerDepth * 14 + 1];
+        char* at = chain;
+        for (unsigned i = 0; i < report.callerDepth; ++i)
+            at = appendFrame(at, chain + sizeof(chain) - 1,
+                             report.callerFrames[i]);
+        *at = 0;
+        tq::hdr::log("Engine trace: directional mesh Resource %ld upstream"
+                     " %u frames:%s\r\n",
+                     sequence, report.callerDepth, chain);
+        ++emitted;
+    }
+    InterlockedExchange(&g_shadowMeshResourceReportedThrough, window.total);
+    tq::hdr::log("Engine trace: F12 frame %u emitted %u directional state-0"
+                 " mesh Resource loads from the preceding %u frames;"
+                 " truncated=%u\r\n",
+                 markerFrame, emitted, kShadowMeshResourceMarkerFrames,
+                 window.truncated ? 1u : 0u);
 }
 
 enum ShadowTextureCaller {
@@ -2820,6 +3765,174 @@ void __fastcall hookShadowMeshEnsure(void* resource, void* edx) {
                            tq::probe::microsecondsSince(started));
 }
 
+int __fastcall hookTerrainRtLoad(void* self, void* edx, void* reader,
+                                 int version) {
+    if (!g_terrainRtLoad) return 0;
+    const int64_t started = tq::probe::now();
+    const int result = g_terrainRtLoad(self, edx, reader, version);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtLoad);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtLoadUs,
+                           tq::probe::microsecondsSince(started));
+    if (result)
+        rememberTerrainRtOwnerLayers(self, TerrainRtLoadAttach);
+    return result;
+}
+
+void __fastcall hookTerrainRtLoadTextures(void* self, void* edx) {
+    if (!g_terrainRtLoadTextures) return;
+    const int64_t started = g_terrainTracing ? tq::probe::now() : 0;
+    g_terrainRtLoadTextures(self, edx);
+    if (g_terrainTracing) {
+        tq::probe::engineCount(tq::probe::CounterEngineTerrainRtLoadTextures);
+        tq::probe::engineCount(
+            tq::probe::CounterEngineTerrainRtLoadTexturesUs,
+            tq::probe::microsecondsSince(started));
+        // Record completion: only after this call do TerrainType's base, bump
+        // and grass Resource pointers exist for semantic PreLoad(true).
+        rememberTerrainRtEvent(self, TerrainRtLoadTextures);
+    }
+    if (g_terrainPreloadLayersActive && g_terrainPreloadEntry)
+        g_terrainPreloadEntry(self, nullptr, 1);
+}
+
+int __fastcall hookTerrainRtLoadRenderData(void* self, void* edx) {
+    if (!g_terrainRtLoadRenderData) return 0;
+    const bool main = onMainThread();
+    const int64_t started = tq::probe::now();
+    int result = 0;
+    {
+        // LoadRenderData can run on the loader thread during a save load.
+        // g_gpuCurrent and the immediate D3D context belong to the render
+        // thread; issuing End(query) from the loader can deadlock the device.
+        tq::probe::GpuScope gpu(main ? tq::probe::currentGpuContext() : nullptr,
+                                tq::probe::GpuTerrainRtLoadRender);
+        result = g_terrainRtLoadRenderData(self, edx);
+    }
+    const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtLoadRender);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtLoadRenderUs,
+                           elapsed);
+    tq::probe::engineCount(main
+        ? tq::probe::CounterEngineTerrainRtLoadRenderMain
+        : tq::probe::CounterEngineTerrainRtLoadRenderOther);
+    tq::probe::engineCount(main
+        ? tq::probe::CounterEngineTerrainRtLoadRenderMainUs
+        : tq::probe::CounterEngineTerrainRtLoadRenderOtherUs, elapsed);
+    return result;
+}
+
+void __fastcall hookTerrainRtPreload(void* self, void* edx, int priority,
+                                     const void* frustum, unsigned flags) {
+    if (!g_terrainRtPreload) return;
+    const unsigned layers = rememberTerrainRtOwnerLayers(
+        self, TerrainRtOwnerPreload);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtPreloadLayers,
+                           layers);
+    const int64_t started = tq::probe::now();
+    g_terrainRtPreload(self, edx, priority, frustum, flags);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtPreload);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainRtPreloadUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookTerrainPlugRender(
+    void* self, void* edx, const void* a, const void* b, const void* c,
+    const void* d) {
+    if (!g_terrainPlugRender) return;
+    const int64_t started = tq::probe::now();
+    g_terrainPlugRender(self, edx, a, b, c, d);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainPlug);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainPlugUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookTerrainBlockRender(
+    void* self, void* edx, const void* a, const void* b, const void* c,
+    const void* d) {
+    if (!g_terrainBlockRender) return;
+    const int64_t started = tq::probe::now();
+    g_terrainBlockRender(self, edx, a, b, c, d);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainBlock);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainBlockUs,
+                           tq::probe::microsecondsSince(started));
+}
+
+void __fastcall hookTerrainPreload(void* self, void* edx,
+                                   int includeTextures) {
+    if (!g_terrainPreload) return;
+    rememberTerrainPreload(self, includeTextures != 0);
+    const int64_t started = tq::probe::now();
+    g_terrainPreload(self, edx, includeTextures);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainPreload);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainPreloadUs,
+                           tq::probe::microsecondsSince(started));
+    tq::probe::engineCount(includeTextures
+        ? tq::probe::CounterEngineTerrainPreloadTrue
+        : tq::probe::CounterEngineTerrainPreloadFalse);
+}
+
+void __fastcall hookTerrainSetShaderParams(
+    const void* self, void* edx, const void* shader, int materialIndex) {
+    if (!g_terrainSetShaderParams) return;
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainShaderParams);
+    if (!onMainThread()) {
+        g_terrainSetShaderParams(self, edx, shader, materialIndex);
+        return;
+    }
+    const void* const priorType = g_activeTerrainType;
+    const DWORD priorThread = g_activeTerrainThread;
+    const TerrainParameterPath priorPath = g_activeTerrainPath;
+    const int priorMaterial = g_activeTerrainMaterialIndex;
+    g_activeTerrainType = self;
+    g_activeTerrainThread = GetCurrentThreadId();
+    g_activeTerrainPath = TerrainParameterMaterial;
+    g_activeTerrainMaterialIndex = materialIndex;
+    g_terrainSetShaderParams(self, edx, shader, materialIndex);
+    g_activeTerrainType = priorType;
+    g_activeTerrainThread = priorThread;
+    g_activeTerrainPath = priorPath;
+    g_activeTerrainMaterialIndex = priorMaterial;
+}
+
+void __fastcall hookTerrainSetGrassShaderParams(
+    const void* self, void* edx, const void* shader) {
+    if (!g_terrainSetGrassShaderParams) return;
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainGrassParams);
+    if (!onMainThread()) {
+        g_terrainSetGrassShaderParams(self, edx, shader);
+        return;
+    }
+    const void* const priorType = g_activeTerrainType;
+    const DWORD priorThread = g_activeTerrainThread;
+    const TerrainParameterPath priorPath = g_activeTerrainPath;
+    const int priorMaterial = g_activeTerrainMaterialIndex;
+    g_activeTerrainType = self;
+    g_activeTerrainThread = GetCurrentThreadId();
+    g_activeTerrainPath = TerrainParameterGrass;
+    g_activeTerrainMaterialIndex = -1;
+    g_terrainSetGrassShaderParams(self, edx, shader);
+    g_activeTerrainType = priorType;
+    g_activeTerrainThread = priorThread;
+    g_activeTerrainPath = priorPath;
+    g_activeTerrainMaterialIndex = priorMaterial;
+}
+
+void __fastcall hookTerrainRenderGround(
+    const void* self, void* edx, const void* name, void* canvas,
+    const void* sceneRenderer, const void* pass, int flag) {
+    if (!g_terrainRenderGround) return;
+    const int64_t started = tq::probe::now();
+    {
+        tq::probe::GpuScope gpu(tq::probe::currentGpuContext(),
+                                tq::probe::GpuTerrainGround);
+        g_terrainRenderGround(self, edx, name, canvas, sceneRenderer, pass,
+                              flag);
+    }
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainGround);
+    tq::probe::engineCount(tq::probe::CounterEngineTerrainGroundUs,
+                           tq::probe::microsecondsSince(started));
+}
+
 void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     if (!g_loadResource) return;
     // Sample before entering the game function: state 1 is the branch that
@@ -2830,22 +3943,45 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     const bool main = onMainThread();
     const bool inShadow = main
         && InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0;
-    const bool classify = inShadow && g_resourceStateVerified && resource;
+    const bool outsideDir = g_outsideDirResourceTracing && main && !inShadow;
+    const bool classify = (inShadow || outsideDir)
+        && g_resourceStateVerified && resource;
     const unsigned state = classify
         ? *(const unsigned*)((const BYTE*)resource + kResourceLoadedStateOffset)
         : 0;
-    const bool inQueue = classify
+    const bool inQueue = inShadow && classify
         && *(void* const*)((const BYTE*)resource + kResourceInQueueOffset)
             != nullptr;
-    const char* const resourceName = inShadow
+    const char* const resourceName = (inShadow || outsideDir)
         && g_resourceFileNameVerified && g_resourceFileName && resource
         ? g_resourceFileName(resource, nullptr) : nullptr;
     const ShadowResourceType resourceType = resourceName
         ? shadowResourceType(resourceName) : ShadowResourceOther;
+    const bool shadowMeshReport = g_shadowMeshResourceTracing && inShadow
+        && classify && state == 0 && resourceType == ShadowResourceMesh;
     const ShadowTextureCaller textureCaller =
-        resourceType == ShadowResourceTexture
+        inShadow && resourceType == ShadowResourceTexture
         ? shadowTextureCallerFromStack(&resource)
         : ShadowTextureUnresolved;
+    const void* const caller = outsideDir || shadowMeshReport
+        ? __builtin_return_address(0) : nullptr;
+    const OutsideDirResourcePhase outsidePhase = outsideDir
+        ? outsideDirResourcePhase() : OutsideDirResourceOther;
+    const unsigned frame = outsideDir || shadowMeshReport
+        ? tq::probe::currentFrameIndex() : 0;
+    const bool terrainContext = outsideDir && g_activeTerrainType
+        && g_activeTerrainThread == GetCurrentThreadId();
+    const void* const terrainType = terrainContext
+        ? g_activeTerrainType : nullptr;
+    const TerrainParameterPath terrainPath = terrainContext
+        ? g_activeTerrainPath : TerrainParameterNone;
+    const int terrainMaterialIndex = terrainContext
+        ? g_activeTerrainMaterialIndex : -1;
+    const TerrainPreloadSnapshot terrainPreload =
+        terrainPreloadSnapshot(terrainType);
+    char resourceNameCopy[kOutsideDirResourceNameChars + 1] = {};
+    if (outsideDir || shadowMeshReport)
+        copyResourceName(resourceNameCopy, resourceName);
     const int64_t started = tq::probe::now();
     g_loadResource(self, edx, resource);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
@@ -2854,6 +3990,13 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     if (main) {
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMain);
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMainUs, elapsed);
+        if (outsideDir) {
+            countOutsideDirResource(resourceType, outsidePhase, elapsed);
+            rememberOutsideDirResource(
+                caller, &resource, resourceNameCopy, classify, state, resourceType,
+                outsidePhase, frame, elapsed, terrainType, terrainPath,
+                terrainMaterialIndex, terrainPreload);
+        }
         if (inShadow) {
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoad);
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoadUs,
@@ -2861,6 +4004,10 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
             if (classify) countShadowResourceState(state, inQueue, elapsed);
             if (g_resourceFileNameVerified) {
                 countShadowResourceType(resourceType, elapsed);
+                if (shadowMeshReport)
+                    rememberShadowMeshResource(
+                        caller, &resource, resourceNameCopy, inQueue, frame,
+                        elapsed);
                 if (resourceType == ShadowResourceTexture) {
                     countShadowTextureCaller(textureCaller, elapsed);
                     if (textureCaller == ShadowTextureUnresolved)
@@ -3112,7 +4259,11 @@ void __fastcall hookEngineUpdate(void* self, void* edx, const void* frustum,
                                  int flag) {
     if (!g_engineUpdate) return;
     const int64_t started = tq::probe::now();
+    if (g_outsideDirResourceTracing)
+        InterlockedIncrement(&g_insideEngineUpdate);
     g_engineUpdate(self, edx, frustum, flag);
+    if (g_outsideDirResourceTracing)
+        InterlockedDecrement(&g_insideEngineUpdate);
     tq::probe::engineCount(tq::probe::CounterEngineUpdate);
     tq::probe::engineCount(tq::probe::CounterEngineUpdateUs,
                            tq::probe::microsecondsSince(started));
@@ -3269,7 +4420,11 @@ void __fastcall hookEngineRender(void* self, void* edx) {
         reportSlowLoads();
     }
     const int64_t started = tq::probe::now();
+    if (g_outsideDirResourceTracing)
+        InterlockedIncrement(&g_insideEngineRender);
     g_engineRender(self, edx);
+    if (g_outsideDirResourceTracing)
+        InterlockedDecrement(&g_insideEngineRender);
     tq::probe::engineCount(tq::probe::CounterEngineRender);
     tq::probe::engineCount(tq::probe::CounterEngineRenderUs,
                            tq::probe::microsecondsSince(started));
@@ -3465,8 +4620,11 @@ BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
     if (result && message
         && (message->message == WM_KEYDOWN || message->message == WM_SYSKEYDOWN)
         && message->wParam == VK_F12
-        && (message->lParam & (LPARAM(1) << 30)) == 0)
+        && (message->lParam & (LPARAM(1) << 30)) == 0) {
+        reportOutsideDirResourcesAtMarker();
+        reportShadowMeshResourcesAtMarker();
         tq::probe::markStutter();
+    }
     if (!timePeek) return result;
 
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
@@ -4391,6 +5549,216 @@ bool installFrame(HMODULE engine) {
     return true;
 }
 
+bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
+    BYTE* const base = (BYTE*)engine;
+    const BYTE* const vtable = base + kTerrainRtVtableRva;
+    const bool vtableReadable = tq::detour::readable(
+        vtable, kTerrainRtLayerTypeVtableOffset + sizeof(DWORD));
+    const bool runtimeIdentity = vtableReadable
+        && *(void* const*)(vtable + kTerrainRtLoadVtableOffset)
+            == base + kTerrainRtLoadRva
+        && *(void* const*)(vtable + kTerrainRtLoadRenderDataVtableOffset)
+            == base + kTerrainRtLoadRenderDataRva
+        && *(void* const*)(vtable + kTerrainRtPreloadVtableOffset)
+            == base + kTerrainRtPreloadRva
+        && *(void* const*)(vtable + kTerrainRtNumLayersVtableOffset)
+            == base + kTerrainRtNumLayersRva
+        && *(void* const*)(vtable + kTerrainRtLayerTypeVtableOffset)
+            == base + kTerrainRtLayerTypeRva;
+    const bool runtimeBytes = runtimeIdentity
+        && tq::detour::matches(
+            engine, base + kTerrainRtNumLayersRva,
+            signature(kTerrainRtNumLayersBytes,
+                      sizeof(kTerrainRtNumLayersBytes)))
+        && tq::detour::matches(
+            engine, base + kTerrainRtLayerTypeRva,
+            signature(kTerrainRtLayerTypeBytes,
+                      sizeof(kTerrainRtLayerTypeBytes)))
+        && tq::detour::matches(
+            engine, base + kTerrainPlugShaderWindowRva,
+            signature(kTerrainPlugShaderWindowBytes,
+                      sizeof(kTerrainPlugShaderWindowBytes),
+                      kTerrainPlugShaderWindowRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kTerrainBlockShaderWindowRva,
+            signature(kTerrainBlockShaderWindowBytes,
+                      sizeof(kTerrainBlockShaderWindowBytes)));
+    if (traceTerrain && runtimeBytes) {
+        g_terrainRtNumLayers = (TerrainRtNumLayersFn)(
+            base + kTerrainRtNumLayersRva);
+        g_terrainRtLayerType = (TerrainRtLayerTypeFn)(
+            base + kTerrainRtLayerTypeRva);
+    }
+
+    if (traceTerrain && runtimeBytes)
+        tq::detour::attach(
+            g_terrainRtLoadDetour, engine, base + kTerrainRtLoadRva,
+            signature(kTerrainRtLoadBytes, sizeof(kTerrainRtLoadBytes),
+                      kTerrainRtLoadRelocs, 1),
+            6, (const void*)&hookTerrainRtLoad,
+            (void**)&g_terrainRtLoad);
+
+    if (traceTerrain && runtimeBytes)
+        tq::detour::attach(
+            g_terrainRtLoadRenderDataDetour, engine,
+            base + kTerrainRtLoadRenderDataRva,
+            signature(kTerrainRtLoadRenderDataBytes,
+                      sizeof(kTerrainRtLoadRenderDataBytes),
+                      kTerrainRtLoadRenderDataRelocs, 2),
+            8, (const void*)&hookTerrainRtLoadRenderData,
+            (void**)&g_terrainRtLoadRenderData);
+
+    if (traceTerrain && runtimeBytes)
+        tq::detour::attach(
+            g_terrainRtPreloadDetour, engine,
+            base + kTerrainRtPreloadRva,
+            signature(kTerrainRtPreloadBytes,
+                      sizeof(kTerrainRtPreloadBytes),
+                      kTerrainRtPreloadRelocs, 1),
+            6, (const void*)&hookTerrainRtPreload,
+            (void**)&g_terrainRtPreload);
+
+    void* const loadTextures = resolve(
+        engine, kTerrainLoadTexturesName, kTerrainLoadTexturesRva);
+    void* const preloadTarget = resolve(
+        engine, kTerrainPreloadName, kTerrainPreloadRva);
+    const bool preloadVerified = preloadTarget
+        && tq::detour::matches(
+            engine, preloadTarget,
+            signature(kTerrainPreloadBytes, sizeof(kTerrainPreloadBytes),
+                      kTerrainPreloadRelocs, 1));
+    g_terrainPreloadEntry = preloadVerified
+        ? (TerrainPreloadFn)preloadTarget : nullptr;
+    g_terrainRtLoadTextures = (TerrainTypeLoadTexturesFn)loadTextures;
+    const bool loadTexturesPatched = loadTextures && preloadVerified
+        && (!traceTerrain || runtimeBytes)
+        && tq::detour::patchCall(
+            g_terrainRtLoadTexturesPatch, engine,
+            base + kTerrainRtLoadTexturesWindowRva,
+            signature(kTerrainRtLoadTexturesWindowBytes,
+                      sizeof(kTerrainRtLoadTexturesWindowBytes)),
+            kTerrainRtLoadTexturesCallOffset, loadTextures,
+            (const void*)&hookTerrainRtLoadTextures);
+
+    if (traceTerrain && runtimeBytes)
+        tq::detour::attach(
+            g_terrainPlugRenderDetour, engine,
+            base + kTerrainPlugRenderRva,
+            signature(kTerrainPlugRenderBytes,
+                      sizeof(kTerrainPlugRenderBytes),
+                      kTerrainPlugRenderRelocs, 1),
+            6, (const void*)&hookTerrainPlugRender,
+            (void**)&g_terrainPlugRender);
+
+    if (traceTerrain && runtimeBytes)
+        tq::detour::attach(
+            g_terrainBlockRenderDetour, engine,
+            base + kTerrainBlockRenderRva,
+            signature(kTerrainBlockRenderBytes,
+                      sizeof(kTerrainBlockRenderBytes),
+                      kTerrainBlockRenderRelocs, 1),
+            6, (const void*)&hookTerrainBlockRender,
+            (void**)&g_terrainBlockRender);
+
+    void* target = preloadTarget;
+    if (traceTerrain && target)
+        tq::detour::attach(
+            g_terrainPreloadDetour, engine, target,
+            signature(kTerrainPreloadBytes, sizeof(kTerrainPreloadBytes),
+                      kTerrainPreloadRelocs, 1),
+            6, (const void*)&hookTerrainPreload, (void**)&g_terrainPreload);
+
+    target = traceTerrain
+        ? resolve(engine, kTerrainSetShaderParamsName,
+                  kTerrainSetShaderParamsRva)
+        : nullptr;
+    if (traceTerrain && target)
+        tq::detour::attach(
+            g_terrainSetShaderParamsDetour, engine, target,
+            signature(kTerrainSetShaderParamsBytes,
+                      sizeof(kTerrainSetShaderParamsBytes),
+                      kTerrainSetShaderParamsRelocs, 1),
+            8, (const void*)&hookTerrainSetShaderParams,
+            (void**)&g_terrainSetShaderParams);
+
+    target = traceTerrain
+        ? resolve(engine, kTerrainSetGrassShaderParamsName,
+                  kTerrainSetGrassShaderParamsRva)
+        : nullptr;
+    if (traceTerrain && target)
+        tq::detour::attach(
+            g_terrainSetGrassShaderParamsDetour, engine, target,
+            signature(kTerrainSetGrassShaderParamsBytes,
+                      sizeof(kTerrainSetGrassShaderParamsBytes),
+                      kTerrainSetGrassShaderParamsRelocs, 1),
+            8, (const void*)&hookTerrainSetGrassShaderParams,
+            (void**)&g_terrainSetGrassShaderParams);
+
+    target = traceTerrain
+        ? resolve(engine, kTerrainRenderGroundName,
+                  kTerrainRenderGroundRva)
+        : nullptr;
+    if (traceTerrain && target)
+        tq::detour::attach(
+            g_terrainRenderGroundDetour, engine, target,
+            signature(kTerrainRenderGroundBytes,
+                      sizeof(kTerrainRenderGroundBytes),
+                      kTerrainRenderGroundRelocs, 1),
+            6, (const void*)&hookTerrainRenderGround,
+            (void**)&g_terrainRenderGround);
+
+    const bool traceOk = !traceTerrain || (runtimeBytes && g_terrainRtLoad
+        && g_terrainRtLoadRenderData && g_terrainRtPreload
+        && loadTexturesPatched && g_terrainPlugRender && g_terrainBlockRender
+        && g_terrainPreload && g_terrainSetShaderParams
+        && g_terrainSetGrassShaderParams && g_terrainRenderGround);
+    const bool preloadOk = !preloadLayers
+        || (loadTexturesPatched && preloadVerified);
+    const bool ok = traceOk && preloadOk;
+    if (!ok) {
+        tq::detour::detach(g_terrainRenderGroundDetour);
+        tq::detour::detach(g_terrainSetGrassShaderParamsDetour);
+        tq::detour::detach(g_terrainSetShaderParamsDetour);
+        tq::detour::detach(g_terrainPreloadDetour);
+        tq::detour::detach(g_terrainBlockRenderDetour);
+        tq::detour::detach(g_terrainPlugRenderDetour);
+        tq::detour::restoreCall(g_terrainRtLoadTexturesPatch);
+        tq::detour::detach(g_terrainRtPreloadDetour);
+        tq::detour::detach(g_terrainRtLoadRenderDataDetour);
+        tq::detour::detach(g_terrainRtLoadDetour);
+        g_terrainRenderGround = nullptr;
+        g_terrainSetGrassShaderParams = nullptr;
+        g_terrainSetShaderParams = nullptr;
+        g_terrainPreload = nullptr;
+        g_terrainPreloadEntry = nullptr;
+        g_terrainBlockRender = nullptr;
+        g_terrainPlugRender = nullptr;
+        g_terrainRtLoadTextures = nullptr;
+        g_terrainRtPreload = nullptr;
+        g_terrainRtLoadRenderData = nullptr;
+        g_terrainRtLoad = nullptr;
+        g_terrainRtLayerType = nullptr;
+        g_terrainRtNumLayers = nullptr;
+    }
+    g_terrainTracing = ok && traceTerrain;
+    g_terrainPreloadLayersActive = ok && preloadLayers;
+    if (traceTerrain) {
+        note("TerrainRT::Load", ok);
+        note("TerrainRT::LoadRenderData", ok);
+        note("TerrainRT::LoadRenderData -> TerrainType::LoadTextures", ok);
+        note("TerrainRT::PreLoad", ok);
+        note("TerrainPlug colour render", ok);
+        note("TerrainBlock colour render", ok);
+        note("TerrainType::PreLoad", ok);
+        note("TerrainType::SetShaderParams", ok);
+        note("TerrainType::SetGrassShaderParams", ok);
+        note("TerrainRenderInterfaceRT::RenderGround", ok);
+    } else {
+        note("Terrain layer semantic preload", ok);
+    }
+    return ok;
+}
+
 // Brackets the renderer's single directional-shadow build and tags resource
 // loads made synchronously inside it. The object field is verified separately
 // because patchCall's window proves the caller and callee, not the layout of
@@ -4809,6 +6177,12 @@ void readOptions(const wchar_t* iniPath) {
     g_shadowDeferColdAlpha = iniPath && iniPath[0]
         && GetPrivateProfileIntW(L"performance", L"shadow_defer_cold_alpha", 0,
                                  iniPath) != 0;
+    // Runtime TerrainRT creates layer texture Resources but omits the stock
+    // TerrainType semantic preload that would queue them. This fix invokes
+    // that stock non-blocking path at the exact post-LoadTextures boundary.
+    g_terrainPreloadLayers = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance", L"terrain_preload_layers", 0,
+                                 iniPath) != 0;
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -4821,8 +6195,8 @@ bool install(HMODULE engine) {
     // opens them:
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
-    // archive_cache_mb, async_level_load, shadow_transition_reuse and
-    // shadow_defer_cold_alpha add
+    // archive_cache_mb, async_level_load, shadow_transition_reuse,
+    // shadow_defer_cold_alpha and terrain_preload_layers add
     // independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
@@ -4834,10 +6208,11 @@ bool install(HMODULE engine) {
     const bool pumpFilter = g_pumpTimerMinMs != 0;
     const bool shadowReuse = g_shadowTransitionReuse;
     const bool shadowDefer = g_shadowDeferColdAlpha;
+    const bool terrainPreload = g_terrainPreloadLayers;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
     if (!g_tracing && !cache && !async && !pumpFilter && !shadowReuse
-        && !shadowDefer
+        && !shadowDefer && !terrainPreload
         && !marker)
         return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
@@ -4864,6 +6239,23 @@ bool install(HMODULE engine) {
                                           sizeof(DWORD)) ? mainThread : nullptr;
 
     g_installedHooks = 0;
+    g_outsideDirResourceTracing = false;
+    g_shadowMeshResourceTracing = false;
+    memset(g_outsideDirResourceReports, 0,
+           sizeof(g_outsideDirResourceReports));
+    InterlockedExchange(&g_outsideDirResourceSequence, 0);
+    InterlockedExchange(&g_outsideDirResourceReportedThrough, 0);
+    memset(g_shadowMeshResourceReports, 0,
+           sizeof(g_shadowMeshResourceReports));
+    InterlockedExchange(&g_shadowMeshResourceSequence, 0);
+    InterlockedExchange(&g_shadowMeshResourceReportedThrough, 0);
+    memset(g_terrainPreloadStates, 0, sizeof(g_terrainPreloadStates));
+    g_activeTerrainType = nullptr;
+    g_activeTerrainThread = 0;
+    g_activeTerrainPath = TerrainParameterNone;
+    g_activeTerrainMaterialIndex = -1;
+    g_terrainTracing = false;
+    g_terrainPreloadLayersActive = false;
     const bool shadowDeferReady = shadowDefer
         && prepareShadowAlphaDefer(engine);
     if (wants(kGroupLoads)) installLoads(engine);
@@ -4881,19 +6273,38 @@ bool install(HMODULE engine) {
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
+    const bool traceTerrain = wants(kGroupTerrain);
+    if (traceTerrain || terrainPreload)
+        installTerrain(engine, traceTerrain, terrainPreload);
     const bool traceShadow = wants(kGroupShadow);
     if (traceShadow || shadowReuse || shadowDeferReady)
         installShadow(engine, traceShadow);
     if (async) installAsyncLoad(engine);
 
+    // These columns and marker records mean exactly "main-thread
+    // LoadResource outside RenderDirectional, partitioned by Engine phase."
+    // Refuse the diagnostic unless every bracket and both Resource accessors
+    // are live; a missing hook must produce zeros rather than a false class.
+    g_outsideDirResourceTracing = g_loadResource && g_engineUpdate
+        && g_engineRender && g_shadowTracing && g_resourceStateVerified
+        && g_resourceFileNameVerified;
+    tq::hdr::log("Engine trace: outside-directional Resource attribution %s"
+                 "\r\n",
+                 g_outsideDirResourceTracing ? "active" : "unavailable");
+    g_shadowMeshResourceTracing = g_loadResource && g_shadowTracing
+        && g_resourceStateVerified && g_resourceFileNameVerified;
+    tq::hdr::log("Engine trace: directional cold-mesh retention %s\r\n",
+                 g_shadowMeshResourceTracing ? "active" : "unavailable");
+
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
                  " pump timer floor %u ms, shadow transition reuse %s,"
-                 " cold alpha-shadow defer %s,"
+                 " cold alpha-shadow defer %s, terrain layer preload %s,"
                  " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
                  g_pumpTimerMinMs, shadowReuse ? "requested" : "off",
                  shadowDefer ? "requested" : "off",
+                 terrainPreload ? "requested" : "off",
                  g_installedHooks,
                  (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
@@ -4902,6 +6313,11 @@ bool install(HMODULE engine) {
 }
 
 void shutdown() {
+    // Stop classification before removing any one of the three brackets it
+    // depends on. The game does not normally unload us, but explicit teardown
+    // must never turn a missing hook into an "outside directional" sample.
+    g_outsideDirResourceTracing = false;
+    g_shadowMeshResourceTracing = false;
     reportMessages();
     reportSlowLoads();
     // Safe to run before the block hook is unpatched: stop() clears the slab
@@ -4964,6 +6380,46 @@ void shutdown() {
     g_reusedLastShadow = false;
     g_shadowTracing = false;
     InterlockedExchange(&g_insideDirectional, 0);
+    InterlockedExchange(&g_insideEngineUpdate, 0);
+    InterlockedExchange(&g_insideEngineRender, 0);
+    tq::detour::detach(g_terrainRenderGroundDetour);
+    tq::detour::detach(g_terrainSetGrassShaderParamsDetour);
+    tq::detour::detach(g_terrainSetShaderParamsDetour);
+    tq::detour::detach(g_terrainPreloadDetour);
+    tq::detour::detach(g_terrainBlockRenderDetour);
+    tq::detour::detach(g_terrainPlugRenderDetour);
+    tq::detour::restoreCall(g_terrainRtLoadTexturesPatch);
+    tq::detour::detach(g_terrainRtPreloadDetour);
+    tq::detour::detach(g_terrainRtLoadRenderDataDetour);
+    tq::detour::detach(g_terrainRtLoadDetour);
+    g_terrainRenderGround = nullptr;
+    g_terrainSetGrassShaderParams = nullptr;
+    g_terrainSetShaderParams = nullptr;
+    g_terrainPreload = nullptr;
+    g_terrainPreloadEntry = nullptr;
+    g_terrainBlockRender = nullptr;
+    g_terrainPlugRender = nullptr;
+    g_terrainRtLoadTextures = nullptr;
+    g_terrainRtPreload = nullptr;
+    g_terrainRtLoadRenderData = nullptr;
+    g_terrainRtLoad = nullptr;
+    g_terrainRtLayerType = nullptr;
+    g_terrainRtNumLayers = nullptr;
+    g_terrainTracing = false;
+    g_terrainPreloadLayersActive = false;
+    g_activeTerrainType = nullptr;
+    g_activeTerrainThread = 0;
+    g_activeTerrainPath = TerrainParameterNone;
+    g_activeTerrainMaterialIndex = -1;
+    memset(g_terrainPreloadStates, 0, sizeof(g_terrainPreloadStates));
+    memset(g_outsideDirResourceReports, 0,
+           sizeof(g_outsideDirResourceReports));
+    InterlockedExchange(&g_outsideDirResourceSequence, 0);
+    InterlockedExchange(&g_outsideDirResourceReportedThrough, 0);
+    memset(g_shadowMeshResourceReports, 0,
+           sizeof(g_shadowMeshResourceReports));
+    InterlockedExchange(&g_shadowMeshResourceSequence, 0);
+    InterlockedExchange(&g_shadowMeshResourceReportedThrough, 0);
     tq::detour::restoreCall(g_enginesleepPatch);
     g_engineSleep = nullptr;
     tq::detour::restoreCall(g_objWaitMultiplePatch);
@@ -5057,6 +6513,7 @@ void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
 bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
 bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
 bool shadowDeferColdAlphaForTest() { return g_shadowDeferColdAlpha; }
+bool terrainPreloadLayersForTest() { return g_terrainPreloadLayers; }
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state) {
     return shouldDeferShadowAlpha(style, state);
 }
@@ -5093,6 +6550,108 @@ void countShadowResourceStateForTest(unsigned state, bool inQueue,
 }
 void countShadowResourceTypeForTest(const char* name, unsigned elapsedUs) {
     countShadowResourceType(shadowResourceType(name), elapsedUs);
+}
+void countOutsideDirResourceForTest(unsigned type, unsigned phase,
+                                    unsigned elapsedUs) {
+    const ShadowResourceType resourceType = type <= ShadowResourceTexture
+        ? (ShadowResourceType)type : ShadowResourceOther;
+    const OutsideDirResourcePhase resourcePhase =
+        phase < OutsideDirResourcePhaseCount
+            ? (OutsideDirResourcePhase)phase : OutsideDirResourceOther;
+    countOutsideDirResource(resourceType, resourcePhase, elapsedUs);
+}
+void outsideDirResourceResetForTest() {
+    memset(g_outsideDirResourceReports, 0,
+           sizeof(g_outsideDirResourceReports));
+    InterlockedExchange(&g_outsideDirResourceSequence, 0);
+    InterlockedExchange(&g_outsideDirResourceReportedThrough, 0);
+}
+void outsideDirResourceRememberForTest(unsigned frame) {
+    rememberOutsideDirResource(nullptr, nullptr, "test.msh", true, 0,
+                               ShadowResourceMesh, OutsideDirResourceRender,
+                               frame, 1000, nullptr, TerrainParameterNone, -1,
+                               TerrainPreloadSnapshot());
+}
+unsigned outsideDirResourceWindowForTest(unsigned markerFrame,
+                                         bool* truncated) {
+    const OutsideDirResourceWindow window =
+        outsideDirResourceWindow(markerFrame);
+    unsigned count = 0;
+    for (LONG sequence = window.first; sequence < window.total; ++sequence) {
+        const OutsideDirResourceReport& report = g_outsideDirResourceReports[
+            (unsigned)sequence % kOutsideDirResourceReportSlots];
+        if (outsideDirResourceInWindow(report, sequence, markerFrame)) ++count;
+    }
+    if (truncated) *truncated = window.truncated;
+    return count;
+}
+void shadowMeshResourceResetForTest() {
+    memset(g_shadowMeshResourceReports, 0,
+           sizeof(g_shadowMeshResourceReports));
+    InterlockedExchange(&g_shadowMeshResourceSequence, 0);
+    InterlockedExchange(&g_shadowMeshResourceReportedThrough, 0);
+}
+void shadowMeshResourceRememberForTest(unsigned frame) {
+    rememberShadowMeshResource(nullptr, nullptr, "test.msh", false, frame,
+                               1000);
+}
+unsigned shadowMeshResourceWindowForTest(unsigned markerFrame,
+                                         bool* truncated) {
+    const ShadowMeshResourceWindow window =
+        shadowMeshResourceWindow(markerFrame);
+    unsigned count = 0;
+    for (LONG sequence = window.first; sequence < window.total; ++sequence) {
+        const ShadowMeshResourceReport& report = g_shadowMeshResourceReports[
+            (unsigned)sequence % kShadowMeshResourceReportSlots];
+        if (shadowMeshResourceInWindow(report, sequence, markerFrame)) ++count;
+    }
+    if (truncated) *truncated = window.truncated;
+    return count;
+}
+void terrainPreloadResetForTest() {
+    memset(g_terrainPreloadStates, 0, sizeof(g_terrainPreloadStates));
+}
+void terrainPreloadRememberForTest(const void* terrain, bool includeTextures,
+                                   unsigned frame) {
+    rememberTerrainPreloadAtFrame(terrain, includeTextures, frame);
+}
+void terrainPreloadSnapshotForTest(const void* terrain, unsigned* trueCount,
+                                   unsigned* falseCount,
+                                   unsigned* lastTrueFramePlusOne,
+                                   unsigned* lastFalseFramePlusOne) {
+    const TerrainPreloadSnapshot snapshot = terrainPreloadSnapshot(terrain);
+    if (trueCount) *trueCount = snapshot.trueCount;
+    if (falseCount) *falseCount = snapshot.falseCount;
+    if (lastTrueFramePlusOne)
+        *lastTrueFramePlusOne = snapshot.lastTrueFramePlusOne;
+    if (lastFalseFramePlusOne)
+        *lastFalseFramePlusOne = snapshot.lastFalseFramePlusOne;
+}
+void terrainRtEventRememberForTest(const void* terrain, unsigned event,
+                                   unsigned frame) {
+    const TerrainRtEvent kind = event == 0 ? TerrainRtLoadAttach
+        : event == 1 ? TerrainRtLoadTextures : TerrainRtOwnerPreload;
+    rememberTerrainRtEventAtFrame(terrain, kind, frame);
+}
+void terrainRtEventSnapshotForTest(
+    const void* terrain, unsigned* attachCount, unsigned* attachFirst,
+    unsigned* attachLast, unsigned* texturesCount, unsigned* texturesFirst,
+    unsigned* texturesLast, unsigned* preloadCount, unsigned* preloadFirst,
+    unsigned* preloadLast) {
+    const TerrainPreloadSnapshot snapshot = terrainPreloadSnapshot(terrain);
+    if (attachCount) *attachCount = snapshot.rtLoadAttachCount;
+    if (attachFirst) *attachFirst = snapshot.rtLoadAttachFirstFramePlusOne;
+    if (attachLast) *attachLast = snapshot.rtLoadAttachLastFramePlusOne;
+    if (texturesCount) *texturesCount = snapshot.rtLoadTexturesCount;
+    if (texturesFirst)
+        *texturesFirst = snapshot.rtLoadTexturesFirstFramePlusOne;
+    if (texturesLast)
+        *texturesLast = snapshot.rtLoadTexturesLastFramePlusOne;
+    if (preloadCount) *preloadCount = snapshot.rtOwnerPreloadCount;
+    if (preloadFirst)
+        *preloadFirst = snapshot.rtOwnerPreloadFirstFramePlusOne;
+    if (preloadLast)
+        *preloadLast = snapshot.rtOwnerPreloadLastFramePlusOne;
 }
 void countShadowMaterialTextureForTest(bool known, bool used,
                                        unsigned elapsedUs) {
