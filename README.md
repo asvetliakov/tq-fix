@@ -24,7 +24,7 @@ it:
 - changes TQ's four cardinal bilinear shadow taps into the corners of an
   optimized 3x3 PCF footprint, scaled to hold edge softness constant as the
   projection widens.
-- progressively uploads large streamed terrain textures in bounded,
+- progressively uploads eligible large loose-file textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
 - can keep the final scene/post-process chain in FP16 and apply either a
   look-preserving Frostbite-style display mapper or a modern AgX-derived output
@@ -44,6 +44,45 @@ matched device/context hooks needed by the visual path, and the two DXBC
 transformers. Resolution-dependent AA targets are reused. The one place it
 reads back from the GPU is the grass crossing's fallback seed, a staging copy
 mapped without waiting a frame after a Present has carried it.
+
+## Stutter findings and fixes
+
+The problem was a noticeable pause when entering a new area during play:
+cold scene work arrived together instead of being spread across frames.
+This **in-play scene-transition burst** was not one slow shadow function
+or an established Wine-only problem. The evidence supports several interacting
+costs: synchronous cold-resource loads during directional-shadow gathering,
+runtime terrain layers whose textures were never semantically preloaded, and
+bursty first GPU participation across reflection and directional shadows.
+A slow later D3D draw can be where queued work is waited on, not where it
+originated. These engine paths also exist on native Windows; the measurements
+here were made on the supported CrossOver/DXMT installation.
+
+Our fix is to prepare resources earlier and spread secondary drawing across
+frames. The defaults queue and temporarily omit cold directional-shadow casters,
+avoid unused shadow texture dependencies, invoke the stock terrain-layer
+preload, and share an eight-new-object-per-frame draw-admission budget across
+reflection and directional shadow. Normal colour drawing remains unchanged;
+pending local shadows/reflections may appear later. This does not lower shadow
+resolution or undo the shadow-distance fix, and required no renderer rewrite.
+The separate 8 MiB archive cache remains enabled for its limited reuse benefit.
+
+In Runs 84 and 85 the user no longer noticed the old-route **play** hitch.
+Run 85's old-location transition was 40.117 ms CPU / 40.780 ms GPU, with no
+large postponed rebound; that is a route-specific result, not a promise of
+stutter-free loading or universally smooth play. All fixes operate with
+`performance_trace=0`. The module/trace-off refactor at `79ef3ab` passes
+off-game tests; its Run 87 game confirmation is still pending. See
+[research.md](research.md) for the evidence, trade-offs, and rejected explanations.
+
+The progressive texture uploader addresses a separate problem: submitting all
+mip data for a large texture in one creation call concentrates upload work.
+With `streaming=optimized`, eligible mapped **loose-file** textures start with
+a low-detail view while high-detail mip data uploads in frame-paced chunks;
+the full view returns when the job completes. This trades temporary softness
+for smaller upload steps. It does not progressively upload `.arc` textures,
+skip archive decompression, or replace the shadow/reflection admission fix.
+See [progressive texture uploading](#progressive-texture-uploading).
 
 ## Visual settings
 
@@ -637,16 +676,39 @@ that forces this log on through a build define (`TQ_FORCE_TRACE`) without
 requiring an INI change; its symbols and linker map remain under `build/debug`
 for resolving a reported crash offset.
 
-Streaming keeps the game's original level/entity preload distances. Large
-eligible BC1/BC2/BC3 terrain textures are created with their low mips ready
-immediately, then their high mips are uploaded progressively using an adaptive
-512 KiB–2 MiB frame budget. The original mapped archive data is retained only
-until those uploads finish, avoiding an extra texture-sized copy. Exact Engine
-and renderer build checks guard this path; any mismatch or resource-pressure
-condition falls back to the game's original synchronous upload. Use
-`streaming=original` to disable the optimization. The mod does not replace the
-resource thread or move D3D11 immediate-context work onto an unsafe worker
-thread.
+## Progressive texture uploading
+
+The problem: the game supplies an entire texture's mip chain to
+`CreateTexture2D` at once. Large initial-data uploads concentrate work on the
+calling thread and GPU queue. Moving resource loading to a worker alone does
+not make that GPU work disappear.
+
+The fix (`streaming=optimized`, the default): for eligible BC1/BC2/BC3
+textures on the verified mapped loose-file path, create the full-size texture
+with its small mips populated and substitute a low-detail shader view. That
+view starts at the first mip no larger than 512 pixels on either axis (or
+the last mip). Before each Present, upload one chunk of one pending job on
+the render thread. Restore the full view when all withheld mip data is ready.
+Visible textures can therefore look soft temporarily; final resolution is
+unchanged.
+
+The controller uses high-resolution timings to aim for roughly 3 ms of CPU
+time per upload step, adjusting within a 256 KiB–2 MiB range, with a smaller
+per-job ceiling for smaller textures. This is a feedback target, not a hard
+3 ms limit: source-page faults or a driver wait can still make a chunk slow.
+The timing drives the fix and remains active with `performance_trace=0`;
+optional reporting does not drive it.
+
+Reference-counted leases keep the loose file's mapping alive until the engine
+has finished with it and its upload jobs complete, avoiding another full-size
+source copy. This retains address space while jobs are pending. Despite old
+internal names containing “archive,” this path does **not** handle decompressed
+`.arc` texture payloads; those keep stock creation. Unsupported candidates,
+failed ownership checks, or unavailable job/lease capacity fall back to stock.
+Use `streaming=original` to disable this optimization. It preserves the game's
+level/entity preload distances and does not move D3D11 immediate-context work
+to a worker thread. This uploader and the secondary-pass object budget address
+different stages; neither is a replacement for the other.
 
 Set `[debug] frame_overlay=1` to show a frame-pacing overlay for A/B tests
 (the key's old `[performance]` home is still honoured). It reports
