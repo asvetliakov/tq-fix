@@ -72,34 +72,28 @@ peak_nits=auto
 
 [performance]
 streaming=optimized
-loose_texture_max=0
-archive_cache_mb=0
-async_level_load=0
-timer_period_ms=0
-pump_timer_min_ms=0
-shadow_transition_reuse=0
-shadow_defer_cold_alpha=0
-shadow_defer_cold_actor_pose=0
-terrain_preload_layers=0
-reflection_defer_admission_mesh=0
-reflection_defer_admission_all=0
-secondary_pass_admission_budget=0
+loose_texture_max=4096
+archive_cache_mb=8
+shadow_defer_cold_resources=1
+shadow_defer_cold_actor_pose=1
+terrain_preload_layers=1
+secondary_pass_admission_budget=8
 
 [debug]
 frame_overlay=0
 trace=0
 performance_trace=0
 engine_trace=1
-draw_timing=0
 stutter_marker=0
 ```
 
 `loose_texture_max` refuses a loose texture whose base level is larger than
 the given number of pixels on either side, so the game falls back to its own
-copy from the `.arc` archives. It is off at `0`, which is stock behaviour, and
-it exists for high-resolution texture packs: one measured install carries 984
-loose textures over 4096 on a side, up to 16384x16384 and 341 MiB for a single
-file, and although they are only 7.9% of its files they are 46% of its bytes.
+copy from the `.arc` archives. It defaults to `4096`; `0` restores stock loose-
+file selection. This exists for high-resolution texture packs: one measured
+install carries 984 loose textures over 4096 on a side, up to 16384x16384 and
+341 MiB for a single file, and although they are only 7.9% of its files they
+are 46% of its bytes.
 The archive copies of those same assets total 6.4% of the size. Setting
 `loose_texture_max=4096` keeps every 4K and smaller asset from the pack and
 takes the rest from the archive; a texture with no archive copy is simply not
@@ -120,8 +114,9 @@ Greece -- 4.4 and 2.1 seconds of a hundred-second session, all of it inside the
 game's render pass.
 
 The value is a size in MiB, up to 256, held as a fixed slab of 256 KiB slots
-with a clock victim. At `0`, the default, nothing is allocated and the block
-routine is left exactly as the game ships it. A `verify` suffix --
+with a clock victim. It defaults to the measured useful ceiling of `8`; at
+`0`, nothing is allocated and the block routine is left exactly as the game
+ships it. A `verify` suffix --
 `archive_cache_mb=8verify` -- commits the slab but never serves from it: every
 block is read and inflated by the engine as usual and then compared, byte for
 byte, against what the cache holds for it. That run costs what an uncached run
@@ -138,19 +133,19 @@ quarter-gigabyte cache resident, 91.8% of requests are for a block nothing has
 seen before: the amplification is mostly blocks being *partly consumed* and
 never asked for again, which no cache of any size recovers.
 
-If you want it on, `archive_cache_mb=8verify` with `[debug] trace=1` and no
-`performance_trace` is worth a few hours of ordinary play first: the cache
-installs on its own, never serves, and compares every block byte for byte
-against what the engine produced, so it proves itself on your own routes
-before it is trusted with them. Its log reports back off after the eighth, so
-a long session writes about a kilobyte.
+Before trusting the default on a different executable or archive set,
+`archive_cache_mb=8verify` with `[debug] trace=1` and no `performance_trace`
+is worth a few hours of ordinary play: the cache installs on its own, never
+serves, and compares every block byte for byte against what the engine
+produced. Its log reports back off after the eighth, so a long session writes
+about a kilobyte. `archive_cache_mb=0` remains the immediate stock-path
+rollback.
 
 What reuse there is clusters in the frames that hurt — 19.4% of blocks in the
 archive-heaviest frame against 8.2% overall — and nearly all of it fits in 32
 slots, so `archive_cache_mb=8` captures most of the available benefit and
 larger values are close to pointless. Expect roughly a ninth off the single
-worst frame of a session and about 0.15% of wall clock. It defaults to `0`,
-and that default is a fair reflection of the measurement.
+worst frame of a session and about 0.15% of wall clock.
 
 The cache is keyed on the archive, the open file handle, and the block's
 offset, compressed size and decompressed size -- all five read out of the
@@ -160,58 +155,8 @@ the performance probe on, `arc_cache_hit` against `engine_arc_blocks` is the
 result, `arc_cache_evict` says whether the slab is too small, and
 `arc_cache_bad` must be zero.
 
-`async_level_load` retargets the three call sites that force a synchronous
-`Region::LoadLevel` at `Region::BackgroundLoadLevel`, the engine's own
-asynchronous entry point, which raises the same `region+0x74` flag each of
-those sites already tests and branches on.
-
-**It defaults to `0`, installs nothing at `0`, and on the measured route it is
-worth nothing at `1` either.** That is four sessions of measurement rather
-than an estimate. The two renderer sites (`AddElementsInBox`) and the portal
-site between them were reached 4,191 times in one session and found the region
-already resident every single time. The game's own `RegionLoader` keeps ahead
-of the player, so ordinary traversal -- some 200,000 `Region::LoadLevel` calls
-a session -- is already asynchronous and costs 2 to 6 milliseconds in total.
-
-The one place it can ever pay is portal traversal, the region beyond a
-doorway: 105.7 ms, seen once in five sessions. That site is included and is
-the safest of the three, because `Region::GetPortal`'s result is null-checked
-immediately after the branch, so the code past it already copes with a region
-that did not load.
-
-It does nothing for the multi-second freeze when a save is loaded from the
-menu. That one is a full `World::Load` and a player spawn, and the level it
-forces is the region the character is about to be placed in -- deferring it
-would put them down before the floor beneath them exists. Only about a third
-of that frame is the level load at all.
-
-It is kept because it is verified and free: every byte of the three call
-windows, `BackgroundLoadLevel`'s own behaviour and the offsets they share are
-re-checked against the installed `Engine.dll` before anything is written, and
-a mismatch anywhere leaves the game byte-identical to `0`. The trade at `1` is
-pop-in at a doorway.
-
-With the performance probe on, `engine_async_load` / `engine_async_sync` count
-the two renderer sites and `engine_portal_async_load` /
-`engine_portal_async_sync` the portal one, kept apart because the deferral
-counts are expected to stay at zero and the fall-through counts are the
-evidence that the sites were reached at all.
-
-`shadow_transition_reuse=1` targets the outdoor-transition shadow/loading
-burst without changing shadow distance. When the directional-shadow context's
-verified region pointer changes, it retains the previous global depth map and
-copies back that map's matching 64-byte receiver matrix for one frame, then
-renders normally on the following frame. It defaults to `0` and installs
-nothing at `0`; at `1` it works with the performance probe off and brings no
-trace group with it. With tracing enabled, `engine_shadow_reuse` confirms the
-one skipped build. This is deliberately separate from `shadow_split`, which
-remains the necessary shadow-distance feature. Run 47 rejected this experiment:
-the stale map visibly flickers and the complete build is merely paid on the
-following frame. Leave it at `0`; the switch remains only to preserve the exact
-measured experiment.
-
-`shadow_defer_cold_alpha=1` changes only exact `GraphicsMeshInstance` casters
-in the directional shadow map. Before the engine can even ask for shadow
+`shadow_defer_cold_resources=1` changes only exact `GraphicsMeshInstance`
+casters in the directional shadow map. Before the engine can even ask for shadow
 style, it synchronously ensures the root mesh merely to read its pass count.
 A root mesh that is still unloaded or loading now makes that caster report
 zero passes; an unloaded mesh is explicitly queued through the engine's normal
@@ -231,7 +176,7 @@ same instance has a distinct non-null base override that the verified stock
 path immediately ensures and binds to the same Name. The normal colour pass is
 unchanged, and a shadow shader that does use the bump texture still takes the
 stock path. The temporary alpha trade is a missing cutout shadow rather than
-solid-looking foliage or a missing visible object. It defaults to `0`, works
+solid-looking foliage or a missing visible object. It defaults to `1`, works
 with the performance probe off, and installs no trace group by itself.
 Run 51 found no visible flicker or shadow popping from the texture omission.
 Run 59 then removed every directional-shadow texture load in play, leaving
@@ -250,7 +195,7 @@ queue, or the new queue link is confirmed. If queuing cannot be confirmed—or
 if the request makes the root resident immediately—it runs the stock pose
 update instead. The existing exact-class root gate then omits a confirmed-cold
 caster until residency reaches state 2. It implies the complete
-`shadow_defer_cold_alpha` patch set, defaults to `0`, works with the performance
+`shadow_defer_cold_resources` patch set, defaults to `1`, works with the performance
 probe off, and installs no trace group by itself. Color rendering, point
 shadows, resident actors, and every other `Actor::UpdateMeshInstance` caller
 remain stock. With tracing enabled, the `engine_shadow_actor_pose_*` count
@@ -264,28 +209,11 @@ bump, and grass texture Resources during loading, but `TerrainRT::PreLoad`
 never queues those layer Resources. The switch retargets the exact existing
 `LoadTextures` call: after the original returns, it calls the game's stock
 `TerrainType::PreLoad(true)` on that same object. That method uses the normal
-background ResourceLoaders and does not wait. The switch defaults to `0`,
+background ResourceLoaders and does not wait. The switch defaults to `1`,
 works with the performance probe off, and installs no trace group by itself.
 It does not omit colour or shadows, change culling, or replace resource
 loading; it moves the texture queue request from first colour use to the point
 where those Resources first exist.
-
-`reflection_defer_admission_mesh=1` stages one exact first-use reflection
-class. When a water-reflection `BuildScene` creates at least 32 D3D buffers,
-resident `GraphicsMeshInstance` draws are omitted only from its immediately
-following `RenderLightStyle`. The normal colour pass later in the same
-recursive branch remains stock, and mesh reflection returns automatically on
-the next frame. Terrain reflection, ordinary reflection frames, shadows,
-culling, and resource loading are unchanged. The switch defaults to `0`,
-works with the performance probe off, and installs no trace group by itself.
-
-`reflection_defer_admission_all=1` uses the same transition boundary but
-omits the entire immediately following reflection `RenderLightStyle` once.
-The reflection target can retain its preceding contents for that frame;
-terrain and mesh reflection both return on the next frame. Directional
-shadows, the main colour pass, culling, and loading are unchanged. This switch
-also defaults to `0`, works with the performance probe off, and installs no
-trace group by itself.
 
 `secondary_pass_admission_budget=N` progressively admits first-use objects to
 reflection and directional-shadow drawing. The two secondary consumers share
@@ -296,30 +224,25 @@ self-arms deferral without requiring a reflection-buffer or shadow-region
 signal. Deferred renderables still run their ordinary Resource and material
 preparation, but their `Draw`/`DrawIndexed` calls wait for a later frame's
 slot, so postponed GPU first use does not return as one lump on the next
-consumer. Normal colour rendering remains unchanged. `0` is stock/off;
-accepted positive values are `1` through `64`. The switch works with the
-performance probe off, requests only its two required D3D draw hooks, and
-installs no trace group by itself.
+consumer. Normal colour rendering remains unchanged. It defaults to `8`; `0`
+is stock/off; accepted positive values are `1` through `64`. The switch works
+with the performance probe off, requests only its two required D3D draw hooks,
+and installs no trace group by itself.
+
+Rejected experimental behavior keys have been removed from the current
+configuration interface: `async_level_load`, `timer_period_ms`,
+`pump_timer_min_ms`, `shadow_transition_reuse`,
+`reflection_defer_admission_mesh`, and `reflection_defer_admission_all`. The
+first three did not improve their measured class; whole-map shadow reuse
+flickered and deferred the cost; and both one-consumer reflection omissions
+moved work without changing the felt stutter. Their findings and old CSV
+columns remain as the historical record, but old INI entries are ignored.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
 `shadows=original`, which restores every shadow path at once. The in-game AA
 toggle remains authoritative: SMAA replaces the FXAA draw only while the game
 has AA enabled. Shadow Quality should remain High for the intended result.
-
-`pump_timer_min_ms` keeps `WM_TIMER` out of the game's unfiltered
-`PeekMessageA` except once every that many milliseconds; every other poll asks
-for everything below the timer and then everything above it. It is off at `0`.
-It exists because the message pump is the only in-play stutter class that GPU
-settings do not touch -- 7-21 frames a minute of 60-225 ms with `Engine::Render`
-under 15 ms -- and because the cost is the *retrieval*, not the asking: one
-measured frame spent 221,249 us in the two peeks that returned a message and
-1 us in the one that came back empty, and 76% of slow retrievals return
-`WM_TIMER`, which `PeekMessage` synthesizes on demand rather than dequeues. The
-game still receives `WM_TIMER`; at the 14.2 a second measured, a floor of 50 ms
-leaves its cadence intact while cutting unfiltered peeks from a couple of
-hundred a second to twenty. `pump_timer_full` and `pump_timer_split` count
-which path each poll took. Values above 1000 are refused rather than clamped.
 
 `shadow_split` sets how far the directional map reaches; coverage scales as
 `split^1.90`, so a wider split costs texel density and `shadow_map_scale`
@@ -442,9 +365,10 @@ naming how far every field sat from its own median over the preceding sixty
 frames -- which is the part that names the cause; the file grows by a few
 hundred bytes per hitch, so this mode is cheap enough to leave on.
 `performance_trace=full` writes every frame instead, tens of KB a second with
-the current columns, for a measurement session. At `0`, the default, nothing
-is measured, allocated, or written; what remains compiled in is one branch per
-instrumented call site.
+the current columns, for a measurement session. Full mode also times the
+game's high-frequency `Draw`, `DrawIndexed`, and `Map` calls; hitch-only mode
+does not. At `0`, the default, nothing is measured, allocated, or written;
+what remains compiled in is one branch per instrumented call site.
 
 `tools/frames.py cache/run.csv` summarizes one or more runs: the frame-time
 distribution split into menu, the load-game frame, loading screen, first world
@@ -453,18 +377,12 @@ the hitches and what it cost above its own baseline. World entry is the first
 frame with `draw_indexed` of 500 or more; the loading screen draws one indexed
 primitive a frame, so a whole-file median describes none of those five parts.
 
-`draw_timing=1` adds two columns, `draw_submit_ms` and `map_resource_ms`,
-bracketing the game's own `Draw`/`DrawIndexed` and `Map` -- the driver call
-itself, not the surrounding hook. These are the *game's* time, not the mod's,
-and `tools/frames.py` reports them separately for that reason. It is off by
-default because those hooks run 1,500 to 2,700 times a frame and a
-`QueryPerformanceCounter` pair on each is not free; it does nothing without
-`performance_trace`, and the CSV records which it was in a `# draw_timing=`
-header line so a zero column can be told from an unarmed one. It exists to
-split the residual in `research/streaming/findings.md` §35: on the in-play
-stutter frame, 29-54% of `Engine::Render` is left over after the game's own
-resource loader and every other named cost, and these two columns say whether
-that time is inside the D3D11 calls or in the game's code between them.
+Full mode's `draw_submit_ms` and `map_resource_ms` columns bracket the driver
+calls themselves, not the surrounding hook. These are the *game's* time, not
+the mod's, and `tools/frames.py` reports them separately for that reason. The
+CSV retains a `# draw_timing=` header so old and new runs can distinguish a
+zero measurement from an unarmed high-frequency clock. There is no separate
+setting now: selecting full measurement selects the complete measurement.
 
 `stutter_marker=1` adds a `stutter_marker` column. Press `F12` immediately
 after you notice a stutter; you do not need to catch it while it is happening.
@@ -634,18 +552,12 @@ miss, so a cached session's amplification is still comparable to an uncached
 one's; `engine_arc_inflate_us` then covers only the blocks that were actually
 read and inflated.
 
-The four `engine_*async*` columns do the same job for `async_level_load`:
-between them they are every call the retargeted sites make. The renderer pair
-reading zero deferrals is not a fault -- it is the measurement that says
-ordinary traversal is already asynchronous.
-
 Those columns come from instrumentation written into `Engine.dll`'s own code,
 so they are gated twice: no *instrument* is installed unless
 `performance_trace` is on **and** `engine_trace` is not `0`, which means a
-normal boot is byte-identical to a build without any of it. The two fixes that
-live in the same file -- `archive_cache_mb` and `async_level_load` -- are the
-exception, and only in one direction: they install with the probe off, because
-they change the game rather than measure it, and they bring none of the
+normal boot installs none of the trace groups. The behavior fixes in the same
+file—archive caching, cold-shadow-resource deferral, terrain-layer preload,
+and secondary-pass admission—install with the probe off and bring none of the
 instrument with them. Every site is resolved by its exported name,
 checked against the address the audited build puts it at, and matched against
 16 to 24 bytes before 4 to 7 are written; a mismatch skips that one hook and
@@ -678,9 +590,9 @@ silently folded into the named classes. Selecting `131072` therefore installs
 the directional and deferred scope brackets as dependencies, while still
 changing no rendering choice.
 
-When the terrain (`32768`) and reflection (`131072`) groups are selected with
-`draw_timing=1`—as they are under `engine_trace=1`—the trace can arm one sparse
-reflection-only GPU subdivision. An exact second-manager/first-plane
+When the terrain (`32768`) and reflection (`131072`) groups are selected in a
+full measurement run—as they are under `engine_trace=1`—the trace can arm one
+sparse reflection-only GPU subdivision. An exact second-manager/first-plane
 `BuildScene` lasting at least 2 ms selects the following whole
 `RenderLightStyle`. `gpu_chunk_reflection_00` through `_15` continuously cover
 draws 1--320 in 20-draw intervals, including work issued between adjacent
@@ -694,16 +606,6 @@ unexported terrain hooks; the mesh call is its exact exported virtual override.
 Directional shadow opens no chunk query and receives no executor patch.
 Ordinary frames open none of these queries; collision, draw overflow, and
 renderable-call overflow are explicit.
-
-`timer_period_ms` is an experiment attached to that trace rather than a
-setting to leave on. Three quarters of the slow message retrievals measured on
-this install return `WM_TIMER`, which is synthesized rather than queued -- so
-retrieving it means asking the host whether a timer expired, and under
-CrossOver that ask is the expensive part. At `0`, the default, the game's own
-period is used and the build is byte-identical to not having the option. Any
-other value (up to 1000) replaces the period `TQ.exe` asks for, so a run can
-test whether the stalls scale with the timer rate. It only takes effect while
-the engine trace is installed.
 
 The `512`, `1024`, `2048`, `4096` and `8192` groups patch nothing at all: they
 redirect entries of an import address table, so each is scoped to the one

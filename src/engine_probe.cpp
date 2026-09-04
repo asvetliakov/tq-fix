@@ -460,7 +460,7 @@ const Relocation kBaseTextureNameInitWindowRelocs[] = {
 // return address is still on the stack. Run 52 scans only that committed stack
 // region and compares exact return RVAs; indirect or unrecognized paths remain
 // in an explicit bucket. The existing material E8 at 0x169cab is represented
-// by a dynamic bracket because shadow_defer_cold_alpha has already retargeted
+// by a dynamic bracket because shadow_defer_cold_resources has already retargeted
 // it before the load occurs.
 const DWORD kShadowTextureDirectCallerRvas[] = {
     0x1159ed, // FUN_101155b0
@@ -943,7 +943,7 @@ const BYTE kEnqueueBytes[] = {
 const Relocation kEnqueueRelocs[] = {{3, 0x2a2e86}};
 
 // BaseResourceManager's stock preload path supplies the exact tuple reused by
-// the cold-alpha fix: priority 1, notify=true, immediate=false. This window is
+// the cold-resource fix: priority 1, notify=true, immediate=false. This window is
 // verified as behaviour, not patched.
 const DWORD kPreloadResourceRva = 0x1200e0;
 const char kPreloadResourceName[] =
@@ -1985,48 +1985,20 @@ const unsigned kGroupDeferredPasses = 0x10000;
 const unsigned kGroupReflections = 0x20000;
 
 unsigned g_traceMask = 1;
-unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
-// [performance] pump_timer_min_ms. A game-behaviour change rather than an
-// instrument, so like archive_cache_mb and async_level_load it defaults off,
-// installs nothing at 0, and reaches install() with the performance probe off.
-//
-// What it is for. Across runs 34-37 the message pump is the only in-play
-// stutter class the GPU work does not touch: 7-21 frames a minute of 60-225 ms
-// with Engine::Render under 15 ms, 1.3-3.2 seconds of stall per minute of play.
-// The cost is not "asking the host" -- an empty poll is 1 us. It is the
-// retrieval: run 35's frame 5303 spent 221,249 us in the two peeks that
-// returned a message and 1 us in the one that did not. §16 found 76% of slow
-// retrievals return WM_TIMER, which PeekMessage *synthesizes* when the queue is
-// otherwise empty and a timer has expired, rather than dequeues.
-//
-// So the lever §17 did not try: keep WM_TIMER out of the peek's range on most
-// calls, and let an unfiltered peek -- the only kind that can synthesize one --
-// through no more than once every pump_timer_min_ms. The game still receives
-// WM_TIMER, just not on every poll; at the 14.2 a second §16 measured, a floor
-// of 50 ms leaves the cadence essentially intact while cutting unfiltered peeks
-// from a couple of hundred a second to twenty.
-//
-// If the stalls follow the unfiltered peek, this is the lever. If they simply
-// move to the other messages, the pump really is a host property and §17's
-// closure stands -- which is worth one boot either way.
-unsigned g_pumpTimerMinMs;  // 0 = never filter, the stock pump
+// Rejected behavior experiments remain compile-time off while their trace
+// machinery and CSV columns stay available for reading the archived runs.
+constexpr unsigned g_timerPeriodMs = 0;
+constexpr unsigned g_pumpTimerMinMs = 0;
 LONG g_pumpLastFullTick;    // GetTickCount of the last unfiltered peek
-// [performance] async_level_load. A game-behaviour change rather than an
-// instrument, so like archive_cache_mb it defaults off, installs nothing at
-// 0, and reaches install() with the performance probe off.
-bool g_asyncLevelLoad;
-// [performance] shadow_transition_reuse. On a directional shadow region
-// change, preserve the previous global depth map and explicitly restore its
-// matching matrix for one frame. A fix rather than an instrument: defaults
-// off, reaches install() with the probe off, and does no timing in that mode.
-bool g_shadowTransitionReuse;
-// [performance] shadow_defer_cold_alpha. Exact GraphicsMeshInstance casters
+constexpr bool g_asyncLevelLoad = false;
+constexpr bool g_shadowTransitionReuse = false;
+// [performance] shadow_defer_cold_resources. Exact GraphicsMeshInstance casters
 // whose root mesh is not resident are omitted before their pass count is read;
 // alpha-tested casters whose base texture is not resident are omitted later at
 // the record boundary. State-0 dependencies are explicitly handed to the
 // engine's loader and return after reaching state 2. Colour rendering and
 // resident casters are untouched.
-bool g_shadowDeferColdAlpha;
+bool g_shadowDeferColdResources;
 bool g_shadowDeferActive;
 // [performance] shadow_defer_cold_actor_pose. Run 68 resolves a still-earlier
 // synchronous root-mesh dependency in the exact Actor::AddToScene class.
@@ -2043,16 +2015,13 @@ bool g_shadowActorPoseDeferActive;
 bool g_terrainPreloadLayers;
 bool g_terrainPreloadLayersActive;
 bool g_terrainTracing;
-// [performance] reflection_defer_admission_mesh. The exact reflection
-// BuildScene call is the only writer, and CreateBuffer observes it on the same
-// render thread. A fixed count is preferable to a machine-dependent elapsed
-// time: the marked transition population was 63--172 buffers in seven
-// independent runs, while the largest neighbouring population was 30.
+// The rejected reflection-omission experiments stay disabled. Their trace
+// fields retain their positions so archived CSVs remain schema-compatible.
 const unsigned kReflectionAdmissionBufferThreshold = 32;
 const unsigned kSecondaryPassAdmissionBudgetMax = 64;
-bool g_reflectionDeferAdmissionMesh;
+constexpr bool g_reflectionDeferAdmissionMesh = false;
 bool g_reflectionDeferAdmissionMeshActive;
-bool g_reflectionDeferAdmissionAll;
+constexpr bool g_reflectionDeferAdmissionAll = false;
 bool g_reflectionDeferAdmissionAllActive;
 // [performance] secondary_pass_admission_budget. Unlike the rejected
 // one-consumer omissions, this keeps resource/material preparation in place
@@ -7767,7 +7736,7 @@ bool verifyResourceStateLayout(HMODULE engine) {
     return ok;
 }
 
-// Resolve and verify every function the cold-alpha fix calls before any entry
+// Resolve and verify every function the cold-resource fix calls before any entry
 // detour can replace their first bytes. The enqueue export is also used by the
 // load trace, which installs earlier than the shadow call-site patch.
 bool prepareShadowAlphaDefer(HMODULE engine) {
@@ -9028,7 +8997,7 @@ bool installShadow(HMODULE engine, bool trace) {
         g_renderDirectional = nullptr;
     }
     note("GraphicsShadowMapDx11::RenderDirectional", ok);
-    if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {
+    if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {
         const bool recordOk = g_buildShadowRecord
             && tq::detour::patchCall(
                 g_shadowRecordPatch, engine,
@@ -9457,7 +9426,7 @@ void noteDeferredBufferCreated(
 }
 
 bool reflectionAdmissionBufferTrackingRequested() {
-    return g_reflectionDeferAdmissionMesh || g_reflectionDeferAdmissionAll;
+    return false;
 }
 
 bool secondaryPassAdmissionRequested() {
@@ -9474,87 +9443,37 @@ void readOptions(const wchar_t* iniPath) {
     g_traceMask = iniPath && iniPath[0]
         ? (unsigned)GetPrivateProfileIntW(L"debug", L"engine_trace", 1, iniPath)
         : 1u;
-    // A game-behaviour change, so it lives under [performance] and defaults
-    // to leaving the game alone. Clamped: a period of zero would be a request
-    // for the system minimum, and anything over a second would stop whatever
-    // the timer drives rather than slow it.
-    const int period = iniPath && iniPath[0]
-        ? GetPrivateProfileIntW(L"performance", L"timer_period_ms", 0, iniPath)
-        : 0;
-    g_timerPeriodMs = period > 0 && period <= 1000 ? (unsigned)period : 0u;
-    // Makes the two renderer-forced level loads asynchronous. The same kind
-    // of key as timer_period_ms and archive_cache_mb -- a game-behaviour
-    // change under [performance], defaulting to leaving the game alone -- but
-    // like archive_cache_mb and unlike timer_period_ms it is a fix rather
-    // than an experiment, so install() lets it in without the trace.
-    g_asyncLevelLoad = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance", L"async_level_load", 0,
-                                 iniPath) != 0;
-    // Keeps WM_TIMER out of the game's unfiltered peek except once every this
-    // many milliseconds. Like archive_cache_mb and async_level_load it is a
-    // fix rather than an experiment, so install() lets it in without the
-    // trace. Clamped to a second: beyond that the game's timer cadence is
-    // being changed rather than its polling, which is a different experiment
-    // and one §17 already refused.
-    const int floorMs = iniPath && iniPath[0]
-        ? GetPrivateProfileIntW(L"performance", L"pump_timer_min_ms", 0,
-                                iniPath)
-        : 0;
-    g_pumpTimerMinMs = floorMs > 0 && floorMs <= 1000 ? (unsigned)floorMs : 0u;
     g_pumpLastFullTick = (LONG)GetTickCount();
-    // Reuses the last complete directional depth-map/matrix pair for exactly
-    // one call when the shadow context's region pointer changes. Unlike the
-    // trace group, this is a game-behaviour change and must work with the
-    // performance probe off.
-    g_shadowTransitionReuse = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance", L"shadow_transition_reuse", 0,
-                                 iniPath) != 0;
-    // Omits only alpha-tested GraphicsMeshInstance shadow records while their
-    // base texture is in loaded state 0 or 1, explicitly queueing state 0.
-    // This is a behaviour fix, not an instrument, so it also works with the
-    // performance probe off and defaults to leaving the engine untouched.
-    g_shadowDeferColdAlpha = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance", L"shadow_defer_cold_alpha", 0,
+    // The accepted directional-shadow mitigation is enabled by default. It
+    // covers cold root meshes for opaque and alpha-tested casters, cold alpha
+    // base textures, and texture inputs absent from the active shadow shader.
+    g_shadowDeferColdResources = !iniPath || !iniPath[0]
+        || GetPrivateProfileIntW(L"performance",
+                                 L"shadow_defer_cold_resources", 1,
                                  iniPath) != 0;
     // Moves the same cold-root decision earlier for the exact
     // Actor::AddToScene -> Actor::UpdateMeshInstance call proved by Run 68.
     // Enabling it implies the later complete shadow-defer patch set, because
     // the early skip is safe only when the cold renderable is then omitted.
-    g_shadowDeferColdActorPose = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance",
-                                 L"shadow_defer_cold_actor_pose", 0,
+    g_shadowDeferColdActorPose = !iniPath || !iniPath[0]
+        || GetPrivateProfileIntW(L"performance",
+                                 L"shadow_defer_cold_actor_pose", 1,
                                  iniPath) != 0;
     // Runtime TerrainRT creates layer texture Resources but omits the stock
     // TerrainType semantic preload that would queue them. This fix invokes
     // that stock non-blocking path at the exact post-LoadTextures boundary.
-    g_terrainPreloadLayers = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance", L"terrain_preload_layers", 0,
+    g_terrainPreloadLayers = !iniPath || !iniPath[0]
+        || GetPrivateProfileIntW(L"performance", L"terrain_preload_layers", 1,
                                  iniPath) != 0;
-    // A transition-sized reflection scene is identified by an exact count of
-    // successful D3D buffer creations during BuildScene, not by elapsed time.
-    // The immediately following mesh-instance reflection calls are omitted;
-    // normal color later in the same branch and the next reflection are stock.
-    g_reflectionDeferAdmissionMesh = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance",
-                                 L"reflection_defer_admission_mesh", 0,
-                                 iniPath) != 0;
-    // Run 81 proved that omitting all 87 GraphicsMeshInstance calls left the
-    // marked burst and its terrain-only reflection GPU interval intact.  This
-    // stronger A/B skips that one whole RenderLightStyle call, so terrain and
-    // mesh reflection both return together on the following frame.
-    g_reflectionDeferAdmissionAll = iniPath && iniPath[0]
-        && GetPrivateProfileIntW(L"performance",
-                                 L"reflection_defer_admission_all", 0,
-                                 iniPath) != 0;
-    // Zero is stock. A positive value is an object-identity budget, not a
+    // A positive value is an object-identity budget, not a
     // millisecond target, so the same recorded population is treated the same
     // on native Windows and Wine. Values above the audited bound are refused
     // rather than silently turning this into effectively unbounded admission.
     const int secondaryBudget = iniPath && iniPath[0]
         ? GetPrivateProfileIntW(L"performance",
-                                L"secondary_pass_admission_budget", 0,
+                                L"secondary_pass_admission_budget", 8,
                                 iniPath)
-        : 0;
+        : 8;
     g_secondaryPassAdmissionBudget = secondaryBudget > 0
         && secondaryBudget <= (int)kSecondaryPassAdmissionBudgetMax
         ? (unsigned)secondaryBudget : 0u;
@@ -9570,37 +9489,29 @@ bool install(HMODULE engine) {
     // opens them:
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
-    // archive_cache_mb, async_level_load, shadow_transition_reuse,
-    // shadow_defer_cold_alpha, shadow_defer_cold_actor_pose,
-    // terrain_preload_layers, reflection_defer_admission_mesh,
-    // reflection_defer_admission_all, and secondary_pass_admission_budget add
-    // independent ways in
+    // archive_cache_mb, shadow_defer_cold_resources,
+    // shadow_defer_cold_actor_pose, terrain_preload_layers, and
+    // secondary_pass_admission_budget add independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
     // wants() below refuses every trace group when g_tracing is false, so
     // none of them brings the rest of the instrument along. The marker also
     // installs only the existing PeekMessage import wrapper.
     const bool cache = tq::arccache::configured();
-    const bool async = g_asyncLevelLoad;
-    const bool pumpFilter = g_pumpTimerMinMs != 0;
-    const bool shadowReuse = g_shadowTransitionReuse;
     const bool shadowActorPose = g_shadowDeferColdActorPose;
     // The earlier Actor boundary depends on the exact later root-caster gate;
     // requesting it therefore installs the same complete accepted patch set.
-    const bool shadowDefer = g_shadowDeferColdAlpha || shadowActorPose;
+    const bool shadowDefer = g_shadowDeferColdResources || shadowActorPose;
     const bool terrainPreload = g_terrainPreloadLayers;
     const bool secondaryAdmission = g_secondaryPassAdmissionBudget != 0;
-    const bool reflectionDefer = g_reflectionDeferAdmissionMesh
-                              || g_reflectionDeferAdmissionAll
-                              || secondaryAdmission;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
     const bool crossPass = wants(kGroupReflections)
                         && tq::probe::drawTimingEnabled();
     const bool gpuChunks = wants(kGroupReflections) && wants(kGroupTerrain)
                         && tq::probe::drawTimingEnabled();
-    if (!g_tracing && !cache && !async && !pumpFilter && !shadowReuse
-        && !shadowDefer && !terrainPreload && !reflectionDefer
+    if (!g_tracing && !cache && !shadowDefer && !terrainPreload
+        && !secondaryAdmission
         && !marker)
         return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
@@ -9708,7 +9619,7 @@ bool install(HMODULE engine) {
     if (wants(kGroupGame)) installGame();
     if (wants(kGroupLoop)) installLoop();
     const bool tracePump = wants(kGroupPump);
-    if (tracePump || pumpFilter || marker) installPump(engine, tracePump);
+    if (tracePump || marker) installPump(engine, tracePump);
     if (wants(kGroupHeap)) installHeap(engine);
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
@@ -9719,24 +9630,25 @@ bool install(HMODULE engine) {
                                       secondaryAdmission);
     const bool traceShadow = wants(kGroupShadow);
     bool shadowReady = !secondaryAdmission;
-    if (traceShadow || shadowReuse || shadowDeferReady || crossPass
-        || secondaryAdmission)
+    if (traceShadow || shadowDeferReady || crossPass || secondaryAdmission)
         shadowReady = installShadow(engine, traceShadow);
     if (wants(kGroupDeferredPasses) || crossPass)
         installDeferredPasses(engine);
     const bool traceReflections = wants(kGroupReflections);
     bool reflectionReady = !secondaryAdmission;
-    if (traceReflections || reflectionDefer)
+    if (traceReflections || secondaryAdmission)
         reflectionReady = installReflections(
-            engine, traceReflections, g_reflectionDeferAdmissionMesh,
-            g_reflectionDeferAdmissionAll, secondaryAdmission);
+            engine, traceReflections, false, false, secondaryAdmission);
     g_secondaryPassAdmissionActive = secondaryAdmission
         && g_secondaryAdmissionDrawHooksReady && terrainReady
         && shadowReady && reflectionReady;
     if (secondaryAdmission && !g_secondaryPassAdmissionActive)
         tq::hdr::log("Secondary-pass progressive admission unavailable --"
                      " leaving all draws stock\r\n");
-    if (async) installAsyncLoad(engine);
+    // Keep the withdrawn patch path build-checked and byte-verified for the
+    // historical record. Its request is a compile-time false constant and no
+    // INI key can make this call reachable.
+    if (g_asyncLevelLoad) installAsyncLoad(engine);
     g_crossPassTracing = crossPass && g_renderDirectional
         && g_deferredPassTracing && g_reflectionTracing
         && g_reflectionChildTracing;
@@ -9763,21 +9675,16 @@ bool install(HMODULE engine) {
     tq::hdr::log("Engine trace: directional cold-mesh retention %s\r\n",
                  g_shadowMeshResourceTracing ? "active" : "unavailable");
 
-    tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
-                 " pump timer floor %u ms, shadow transition reuse %s,"
-                 " cold alpha-shadow defer %s, cold actor-pose defer %s,"
-                 " terrain layer preload %s, reflection admission mesh defer %s,"
-                 " reflection admission whole-pass defer %s,"
+    tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s,"
+                 " cold-resource shadow defer %s, cold actor-pose defer %s,"
+                 " terrain layer preload %s,"
                  " secondary-pass admission budget %u,"
                  " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
-                 cache ? "requested" : "off", async ? "requested" : "off",
-                 g_pumpTimerMinMs, shadowReuse ? "requested" : "off",
+                 cache ? "requested" : "off",
                  shadowDefer ? "requested" : "off",
                  shadowActorPose ? "requested" : "off",
                  terrainPreload ? "requested" : "off",
-                 g_reflectionDeferAdmissionMesh ? "requested" : "off",
-                 g_reflectionDeferAdmissionAll ? "requested" : "off",
                  g_secondaryPassAdmissionBudget,
                  g_installedHooks,
                  (const void*)g_mainThreadId);
@@ -10047,16 +9954,14 @@ void shutdown() {
 }
 
 #ifdef TQ_SELFTEST
-unsigned pumpTimerFloorForTest() { return g_pumpTimerMinMs; }
-
+bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
+bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
 unsigned installedForTest() { return g_installedHooks; }
 void enterCriticalSectionForTest(LPCRITICAL_SECTION section) {
     hookEnterCriticalSection(section);
 }
 void setTraceMaskForTest(unsigned mask) { g_traceMask = mask; }
-bool asyncLevelLoadForTest() { return g_asyncLevelLoad; }
-bool shadowTransitionReuseForTest() { return g_shadowTransitionReuse; }
-bool shadowDeferColdAlphaForTest() { return g_shadowDeferColdAlpha; }
+bool shadowDeferColdResourcesForTest() { return g_shadowDeferColdResources; }
 bool shadowDeferColdActorPoseForTest() {
     return g_shadowDeferColdActorPose;
 }
@@ -10071,8 +9976,8 @@ unsigned secondaryPassAdmissionBudgetForTest() {
     return g_secondaryPassAdmissionBudget;
 }
 bool reflectionAdmissionTriggeredForTest(unsigned buffers) {
-    return (g_reflectionDeferAdmissionMesh || g_reflectionDeferAdmissionAll)
-        && reflectionAdmissionThresholdReached(buffers);
+    (void)buffers;
+    return false;
 }
 void resetAdmissionRenderableIdentitiesForTest() {
     memset(g_admissionRenderableIdentities, 0,

@@ -110,11 +110,11 @@ unsigned evict(bool* reused) {
 void readOptions(const wchar_t* iniPath) {
     g_megabytes = 0;
     g_verify = false;
-    if (!iniPath || !iniPath[0]) return;
 
     wchar_t value[32] = {};
-    GetPrivateProfileStringW(L"performance", L"archive_cache_mb", L"0", value,
-                             32, iniPath);
+    if (!iniPath || !iniPath[0]) lstrcpyW(value, L"8");
+    else GetPrivateProfileStringW(L"performance", L"archive_cache_mb", L"8",
+                                  value, 32, iniPath);
 
     // Leading digits are the size; an optional `verify` suffix asks for the
     // measurement boot. Anything else at all is refused rather than guessed

@@ -464,9 +464,6 @@ static_assert(sizeof(kGpuNames) / sizeof(kGpuNames[0]) == GpuPhaseCount,
               "every GPU phase needs a CSV column name");
 
 Mode g_mode = ModeOff;
-// Held separately from detail::drawTiming so the header can record what was
-// asked for even on a boot where the probe then failed to arm.
-bool g_drawTimingRequested = false;
 // Useful only beside a frame record, so this is an instrument rather than a
 // performance switch. The game's existing message-pump hook observes the key;
 // there is deliberately no GetAsyncKeyState call here because run 40 showed
@@ -837,7 +834,6 @@ void readOptions(const wchar_t* iniPath) {
     detail::active = false;
     detail::drawTiming = false;
     g_mode = ModeOff;
-    g_drawTimingRequested = false;
     g_stutterMarkerRequested = false;
     if (!iniPath) return;
     wchar_t value[32];
@@ -850,12 +846,6 @@ void readOptions(const wchar_t* iniPath) {
               || !_wcsicmp(value, L"hitch")) ? ModeHitch : ModeOff;
     if (g_mode == ModeOff) return;
 
-    // A clock pair on a hook that runs 1500-2700 times a frame, so it is asked
-    // for rather than assumed. It cannot arm without the probe: there is no
-    // frame record to add a phase to.
-    GetPrivateProfileStringW(L"debug", L"draw_timing", L"0", value, 32,
-                             iniPath);
-    g_drawTimingRequested = !_wcsicmp(value, L"1") || !_wcsicmp(value, L"on");
     g_stutterMarkerRequested = GetPrivateProfileIntW(
         L"debug", L"stutter_marker", 0, iniPath) != 0;
 
@@ -881,7 +871,10 @@ void readOptions(const wchar_t* iniPath) {
     memset(&g_current, 0, sizeof(g_current));
     ensureWriter();
     detail::active = true;
-    detail::drawTiming = g_drawTimingRequested;
+    // Full measurement runs always price the game's Draw/DrawIndexed and Map
+    // calls. Hitch-only tracing remains cheap enough for ordinary play: it
+    // does not put a clock pair on thousands of calls per frame.
+    detail::drawTiming = g_mode == ModeFull;
 }
 
 bool stutterMarkerEnabled() {

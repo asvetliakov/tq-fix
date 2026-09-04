@@ -21,9 +21,8 @@ namespace arccache {
 // A 256 KiB memcpy is on the order of 25 microseconds; the inflate it replaces
 // measured 582 and 467 microseconds a block on those two runs.
 //
-// This is a fixed slab of 256 KiB slots with a clock victim, and it is off by
-// default: `[performance] archive_cache_mb = 0` allocates nothing and leaves
-// the block routine byte-identical to today.
+// This is a fixed slab of 256 KiB slots with a clock victim. The measured
+// default is `[performance] archive_cache_mb = 8`; `0` disables it.
 
 // What a slot holds one of. Every field is read out of the block routine's own
 // operands rather than out of a document -- src/engine_probe.cpp names the
@@ -48,7 +47,7 @@ struct Key {
 // whose descriptor claims more than this is refused rather than truncated.
 const uint32_t kSlotBytes = 0x40000;
 
-// Reads `[performance] archive_cache_mb`. `0` (the default) is off. A plain
+// Reads `[performance] archive_cache_mb`. `0` is off. A plain
 // number is a size in MiB, clamped to 256 -- 1,024 slots, which is more than
 // the 7,646 blocks of the largest entry would ever need resident at once.
 // A `verify` suffix -- `8verify` -- is the measurement mode described below.

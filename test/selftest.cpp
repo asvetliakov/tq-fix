@@ -504,11 +504,11 @@ void testArchiveCache() {
         return;
     DeleteFileW(ini);
 
-    // ---- the option. The default is the whole safety story: it allocates
-    // nothing and leaves the block routine exactly as the game ships it.
+    // ---- the option. Eight MiB is the measured useful ceiling and now the
+    // default; zero remains an explicit stock-path override.
     tq::arccache::readOptions(ini);
-    check(!tq::arccache::configured() && !tq::arccache::verifying(),
-          "archive_cache_mb is off by default and allocates nothing");
+    check(tq::arccache::megabytes() == 8 && !tq::arccache::verifying(),
+          "archive_cache_mb defaults to the measured eight MiB size");
 
     WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"0", ini);
     tq::arccache::readOptions(ini);
@@ -648,26 +648,66 @@ void testEngineProbe() {
         return;
     }
 
-    // The shipping configuration: the probe is off, so nothing is even looked
-    // at, let alone written.
+    // The shipping configuration keeps measurement off while the accepted
+    // behavior fixes remain independently requested. A non-audited image must
+    // still receive no patch.
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
-    check(!tq::probe::enabled()
-          && !tq::engineprobe::install((HMODULE)image)
+    check(!tq::probe::enabled() && tq::arccache::megabytes() == 8
+          && tq::engineprobe::shadowDeferColdResourcesForTest()
+          && tq::engineprobe::shadowDeferColdActorPoseForTest()
+          && tq::engineprobe::terrainPreloadLayersForTest()
+          && tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 8,
+          "no INI selects every accepted performance default without tracing");
+    check(!tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "the engine trace installs nothing while the performance probe is off");
+          "default fixes still refuse a module that is not Engine.dll");
 
-    // draw_timing puts a clock pair on a hook that runs 1500-2700 times a
-    // frame, so the one thing it must never do is arm itself. It cannot arm
-    // without the probe -- there is no frame record for a phase to land in --
-    // and it must stay off when the probe is on but the switch is not set,
-    // which is every run recorded so far.
+    // Pin the actual normal-configuration combination too, rather than only
+    // inferring it from no-INI defaults. Both debug switches are explicitly
+    // off while every accepted Engine-side behavior remains requested; the
+    // independently defaulted visual streaming/loose-file paths are checked
+    // by their own parser and install-contract tests.
+    WritePrivateProfileStringW(L"debug", L"trace", L"0", ini);
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"0", ini);
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"8", ini);
+    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_resources",
+                               L"1", ini);
+    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_actor_pose",
+                               L"1", ini);
+    WritePrivateProfileStringW(L"performance", L"terrain_preload_layers", L"1",
+                               ini);
+    WritePrivateProfileStringW(L"performance",
+                               L"secondary_pass_admission_budget", L"8", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled() && tq::arccache::megabytes() == 8
+          && tq::engineprobe::shadowDeferColdResourcesForTest()
+          && tq::engineprobe::shadowDeferColdActorPoseForTest()
+          && tq::engineprobe::terrainPreloadLayersForTest()
+          && tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 8,
+          "trace=0 and performance_trace=0 keep every accepted Engine-side"
+          " performance behavior requested");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(4)
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(32768)
+          && !tq::engineprobe::wantsForTest(65536)
+          && !tq::engineprobe::wantsForTest(131072),
+          "the trace-off accepted behavior set enables no trace group");
+
+    // Per-draw clocks are part of full measurement now. The removed legacy key
+    // cannot arm them without full mode, and hitch-only mode stays lightweight.
     WritePrivateProfileStringW(L"debug", L"draw_timing", L"1", ini);
     tq::probe::readOptions(ini);
     check(!tq::probe::enabled() && !tq::probe::drawTimingEnabled(),
-          "draw_timing=1 arms nothing while the performance probe is off");
+          "the removed draw_timing key cannot arm measurement by itself");
 
-    WritePrivateProfileStringW(L"debug", L"draw_timing", L"0", ini);
+    WritePrivateProfileStringW(L"debug", L"performance_trace", L"1", ini);
+    tq::probe::readOptions(ini);
+    check(tq::probe::enabled() && !tq::probe::drawTimingEnabled(),
+          "hitch-only performance_trace omits high-frequency draw clocks");
+
     WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
     WritePrivateProfileStringW(L"debug", L"engine_trace", L"0", ini);
     tq::probe::readOptions(ini);
@@ -675,19 +715,13 @@ void testEngineProbe() {
     tq::engineprobe::readOptions(ini);
     check(tq::probe::enabled() && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "engine_trace=0 installs nothing even with the probe on");
+          "a non-audited module stays untouched with full measurement on");
 
-    check(tq::probe::enabled() && !tq::probe::drawTimingEnabled(),
-          "the probe alone leaves draw_timing off");
-
-    // And with both set it arms, and the phase it arms is the one the CSV
+    // Full mode arms the clocks, and the phase it arms is the one the CSV
     // column is named after -- so a run that reads draw_submit_ms = 0 is the
     // game not spending time there, not a switch that silently did nothing.
-    WritePrivateProfileStringW(L"debug", L"draw_timing", L"1", ini);
-    tq::probe::readOptions(ini);
-    tq::probe::setOutputPath(csv);
     check(tq::probe::enabled() && tq::probe::drawTimingEnabled(),
-          "performance_trace and draw_timing together arm the draw phases");
+          "performance_trace=full includes draw and map phases");
     tq::probe::beginFrame(nullptr);
     const int64_t drawStart = tq::probe::now();
     while (tq::probe::now() == drawStart) {}
@@ -888,32 +922,6 @@ void testEngineProbe() {
           "reflection renderable calls distinguish terrain and mesh classes");
     tq::engineprobe::setGpuChunkTracingForTest(false);
 
-    WritePrivateProfileStringW(L"debug", L"draw_timing", L"0", ini);
-    tq::probe::readOptions(ini);
-    tq::probe::setOutputPath(csv);
-
-    // pump_timer_min_ms is a fix rather than an instrument, so like
-    // archive_cache_mb and async_level_load it must reach install() with the
-    // performance probe off -- and must bring no trace group with it.
-    DeleteFileW(ini);
-    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"50", ini);
-    tq::probe::readOptions(ini);
-    tq::engineprobe::readOptions(ini);
-    check(!tq::probe::enabled() && tq::engineprobe::pumpTimerFloorForTest() == 50,
-          "pump_timer_min_ms is read with the performance probe off");
-    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"0", ini);
-    tq::engineprobe::readOptions(ini);
-    check(tq::engineprobe::pumpTimerFloorForTest() == 0,
-          "pump_timer_min_ms=0 leaves the stock pump alone");
-    WritePrivateProfileStringW(L"performance", L"pump_timer_min_ms", L"9999", ini);
-    tq::engineprobe::readOptions(ini);
-    check(tq::engineprobe::pumpTimerFloorForTest() == 0,
-          "a pump_timer_min_ms beyond a second is refused rather than clamped in");
-    DeleteFileW(ini);
-    WritePrivateProfileStringW(L"debug", L"performance_trace", L"full", ini);
-    tq::probe::readOptions(ini);
-    tq::probe::setOutputPath(csv);
-
     WritePrivateProfileStringW(L"debug", L"engine_trace", L"1", ini);
     tq::engineprobe::readOptions(ini);
     check(!tq::engineprobe::install((HMODULE)image)
@@ -993,13 +1001,7 @@ void testEngineProbe() {
     tq::engineprobe::readOptions(nullptr);
     DeleteFileW(ini);
 
-    // The fourth way in: async_level_load, which retargets the two forced
-    // level loads inside the renderer. Same shape as archive_cache_mb -- a
-    // fix rather than an instrument -- so the same three things have to hold.
-    //
-    // First, that it is off unless it is asked for. An INI with no key at all
-    // and no INI at all both have to read as off, because the shipping
-    // configuration is the second of those.
+    // Rejected behavior keys remain inert even if copied from an old INI.
     check(!tq::engineprobe::asyncLevelLoadForTest(),
           "async_level_load is off with no INI at all");
     WritePrivateProfileStringW(L"performance", L"loose_texture_max", L"4096",
@@ -1012,18 +1014,15 @@ void testEngineProbe() {
     check(!tq::engineprobe::asyncLevelLoadForTest(),
           "async_level_load=0 is off");
 
-    // Second, that at 1 it reaches install() with the performance probe off
-    // -- the boot the reporter actually runs -- and still installs nothing
-    // into a module that is not the audited Engine.dll.
+    WritePrivateProfileStringW(L"performance", L"archive_cache_mb", L"0", ini);
     WritePrivateProfileStringW(L"performance", L"async_level_load", L"1", ini);
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
-    check(!tq::probe::enabled() && tq::engineprobe::asyncLevelLoadForTest()
+    check(!tq::probe::enabled() && !tq::engineprobe::asyncLevelLoadForTest()
           && !tq::arccache::configured()
           && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "async_level_load reaches install() with the probe off, and still"
-          " installs nothing into a module that is not Engine.dll");
+          "the removed async_level_load key is ignored");
 
     // Third, that it brings none of the instrument with it. engine_trace
     // defaults to 1, so every group would say yes if the mask were consulted
@@ -1032,7 +1031,7 @@ void testEngineProbe() {
           && !tq::engineprobe::wantsForTest(8192)
           && !tq::engineprobe::wantsForTest(16384)
           && !tq::engineprobe::wantsForTest(65536),
-          "an async-only boot installs no trace group either");
+          "the removed async key installs no trace group");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
@@ -1040,11 +1039,7 @@ void testEngineProbe() {
           "shutting down and re-reading no INI puts async_level_load back off");
     DeleteFileW(ini);
 
-    // The sixth way in is the one-frame directional-shadow transition reuse.
-    // It is a fix, so the same off/default/no-trace contract applies. Its data
-    // path must restore the whole 64-byte matrix paired with the retained
-    // global depth map, reject a different target, and never skip twice in a
-    // row even if the region pointer oscillates.
+    // The rejected one-frame whole-map reuse key is inert too.
     check(!tq::engineprobe::shadowTransitionReuseForTest(),
           "shadow_transition_reuse is off with no INI at all");
     WritePrivateProfileStringW(L"performance", L"shadow_transition_reuse",
@@ -1052,11 +1047,10 @@ void testEngineProbe() {
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
     check(!tq::probe::enabled()
-          && tq::engineprobe::shadowTransitionReuseForTest()
+          && !tq::engineprobe::shadowTransitionReuseForTest()
           && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "shadow_transition_reuse reaches install() with the probe off, and"
-          " still refuses a module that is not Engine.dll");
+          "the removed shadow_transition_reuse key is ignored");
     check(!tq::engineprobe::wantsForTest(2)
           && !tq::engineprobe::wantsForTest(16384)
           && !tq::engineprobe::wantsForTest(65536),
@@ -1077,9 +1071,9 @@ void testEngineProbe() {
                                                outputMatrix),
           "shadow reuse refuses a different depth target");
     tq::engineprobe::primeShadowReuseForTest(oldRegion, surface, oldMatrix);
-    check(tq::engineprobe::reuseShadowForTest(newRegion, surface, outputMatrix)
-          && !memcmp(outputMatrix, oldMatrix, sizeof(oldMatrix)),
-          "a region change restores all 64 bytes paired with the retained map");
+    check(!tq::engineprobe::reuseShadowForTest(newRegion, surface, outputMatrix)
+          && memcmp(outputMatrix, oldMatrix, sizeof(oldMatrix)),
+          "removed whole-map reuse cannot restore a stale shadow matrix");
     check(!tq::engineprobe::reuseShadowForTest(thirdRegion, surface,
                                                outputMatrix),
           "shadow transition reuse never skips two calls in a row");
@@ -1090,26 +1084,30 @@ void testEngineProbe() {
           "re-reading no INI puts shadow_transition_reuse back off");
     DeleteFileW(ini);
 
-    // The seventh independent way in is the cold alpha-tested shadow-caster
-    // deferral. Like the archive cache and async level load it is a fix, not
-    // an instrument: it defaults off, reaches install() with the probe off,
-    // and cannot enable any trace group by itself.
-    check(!tq::engineprobe::shadowDeferColdAlphaForTest(),
-          "shadow_defer_cold_alpha is off with no INI at all");
-    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_alpha",
+    // The accepted cold-resource shadow mitigation defaults on, can be
+    // explicitly disabled, reaches install() with the probe off, and cannot
+    // enable a trace group by itself.
+    check(tq::engineprobe::shadowDeferColdResourcesForTest(),
+          "shadow_defer_cold_resources defaults on with no INI");
+    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_resources",
+                               L"0", ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::engineprobe::shadowDeferColdResourcesForTest(),
+          "shadow_defer_cold_resources=0 disables the mitigation");
+    WritePrivateProfileStringW(L"performance", L"shadow_defer_cold_resources",
                                L"1", ini);
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
     check(!tq::probe::enabled()
-          && tq::engineprobe::shadowDeferColdAlphaForTest()
+          && tq::engineprobe::shadowDeferColdResourcesForTest()
           && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "shadow_defer_cold_alpha reaches install() with the probe off, and"
+          "shadow_defer_cold_resources reaches install() with the probe off, and"
           " still refuses a module that is not Engine.dll");
     check(!tq::engineprobe::wantsForTest(2)
           && !tq::engineprobe::wantsForTest(16384)
           && !tq::engineprobe::wantsForTest(65536),
-          "a cold-alpha-shadow-only boot installs no trace group");
+          "a cold-resource-shadow-only boot installs no trace group");
     check(tq::engineprobe::shouldDeferShadowAlphaForTest(3, 0)
           && tq::engineprobe::shouldDeferShadowAlphaForTest(4, 1)
           && tq::engineprobe::shouldDeferShadowAlphaForTest(5, 0)
@@ -1134,15 +1132,20 @@ void testEngineProbe() {
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
-    check(!tq::engineprobe::shadowDeferColdAlphaForTest(),
-          "re-reading no INI puts shadow_defer_cold_alpha back off");
+    check(tq::engineprobe::shadowDeferColdResourcesForTest(),
+          "re-reading no INI restores shadow_defer_cold_resources default");
     DeleteFileW(ini);
 
     // The eighth independent way in moves the same cold-root decision to the
     // exact Actor::AddToScene call proved by Run 68. It implies the later
-    // caster gate, defaults off, and brings no trace group by itself.
+    // caster gate, defaults on, and brings no trace group by itself.
+    check(tq::engineprobe::shadowDeferColdActorPoseForTest(),
+          "shadow_defer_cold_actor_pose defaults on with no INI");
+    WritePrivateProfileStringW(L"performance",
+                               L"shadow_defer_cold_actor_pose", L"0", ini);
+    tq::engineprobe::readOptions(ini);
     check(!tq::engineprobe::shadowDeferColdActorPoseForTest(),
-          "shadow_defer_cold_actor_pose is off with no INI at all");
+          "shadow_defer_cold_actor_pose=0 disables the early gate");
     WritePrivateProfileStringW(L"performance",
                                L"shadow_defer_cold_actor_pose", L"1", ini);
     tq::probe::readOptions(ini);
@@ -1160,15 +1163,20 @@ void testEngineProbe() {
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
-    check(!tq::engineprobe::shadowDeferColdActorPoseForTest(),
-          "re-reading no INI puts shadow_defer_cold_actor_pose back off");
+    check(tq::engineprobe::shadowDeferColdActorPoseForTest(),
+          "re-reading no INI restores shadow_defer_cold_actor_pose default");
     DeleteFileW(ini);
 
     // The ninth independent way in queues runtime terrain-layer textures at
-    // their exact post-LoadTextures boundary. It is a behavior fix: default
-    // off, reachable with the probe off, and unable to bring a trace group.
+    // their exact post-LoadTextures boundary. It defaults on, is reachable
+    // with the probe off, and cannot bring a trace group.
+    check(tq::engineprobe::terrainPreloadLayersForTest(),
+          "terrain_preload_layers defaults on with no INI");
+    WritePrivateProfileStringW(L"performance", L"terrain_preload_layers",
+                               L"0", ini);
+    tq::engineprobe::readOptions(ini);
     check(!tq::engineprobe::terrainPreloadLayersForTest(),
-          "terrain_preload_layers is off with no INI at all");
+          "terrain_preload_layers=0 disables the preload");
     WritePrivateProfileStringW(L"performance", L"terrain_preload_layers",
                                L"1", ini);
     tq::probe::readOptions(ini);
@@ -1187,14 +1195,11 @@ void testEngineProbe() {
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
-    check(!tq::engineprobe::terrainPreloadLayersForTest(),
-          "re-reading no INI puts terrain_preload_layers back off");
+    check(tq::engineprobe::terrainPreloadLayersForTest(),
+          "re-reading no INI restores terrain_preload_layers default");
     DeleteFileW(ini);
 
-    // The tenth independent way in stages transition-sized reflection scene
-    // admission. It counts exact BuildScene buffer creations and omits only
-    // GraphicsMeshInstance reflection calls for that one RenderLightStyle;
-    // it is a fix, not a trace dependency.
+    // The two rejected one-consumer reflection omission keys are ignored.
     check(!tq::engineprobe::reflectionDeferAdmissionMeshForTest(),
           "reflection_defer_admission_mesh is off with no INI at all");
     WritePrivateProfileStringW(L"performance",
@@ -1202,19 +1207,18 @@ void testEngineProbe() {
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
     check(!tq::probe::enabled()
-          && tq::engineprobe::reflectionDeferAdmissionMeshForTest()
+          && !tq::engineprobe::reflectionDeferAdmissionMeshForTest()
           && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "reflection_defer_admission_mesh reaches install() with the probe"
-          " off, and still refuses a module that is not Engine.dll");
+          "the removed reflection_defer_admission_mesh key is ignored");
     check(!tq::engineprobe::wantsForTest(2)
           && !tq::engineprobe::wantsForTest(32768)
           && !tq::engineprobe::wantsForTest(65536)
           && !tq::engineprobe::wantsForTest(131072),
           "a reflection-admission-only boot installs no trace group");
     check(!tq::engineprobe::reflectionAdmissionTriggeredForTest(31)
-          && tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
-          "reflection admission defers at the verified 32-buffer boundary");
+          && !tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
+          "removed reflection omission cannot arm on buffer count");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
@@ -1222,9 +1226,6 @@ void testEngineProbe() {
           "re-reading no INI puts reflection_defer_admission_mesh back off");
     DeleteFileW(ini);
 
-    // Run 81 left a terrain-only 42 ms reflection interval after all 87 mesh
-    // calls were omitted.  The next independent behavior A/B skips that one
-    // complete reflection child without enabling the reflection trace.
     check(!tq::engineprobe::reflectionDeferAdmissionAllForTest(),
           "reflection_defer_admission_all is off with no INI at all");
     WritePrivateProfileStringW(L"performance",
@@ -1232,20 +1233,19 @@ void testEngineProbe() {
     tq::probe::readOptions(ini);
     tq::engineprobe::readOptions(ini);
     check(!tq::probe::enabled()
-          && tq::engineprobe::reflectionDeferAdmissionAllForTest()
+          && !tq::engineprobe::reflectionDeferAdmissionAllForTest()
           && !tq::engineprobe::reflectionDeferAdmissionMeshForTest()
           && !tq::engineprobe::install((HMODULE)image)
           && tq::engineprobe::installedForTest() == 0,
-          "reflection_defer_admission_all reaches install() with the probe"
-          " off, and still refuses a module that is not Engine.dll");
+          "the removed reflection_defer_admission_all key is ignored");
     check(!tq::engineprobe::wantsForTest(2)
           && !tq::engineprobe::wantsForTest(32768)
           && !tq::engineprobe::wantsForTest(65536)
           && !tq::engineprobe::wantsForTest(131072),
           "a whole-reflection-admission-only boot installs no trace group");
     check(!tq::engineprobe::reflectionAdmissionTriggeredForTest(31)
-          && tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
-          "whole reflection admission defers at the verified 32-buffer boundary");
+          && !tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
+          "removed whole-reflection omission cannot arm on buffer count");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
@@ -1256,8 +1256,13 @@ void testEngineProbe() {
     // The next independent behavior path keeps normal colour stock but
     // budgets first reflection/directional GPU participation as one object
     // population. It must work with the probe off and imply no trace group.
+    check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 8,
+          "secondary_pass_admission_budget defaults to eight with no INI");
+    WritePrivateProfileStringW(L"performance",
+                               L"secondary_pass_admission_budget", L"0", ini);
+    tq::engineprobe::readOptions(ini);
     check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 0,
-          "secondary_pass_admission_budget is off with no INI at all");
+          "secondary_pass_admission_budget=0 restores stock admission");
     WritePrivateProfileStringW(L"performance",
                                L"secondary_pass_admission_budget", L"8", ini);
     tq::probe::readOptions(ini);
@@ -1281,8 +1286,8 @@ void testEngineProbe() {
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
-    check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 0,
-          "re-reading no INI puts secondary_pass_admission_budget back off");
+    check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 8,
+          "re-reading no INI restores secondary admission budget eight");
     DeleteFileW(ini);
 
     // The next passive trace must distinguish an object's first visit to each
@@ -3066,7 +3071,7 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     bool widths = false;
     if (csvText) {
         // Skip every leading comment rather than assuming one: the file opens
-        // with performance_trace and draw_timing today, and a reader that
+        // with full performance_trace today, and a reader that
         // counts comment lines breaks the next time one is added. frames.py
         // drops all of them the same way.
         const char* headerLine = csvText;

@@ -7,15 +7,16 @@ struct ID3D11DeviceContext;
 namespace tq {
 namespace engineprobe {
 
-// Instrumentation written into Engine.dll's .text.
+// Audited instrumentation and performance fixes written into Engine.dll.
 //
 // Every instrument before this one was a vtable slot or mod-side code. This
 // one patches the game's own instruction stream on paths that run thousands of
-// times a second, so the whole module is built around not installing:
+// times a second, so installation is split strictly by purpose:
 //
-// - nothing installs unless the performance probe is on *and* [debug]
-//   engine_trace is not 0, so the shipping configuration is byte-identical to
-//   a build without this file;
+// - trace groups install only when the performance probe is on *and* [debug]
+//   engine_trace is not 0;
+// - accepted [performance] fixes install independently with both trace switches
+//   at 0, and bring none of those trace groups with them;
 // - every target is resolved by decorated export name and then asserted
 //   against the RVA the audit recorded, so a different Engine.dll resolves to
 //   a different address and installs nothing;
@@ -103,59 +104,7 @@ namespace engineprobe {
 // candidates; no log formatting runs on the candidate frame.
 void readOptions(const wchar_t* iniPath);
 
-// [performance] timer_period_ms, an experiment rather than a fix.
-//
-// 76% of the slow message retrievals return WM_TIMER, and WM_TIMER is
-// synthesized rather than queued -- PeekMessage has to ask the host whether a
-// timer has expired, which under CrossOver is the round trip that costs. The
-// game sets one via TQ.exe's SetTimer import at about 14 messages a second.
-//
-// 0, the default, changes nothing and is byte-identical to not having this.
-// Any other value replaces the period TQ.exe asks for, so a run can test
-// whether the stalls scale with the timer rate -- which is the difference
-// between WM_TIMER causing them and WM_TIMER merely being what a slow peek
-// happens to come back with. It only takes effect while the engine trace is
-// installed, so a shipping boot never reaches it.
-
-// [performance] async_level_load, which unlike timer_period_ms is a fix, and
-// so -- like archive_cache_mb -- installs with the performance probe off.
-//
-// Three call sites force a synchronous Region::LoadLevel; at 1 all three are
-// retargeted at Region::BackgroundLoadLevel, which raises the same
-// region+0x74 flag each of them already tests and branches on.
-//
-// Two are the renderers' AddElementsInBox, and runs 27-32 measured them
-// deferring nothing whatever: 2,849 calls, 2,849 already resident. Ordinary
-// traversal is asynchronous already, by way of the engine's own RegionLoader.
-// The third is portal traversal -- the region beyond a doorway -- and is the
-// only synchronous level load that happens during play. It is also the
-// best-founded: Region::GetPortal's result is null-checked immediately after
-// the branch, so the code past it already copes with a region that did not
-// load.
-//
-// It does nothing for the 1.5-second freeze on walking into an interior. That
-// is a full World::Load and a re-spawn, and the load it forces is for the
-// region the player is about to be placed in; deferring it would place them
-// before the floor exists. See findings.md §27-§32.
-//
-// 0, the default, installs nothing. The trade at 1 is pop-in at a doorway.
-
-// [performance] shadow_transition_reuse, also a fix and defaulting to 0.
-//
-// Run 46 localized the marked play outdoor-transition onset inside
-// GraphicsShadowMapDx11::RenderDirectional: 167.799 of its 170.532 CPU ms
-// were synchronous main-thread resource loads, beside 273.815 ms of GPU
-// directional-shadow work. The verified region pointer changed before that
-// call. At 1, that one change reuses the previous global depth map and copies
-// its matching 64-byte matrix into the new light record for exactly one frame;
-// the following call always renders normally. `shadow_split` is untouched.
-// Run 47 rejected it: reuse visibly flickers and only defers the full build.
-// Keep it at 0 outside reproduction of that experiment.
-//
-// It reaches install() with the performance probe off and brings no trace
-// group. Group 16384 adds `engine_shadow_reuse` when measuring it.
-
-// [performance] shadow_defer_cold_alpha, a fix and defaulting to 0.
+// [performance] shadow_defer_cold_resources, a fix and defaulting to 1.
 //
 // Before any caster record exists, GraphicsMeshInstance ensures its root mesh
 // merely to read the number of shadow passes. At 1, a root mesh in state 0 or
@@ -185,7 +134,7 @@ void readOptions(const wchar_t* iniPath);
 // group. Group 16384 reports omitted states, enqueue outcomes, and skipped
 // material/bump dependencies when enabled.
 
-// [performance] shadow_defer_cold_actor_pose, a fix and defaulting to 0.
+// [performance] shadow_defer_cold_actor_pose, a fix and defaulting to 1.
 //
 // Run 68 proved another exact root-mesh EnsureAvailable occurs earlier, while
 // GraphicsShadowMapDx11::RenderDirectional gathers actors: Actor::AddToScene
@@ -198,7 +147,7 @@ void readOptions(const wchar_t* iniPath);
 // It reaches install() with the performance probe off and brings no trace
 // group. Group 16384 reports the exact state/enqueue outcome when enabled.
 
-// [performance] terrain_preload_layers, a fix and defaulting to 0.
+// [performance] terrain_preload_layers, a fix and defaulting to 1.
 //
 // Runtime TerrainRT::LoadRenderData creates each layer TerrainType's base,
 // bump, and grass texture Resources by calling TerrainType::LoadTextures, but
@@ -211,37 +160,14 @@ void readOptions(const wchar_t* iniPath);
 // It reaches install() with the performance probe off and brings no trace
 // group. Group 32768 observes the same stock calls when enabled.
 
-// [performance] reflection_defer_admission_mesh, a fix and defaulting to 0.
-//
-// A transition-sized reflection BuildScene creates at least 32 D3D buffers.
-// For only its immediately following RenderLightStyle, resident
-// GraphicsMeshInstance render passes are omitted. The normal color pass later
-// in the same recursive branch consumes the new scene, and reflection returns
-// on the next frame. Terrain reflection and all non-transition reflections
-// are unchanged.
-//
-// It reaches install() with the performance probe off and brings no trace
-// group. Group 131072 reports the deferred event and mesh-call counts.
-
-// [performance] reflection_defer_admission_all, a fix and defaulting to 0.
-//
-// Uses the same measured >=32-buffer boundary, but skips the one immediately
-// following reflection RenderLightStyle call in full.  The reflection target
-// is stale for one frame; terrain and mesh reflection both return on the next
-// frame. Directional shadows and the later normal colour pass are untouched.
-//
-// It reaches install() with the performance probe off and brings no trace
-// group. Group 131072 reports the trigger and whole-call omission counts.
-
-// [performance] secondary_pass_admission_budget, a fix and defaulting to 0.
+// [performance] secondary_pass_admission_budget, a fix and defaulting to 8.
 //
 // Run 83 found that the felt play transition introduces 134 previously unseen
 // reflection renderables and 15 directional-shadow renderables at once, while
 // Runs 81--82 showed that omitting one consumer merely moves GPU first use to
-// the next consumer/frame.  After the existing >=32-buffer reflection signal
-// or a directional region change, this option admits at most N previously
-// unseen object identities per frame across reflection and directional shadow
-// together.  A deferred RenderPass still executes resource/material setup,
+// the next consumer/frame. The first N identities render normally; identity
+// N+1 proves a real pending population and self-arms admission. A deferred
+// RenderPass still executes resource/material setup,
 // but its D3D Draw/DrawIndexed calls are suppressed until that identity wins a
 // later frame's budget. Normal colour rendering and already admitted objects
 // are unchanged.
@@ -276,7 +202,7 @@ struct DeferredDrawBindings {
 };
 
 // True after options have been read when group 65536 or reflection group
-// 131072 and draw_timing request the D3D binding hooks. It does not mean the
+// 131072 and full performance tracing request the D3D binding hooks. It does not mean the
 // verified Engine sites installed. Group 131072 uses the same setter snapshot
 // to correlate fresh buffer identities across reflection/shadow/color passes.
 bool deferredDrawTraceRequested();
@@ -348,21 +274,17 @@ void setSecondaryAdmissionDrawHooksReady(bool ready);
 void shutdown();
 
 #ifdef TQ_SELFTEST
-// How many hooks the last install() put in, so a test can assert that a run
-// with the trace off installed nothing at all.
+// How many hooks the last install() put in, so a test can assert that an
+// incompatible image remains untouched regardless of requested fixes.
 unsigned installedForTest();
-unsigned pumpTimerFloorForTest();
+bool asyncLevelLoadForTest();
+bool shadowTransitionReuseForTest();
 void setTraceMaskForTest(unsigned mask);
 // Whether install() would install one trace group, decided the way install()
 // decides it. archive_cache_mb can reach install() with the performance probe
 // off, and this is what says the trace does not come with it.
 bool wantsForTest(unsigned group);
-// [performance] async_level_load as readOptions() parsed it, so a test can
-// assert the default is off without inferring it from install() refusing a
-// module that was never Engine.dll anyway.
-bool asyncLevelLoadForTest();
-bool shadowTransitionReuseForTest();
-bool shadowDeferColdAlphaForTest();
+bool shadowDeferColdResourcesForTest();
 bool shadowDeferColdActorPoseForTest();
 bool terrainPreloadLayersForTest();
 bool reflectionDeferAdmissionMeshForTest();

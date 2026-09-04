@@ -363,7 +363,7 @@ void readOptions() {
     // they are 46% of the pack's bytes. Refusing those hands the game its own
     // archive copy, which for the same assets is 6.4% of the size.
     int looseMax = GetPrivateProfileIntW(L"performance", L"loose_texture_max",
-                                         0, path);
+                                         4096, path);
     g_options.looseTextureMax = looseMax >= 64 && looseMax <= 16384
                               ? (UINT)looseMax : 0;
     if (g_options.streaming && !tq::streaming::presentHookInstalled()) {
@@ -3190,8 +3190,8 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (g_options.streaming) startUnmapWorker();
     if (g_options.looseTextureMax) installFileSourceGate();
     // Last of the Engine.dll work, and the only part that writes into .text.
-    // It installs nothing unless the probe is on, so a shipping boot never
-    // reaches past the check.
+    // Its trace groups require the probe, while accepted performance fixes
+    // enter independently and install only their audited sites.
     tq::engineprobe::install(GetModuleHandleW(L"Engine.dll"));
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);

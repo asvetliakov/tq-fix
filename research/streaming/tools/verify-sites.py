@@ -26,6 +26,8 @@ GAME = os.environ.get("TQ_GAME_DIR") or os.path.expanduser(
 SRC = os.environ.get("TQ_VERIFY_SRC") or os.path.join(
     HERE, "..", "..", "..", "src", "engine_probe.cpp")
 CACHE_H = os.path.join(HERE, "..", "..", "..", "src", "arc_cache.h")
+ARC_CPP = os.environ.get("TQ_VERIFY_ARC_CPP") or os.path.join(
+    HERE, "..", "..", "..", "src", "arc_cache.cpp")
 PROBE_CPP = os.environ.get("TQ_VERIFY_PROBE_CPP") or os.path.join(
     HERE, "..", "..", "..", "src", "probe.cpp")
 PROBE_H = os.environ.get("TQ_VERIFY_PROBE_H") or os.path.join(
@@ -36,17 +38,24 @@ VISUAL_CPP = os.environ.get("TQ_VERIFY_VISUAL_CPP") or os.path.join(
     HERE, "..", "..", "..", "src", "visual.cpp")
 SELFTEST_CPP = os.environ.get("TQ_VERIFY_SELFTEST_CPP") or os.path.join(
     HERE, "..", "..", "..", "test", "selftest.cpp")
+README = os.environ.get("TQ_VERIFY_README") or os.path.join(
+    HERE, "..", "..", "..", "README.md")
 FLOW_DOC = os.environ.get("TQ_VERIFY_FLOW_DOC") or os.path.join(
     HERE, "..", "disassembly-targets.md")
+FINDINGS = os.environ.get("TQ_VERIFY_FINDINGS") or os.path.join(
+    HERE, "..", "findings.md")
 
 src = open(SRC).read()
 cache_src = open(CACHE_H).read()
+arc_src = open(ARC_CPP).read()
 probe_src = open(PROBE_CPP).read()
 probe_h = open(PROBE_H).read()
 engine_h = open(ENGINE_PROBE_H).read()
 visual_src = open(VISUAL_CPP).read()
 selftest_src = open(SELFTEST_CPP).read()
+readme_src = open(README).read()
 flow_doc = open(FLOW_DOC).read()
+findings_src = open(FINDINGS).read()
 flat = re.sub(r'"\s*\n\s*"', '', src)          # joined string literals
 failures = []
 
@@ -208,6 +217,199 @@ def check_archive_cache(engine):
         got = imports.get(engine.base + rva)
         ok(got is not None and got[1] == want,
            "Engine.dll+%#x is KERNEL32!%s" % (rva, want))
+
+
+def check_configuration_contract():
+    """Shipping defaults and removal of behavior experiments."""
+    print("\nCurrent configuration contract")
+    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
+    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
+    options = src[read_begin:read_end]
+    probe_begin = probe_src.find("void readOptions(const wchar_t* iniPath)")
+    probe_end = probe_src.find("\n}\n\nbool stutterMarkerEnabled()", probe_begin)
+    probe_options = probe_src[probe_begin:probe_end]
+    visual_read_begin = visual_src.find("void readOptions()")
+    visual_read_end = visual_src.find("\n}\n\nbool contains", visual_read_begin)
+    visual_options = visual_src[visual_read_begin:visual_read_end]
+    visual_install_begin = visual_src.find(
+        "void install(ID3D11Device* device, ID3D11DeviceContext* context,")
+    visual_install_end = visual_src.find("\n}\n\nvoid onPresent", visual_install_begin)
+    visual_install = visual_src[visual_install_begin:visual_install_end]
+    engine_install_begin = src.find("bool install(HMODULE engine)")
+    engine_install_end = src.find("\n}\n\nvoid shutdown()", engine_install_begin)
+    engine_install = src[engine_install_begin:engine_install_end]
+    rejected = [
+        "async_level_load", "timer_period_ms", "pump_timer_min_ms",
+        "shadow_transition_reuse", "reflection_defer_admission_mesh",
+        "reflection_defer_admission_all"]
+    readme_performance = re.search(
+        r"\[performance\]\n(.*?)\n\n\[debug\]", readme_src, re.S)
+    readme_performance = readme_performance.group(1) \
+        if readme_performance else ""
+
+    ok('L"loose_texture_max",\n                                         4096' in visual_src,
+       "loose_texture_max defaults to 4096")
+    ok('lstrcpyW(value, L"8")' in arc_src
+       and 'L"archive_cache_mb", L"8"' in arc_src
+       and "archive_cache_mb defaults to the measured eight MiB size"
+           in selftest_src,
+       "archive_cache_mb defaults to eight with and without an INI")
+    ok('L"shadow_defer_cold_resources", 1' in options
+       and 'L"shadow_defer_cold_actor_pose", 1' in options
+       and 'L"terrain_preload_layers", 1' in options
+       and 'L"secondary_pass_admission_budget", 8' in options
+       and options.count("        : 8;") == 1,
+       "accepted shadow, terrain, and secondary defaults are exact")
+    ok(all(('L"%s"' % key) not in options for key in rejected)
+       and all((key + "=0") not in readme_src for key in rejected),
+       "all six rejected behavior keys are absent from the parser and sample")
+    ok('L"draw_timing"' not in probe_options
+       and "detail::drawTiming = g_mode == ModeFull;" in probe_options
+       and "hitch-only performance_trace omits high-frequency draw clocks"
+           in selftest_src,
+       "full performance_trace owns draw/map timing without a second key")
+    ok(readme_performance.splitlines() == [
+           "streaming=optimized", "loose_texture_max=4096",
+           "archive_cache_mb=8", "shadow_defer_cold_resources=1",
+           "shadow_defer_cold_actor_pose=1", "terrain_preload_layers=1",
+           "secondary_pass_admission_budget=8"],
+       "README performance sample matches all shipping defaults exactly")
+    ok("shadow_defer_cold_alpha" not in options
+       and "shadow_defer_cold_resources" in readme_src
+       and "shadow_defer_cold_alpha" not in readme_src,
+       "the current interface names the complete cold-resource shadow scope")
+    ok('L"debug", L"trace", L"0"' in selftest_src
+       and 'L"debug", L"performance_trace", L"0"' in selftest_src
+       and "trace=0 and performance_trace=0 keep every accepted Engine-side"
+           in selftest_src
+       and "the trace-off accepted behavior set enables no trace group"
+           in selftest_src,
+       "the exact normal trace-off combination is self-tested")
+    ok('L"performance", L"streaming", L"optimized"' in visual_options
+       and 'L"performance", L"loose_texture_max",\n'
+           '                                         4096' in visual_options
+       and "if (g_options.streaming) startUnmapWorker();" in visual_install
+       and "if (g_options.looseTextureMax) installFileSourceGate();"
+           in visual_install,
+       "streaming and loose-texture gates install independently of tracing")
+    ok("if (wants(kGroupArchive) || cache)\n"
+           "        installArchive(engine, wants(kGroupArchive), cache);"
+           in engine_install
+       and "if (!g_tracing && !cache && !shadowDefer && !terrainPreload"
+           in engine_install,
+       "archive caching enters Engine install independently of tracing")
+    ok("const bool shadowDefer = g_shadowDeferColdResources || shadowActorPose;"
+           in engine_install
+       and "const bool shadowDeferReady = shadowDefer\n"
+           "        && prepareShadowAlphaDefer(engine);" in engine_install
+       and "if (traceShadow || shadowDeferReady || crossPass || secondaryAdmission)"
+           in engine_install
+       and "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose))"
+           in src
+       and "if (ok && g_shadowDeferColdActorPose)" in src,
+       "both directional-shadow fixes install independently of tracing")
+    ok("if (traceTerrain || terrainPreload || secondaryAdmission)"
+           in engine_install
+       and "g_terrainPreloadLayersActive = ok && preloadLayers;" in src,
+       "terrain-layer preload installs independently of tracing")
+    ok("secondaryAdmissionDrawHooks" in visual_install
+       and "g_options.smaa || toneEnabled || nativeBloomControl\n"
+           "        || g_deferredBindingTracing || secondaryAdmissionDrawHooks"
+           in visual_install
+       and "setSecondaryAdmissionDrawHooksReady(" in visual_install
+       and "if (traceReflections || secondaryAdmission)" in engine_install
+       and "g_secondaryPassAdmissionActive = secondaryAdmission\n"
+           "        && g_secondaryAdmissionDrawHooksReady && terrainReady\n"
+           "        && shadowReady && reflectionReady;" in engine_install,
+       "secondary admission gets its complete trace-independent hook chain")
+
+    progressive_begin = visual_src.find("bool progressiveTextureCandidate(")
+    progressive_end = visual_src.find("\n}\n\nHRESULT createProgressiveTexture",
+                                      progressive_begin)
+    progressive = visual_src[progressive_begin:progressive_end]
+    present_begin = visual_src.find("void onPresent(IDXGISwapChain* swapChain)")
+    present_end = visual_src.find("\n}\n\nvoid onPostPresent", present_begin)
+    present = visual_src[present_begin:present_end]
+    ok("if (!g_options.streaming" in progressive
+       and "probe::enabled()" not in progressive
+       and present.find("secondaryAdmissionFrameBoundary();")
+           < present.find("probe::beginFrame(")
+       and "advanceTextureUploadsInternal();" in present,
+       "streaming work and the behavior frame boundary run with the probe off")
+
+    loose_begin = visual_src.find("void* __fastcall hookDirectoryOpenFile(")
+    loose_end = visual_src.find("\n}\n\nvoid* __fastcall hookArchiveOpenFile",
+                                loose_begin)
+    loose_hook = visual_src[loose_begin:loose_end]
+    ok("const UINT limit = g_options.looseTextureMax;" in loose_hook
+       and "if (!file || !limit" in loose_hook
+       and "if (!texture || (width <= limit && height <= limit)) return file;"
+           in loose_hook
+       and "return nullptr;" in loose_hook
+       and "probe::enabled()" not in loose_hook,
+       "loose-texture rejection is gated only by its configured cap")
+
+    archive_begin = src.find("int __fastcall hookArchiveBlock(")
+    archive_end = src.find("\n}\n\n// Semantically what", archive_begin)
+    archive_hook = src[archive_begin:archive_end]
+    ok("if (tq::arccache::running())" in archive_hook
+       and "if (tq::arccache::lookup(key, dest))" in archive_hook
+       and "if (keyed && (result & 0xff)) tq::arccache::store(key, dest);"
+           in archive_hook
+       and "g_tracing" not in archive_hook
+       and "probe::enabled()" not in archive_hook,
+       "archive lookup/store behavior does not depend on tracing")
+
+    actor_begin = src.find(
+        "void __fastcall hookShadowActorUpdateMeshInstance(")
+    actor_end = src.find("\n}\n\nint __fastcall hookShadowMeshPassCount",
+                         actor_begin)
+    actor_hook = src[actor_begin:actor_end]
+    mesh_begin = actor_end + 3
+    mesh_end = src.find("\n}\n\nint __fastcall hookBuildShadowRecord",
+                        mesh_begin)
+    mesh_hook = src[mesh_begin:mesh_end]
+    directional_begin = src.find("int __fastcall hookRenderDirectional(")
+    directional_end = src.find("\n}\n\n", directional_begin)
+    directional_hook = src[directional_begin:directional_end]
+    ok("if (!g_shadowActorPoseDeferActive" in actor_hook
+       and "probe::enabled()" not in actor_hook
+       and "if (!g_shadowDeferActive" in mesh_hook
+       and "probe::enabled()" not in mesh_hook
+       and "g_shadowTracing || g_shadowDeferActive" in directional_hook,
+       "shadow behavior uses active fix flags while trace wraps counters only")
+
+    terrain_begin = src.find("void __fastcall hookTerrainRtLoadTextures(")
+    terrain_end = src.find("\n}\n\nint __fastcall hookTerrainRtLoadRenderData",
+                           terrain_begin)
+    terrain_hook = src[terrain_begin:terrain_end]
+    ok("if (g_terrainTracing) {" in terrain_hook
+       and "if (g_terrainPreloadLayersActive && g_terrainPreloadEntry)\n"
+           "        g_terrainPreloadEntry(self, nullptr, 1);" in terrain_hook
+       and terrain_hook.find("g_terrainPreloadLayersActive")
+           > terrain_hook.find("if (g_terrainTracing) {"),
+       "terrain preload executes outside its diagnostic-only trace block")
+
+    secondary_begin = src.find("SecondaryAdmissionContext currentSecondaryAdmissionContext()")
+    secondary_end = src.find("\nstruct SecondaryAdmissionDrawScope", secondary_begin)
+    secondary = src[secondary_begin:secondary_end]
+    draw_begin = visual_src.find("void WINAPI hookDraw(")
+    draw_end = visual_src.find("\n}\n\nvoid WINAPI hookDrawIndexed", draw_begin)
+    draw_hook = visual_src[draw_begin:draw_end]
+    indexed_begin = draw_end + 3
+    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed_hook = visual_src[indexed_begin:indexed_end]
+    ok("g_secondaryAdmissionFrameSerial" in secondary
+       and "probe::currentFrameIndex" not in secondary
+       and draw_hook.find("secondaryAdmissionDrawSuppressed()")
+           < draw_hook.find("probe::drawTimingEnabled()")
+       and indexed_hook.find("secondaryAdmissionDrawSuppressed()")
+           < indexed_hook.find("probe::drawTimingEnabled()"),
+       "secondary admission uses its own frame serial and suppresses before timing")
+    sections = [int(n) for n in re.findall(r"^## ([0-9]+)[.] ",
+                                            findings_src, re.M)]
+    ok(sections == sorted(set(sections)),
+       "findings numbered sections are unique and corrected forward")
 
 
 def check_async_level_load(engine, lock_sites):
@@ -803,12 +1005,12 @@ def check_terrain_diagnostics(engine):
                                 read_options_begin)
     read_options = src[read_options_begin:read_options_end]
     public_install = src[read_options_end:]
-    ok('L"performance", L"terrain_preload_layers", 0' in read_options
+    ok('L"performance", L"terrain_preload_layers", 1' in read_options
        and "const bool terrainPreload = g_terrainPreloadLayers;"
            in public_install
-       and "!shadowDefer && !terrainPreload" in public_install
+       and "!cache && !shadowDefer && !terrainPreload" in public_install
        and "traceTerrain || terrainPreload" in public_install,
-       "terrain_preload_layers defaults off and independently reaches"
+       "terrain_preload_layers defaults on and independently reaches"
        " install()")
     ok("g_terrainPreloadEntry = needLoadTextures && preloadVerified" in install
        and "kTerrainPreloadRelocs, 1" in install
@@ -1233,7 +1435,7 @@ def check_shadow_mesh_boundary(engine):
        "state-0 root meshes use the stock enqueue tuple and return zero passes")
 
     install_begin = src.find(
-        "if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {")
+        "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
     install_end = src.find("\n    if (ok && trace", install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
@@ -1357,12 +1559,12 @@ def check_shadow_actor_pose_boundary(engine):
     install_all_begin = src.find("bool install(HMODULE engine)")
     install_all_end = src.find("\n}\n\nvoid shutdown()", install_all_begin)
     install_all = src[install_all_begin:install_all_end]
-    ok('L"shadow_defer_cold_actor_pose", 0' in options
-       and "const bool shadowDefer = g_shadowDeferColdAlpha || shadowActorPose;"
+    ok('L"shadow_defer_cold_actor_pose", 1' in options
+       and "const bool shadowDefer = g_shadowDeferColdResources || shadowActorPose;"
            in install_all
-       and "!g_tracing && !cache && !async && !pumpFilter && !shadowReuse"
+       and "!g_tracing && !cache && !shadowDefer && !terrainPreload"
            in install_all,
-       "the default-off fix reaches install with tracing disabled and implies"
+       "the default-on fix reaches install with tracing disabled and implies"
        " the later root gate")
     ok('"engine_shadow_actor_pose_deferred"' in probe_src
        and '"engine_shadow_actor_pose_state0"' in probe_src
@@ -1829,7 +2031,7 @@ def check_shadow_alpha_defer(engine):
        and "g_ensureAvailable(texture, nullptr)" in wrapper,
        "bump omission is directional-only and forwards every used case")
     install_begin = src.find(
-        "if (ok && (g_shadowDeferColdAlpha || g_shadowDeferColdActorPose)) {")
+        "if (ok && (g_shadowDeferColdResources || g_shadowDeferColdActorPose)) {")
     install_end = src.find("\n    if (ok && trace", install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
@@ -1839,7 +2041,7 @@ def check_shadow_alpha_defer(engine):
        and "const bool deferOk = recordOk && contextOk && filterOk && bumpOk"
            in install
        and "&& meshOk;" in install,
-       "cold-alpha fix requires the verified bump and mesh patches atomically")
+       "cold-resource fix requires verified bump and mesh patches atomically")
 
     base_ensure = table("kShadowInstanceBaseEnsureWindowBytes")
     base_ensure_at = const("kShadowInstanceBaseEnsureWindowRva")
@@ -2328,10 +2530,9 @@ def check_reflections(engine):
            "GpuReflectionI2P2BuildScene", "GpuReflectionI2P2RenderLight"],
        "reflection child GPU phases preserve exact cell/child order")
     ok("kGroupReflections = 0x20000" in src
-       and "if (traceReflections || reflectionDefer)" in src
+       and "if (traceReflections || secondaryAdmission)" in src
        and "reflectionReady = installReflections(\n"
-           "            engine, traceReflections, g_reflectionDeferAdmissionMesh,\n"
-           "            g_reflectionDeferAdmissionAll, secondaryAdmission);"
+           "            engine, traceReflections, false, false, secondaryAdmission);"
            in src
        and "g_traceMask & kGroupReflections" in src
        and "//131072 the unique reflection-manager call" in engine_h,
@@ -2353,6 +2554,9 @@ def check_reflections(engine):
     buffer_note_end = src.find("\n}\n\nbool reflectionAdmissionBufferTrackingRequested",
                                buffer_note_begin)
     buffer_note = src[buffer_note_begin:buffer_note_end]
+    read_begin = src.find("void readOptions(const wchar_t* iniPath)")
+    read_end = src.find("\n}\n\nbool install(HMODULE engine)", read_begin)
+    read_options = src[read_begin:read_end]
     ok(const("kReflectionAdmissionBufferThreshold") == 32
        and "reflectionAdmissionThresholdReached(buffers)" in build_hook
        and "g_reflectionAdmissionBuildActive = true;" in build_hook
@@ -2365,14 +2569,17 @@ def check_reflections(engine):
        and "g_reflectionAdmissionBuildActive" in buffer_note
        and "++g_reflectionAdmissionBuildBuffers;" in buffer_note,
        "32-buffer BuildScene admission defers only the following mesh pass")
-    ok('L"reflection_defer_admission_mesh", 0' in src
-       and 'L"reflection_defer_admission_all", 0' in src
+    ok('L"reflection_defer_admission_mesh"' not in read_options
+       and 'L"reflection_defer_admission_all"' not in read_options
        and "reflectionAdmissionBufferTrackingRequested()" in visual_src
-       and "reflection_defer_admission_mesh reaches install()" in selftest_src
-       and "reflection_defer_admission_all reaches install()" in selftest_src
+       and "return false;" in src[buffer_note_end:buffer_note_end + 140]
+       and "the removed reflection_defer_admission_mesh key is ignored"
+           in selftest_src
+       and "the removed reflection_defer_admission_all key is ignored"
+           in selftest_src
        and "reflectionAdmissionTriggeredForTest(31)" in selftest_src
        and "reflectionAdmissionTriggeredForTest(32)" in selftest_src,
-       "reflection admission fix is default-off, trace-independent, and tested")
+       "rejected reflection omissions cannot be configured or buffer-arm")
     ok("const bool deferAll = g_reflectionDeferAdmissionAllActive"
            in light_hook
        and "if (!deferAll && g_gpuChunkTracing" in light_hook
@@ -2380,9 +2587,9 @@ def check_reflections(engine):
        and "const bool needMesh = trace || deferAdmissionMesh\n"
            "                       || secondaryPassAdmission;" in install
        and "(!needMesh || tq::detour::attach(" in install
-       and "reflection_defer_admission_all" in engine_h
+       and "false, false, secondaryAdmission" in src
        and "engine_reflection_admission_all_deferred" in probe_src,
-       "whole admission skips one reflection child without requiring the mesh detour")
+       "archived whole-admission fields retain schema but behavior stays disabled")
     admission_prefixes = [
         "reflection_i2_p1", "deferred_i2_setup", "deferred_i2_scene",
         "shadow_directional"]
@@ -2459,12 +2666,12 @@ def check_reflections(engine):
     indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
     indexed_hook = visual_src[indexed_begin:indexed_end]
     ok(const("kSecondaryPassAdmissionBudgetMax") == 64
-       and 'L"secondary_pass_admission_budget", 0' in src
+       and 'L"secondary_pass_admission_budget", 8' in src
        and "secondaryBudget <= (int)kSecondaryPassAdmissionBudgetMax"
            in src
        and "g_secondaryPassAdmissionBudget = secondaryBudget > 0"
            in src,
-       "secondary-pass object budget defaults off and is bounded at 64")
+       "secondary-pass object budget defaults to eight and is bounded at 64")
     ok("SecondaryAdmissionUnseen" in secondary
        and "SecondaryAdmissionAdmitted" in secondary
        and "SecondaryAdmissionPending" in secondary
@@ -2536,8 +2743,8 @@ def check_reflections(engine):
        and visual_src.find("setSecondaryAdmissionDrawHooksReady(")
            < visual_src.find("tq::engineprobe::install(")
        and "return g_secondaryPassAdmissionBudget != 0;" in src
-       and "return g_reflectionDeferAdmissionMesh"
-           " || g_reflectionDeferAdmissionAll;" in src
+       and "bool reflectionAdmissionBufferTrackingRequested() {\n"
+           "    return false;" in src
        and "g_secondaryAdmissionDrawHooksReady = false;" in src
        and "secondary_pass_admission_budget reaches install()"
            in selftest_src
@@ -2551,7 +2758,7 @@ def check_reflections(engine):
            in selftest_src
        and "a pending secondary identity can enter on the next frame's budget"
            in selftest_src,
-       "secondary-pass admission is default-off, trace-independent, Draw-atomic, and self-tested")
+       "secondary-pass admission is default-on, trace-independent, Draw-atomic, and self-tested")
     ok("countReflectionDraw(elapsedUs);" in src
        and "countReflectionCreation(kind == DeferredCreationTexture" in src
        and "countReflectionResource(elapsed);" in src,
@@ -2690,7 +2897,7 @@ def check_cross_pass_identity():
            < src.find("tq::probe::markStutter();"),
        "cross-pass identities are written during the session before F12 marks")
     ok("const bool crossPass = wants(kGroupReflections)" in src
-       and "traceShadow || shadowReuse || shadowDeferReady || crossPass" in src
+       and "traceShadow || shadowDeferReady || crossPass" in src
        and "wants(kGroupDeferredPasses) || crossPass" in src
        and "g_deferredPassTracing && g_reflectionTracing" in src
        and "g_reflectionChildTracing;" in src,
@@ -2872,7 +3079,7 @@ def _check_gpu_draw_chunks_run76(engine):
        and "patchCall(\n            g_shadowRecordExecutorPatch" in shadow_install
        and "if (!executorOk)" in shadow_install
        and shadow_install.find("restoreCall(g_shadowDirectionalPatch)")
-           < shadow_install.find("if (ok && (g_shadowDeferColdAlpha")
+           < shadow_install.find("if (ok && (g_shadowDeferColdResources")
        and "restoreCall(g_shadowRecordExecutorPatch)" in src[
            src.find("void shutdown()"):src.find("#ifdef TQ_SELFTEST")],
        "executor and outer E8 install atomically and restore on shutdown")
@@ -3889,6 +4096,7 @@ def main():
        "TerrainBlock shader window, offset 7, E8")
 
     check_archive_cache(engine)
+    check_configuration_contract()
     check_async_level_load(engine, sites)
     check_directional_shadow(engine)
     check_resource_lifecycle(engine)

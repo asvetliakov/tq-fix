@@ -29,14 +29,10 @@ namespace probe {
 // QueryPerformanceCounter pair on each is not free. Those get counters, and
 // their real cost is priced by turning the feature off in the INI instead.
 //
-// The one exception is `[debug] draw_timing`, which arms a clock pair around
-// the game's own Draw/DrawIndexed and Map calls -- the driver call itself, not
-// the hook body. Findings §35 is why: on the in-play stutter frame, 29-54% of
-// `Engine::Render` is left after the game's resource loader and every other
-// named cost, and the frame after it costs a further 89-179 ms while loading
-// nothing and drawing a scene the frame after *that* draws in 20 ms. That
-// residual can only be in the D3D11 submission path, and these two phases are
-// what split it. Off by default, and off it costs one predictable branch.
+// `performance_trace=full` also arms a clock pair around the game's own
+// Draw/DrawIndexed and Map calls -- the driver call itself, not the hook body.
+// Findings §35 is why. Hitch-only tracing omits these high-frequency clocks;
+// while they are off the hook costs one predictable branch.
 
 // ---------------------------------------------------------------------------
 // CPU phases. The order is the CSV column order and must not be reshuffled
@@ -407,7 +403,7 @@ enum Counter {
     CounterEngineShadowContextPatchContextMismatch,
     CounterEngineShadowContextPatchCallFailed,
     CounterEngineShadowContextPatchReverted,
-    // With shadow_defer_cold_alpha enabled, a missing shader parameter is
+    // With shadow_defer_cold_resources enabled, a missing shader parameter is
     // checked before GetTexture. `skipped` is every avoided getter and
     // `skipped_cold` is the state-0 subset that would have loaded now.
     CounterEngineShadowMaterialTexSkipped,
@@ -422,7 +418,7 @@ enum Counter {
     // these count directional-only omissions and their cold subset.
     CounterEngineShadowBaseOverrideSkipped,
     CounterEngineShadowBaseOverrideSkippedCold,
-    // [performance] shadow_defer_cold_alpha. These describe omitted
+    // [performance] shadow_defer_cold_resources. These describe omitted
     // alpha-tested caster/pass records by the base texture's pre-call state.
     // State 0 is explicitly queued unless it was already in the queue; state
     // 1 is already loading. No pointer survives the call, and state 2 is
@@ -578,12 +574,8 @@ enum Counter {
     // when no message is returned.
     CounterPumpPeekMiss,
     CounterPumpPeekMissUs,
-    // [performance] pump_timer_min_ms. An empty poll costs 1 us and a
-    // retrieval costs up to 110 ms (run 35 frame 5303: three peeks, one miss
-    // at 1 us, 221,249 us across the two that returned), and §16 found 76% of
-    // slow retrievals return WM_TIMER -- which PeekMessage synthesizes on
-    // demand rather than dequeues. These count how often the unfiltered peek
-    // that can synthesize one was allowed through versus split around it.
+    // Archived timer-range experiment counters. They retain their CSV slots
+    // so old runs remain readable; current builds never filter the pump.
     CounterPumpTimerFull,
     CounterPumpTimerSplit,
     // Engine.dll's array allocator, reached through its import table. Run 23
@@ -680,26 +672,10 @@ enum Counter {
     CounterEngineSleepMainUs,
     CounterEngineSleepMainReqUs,
 
-    // [performance] async_level_load, which is a fix rather than an
-    // instrument: the two AddElementsInBox call sites that force a
-    // synchronous Region::LoadLevel are retargeted at
-    // Region::BackgroundLoadLevel instead. Neither column is timed, because
-    // there is nothing left to time -- the point of the change is that the
-    // call returns without doing the work.
-    //
-    // `engine_async_load` is a region handed to the loader thread and skipped
-    // for this frame; `engine_async_sync` is one that fell through to the
-    // original because the level was already resident, which
-    // BackgroundLoadLevel answers by doing nothing at all. The two together
-    // are the whole population of the retargeted sites, so a run with the
-    // switch on and both columns zero means the patch is not in.
+    // Archived async-level experiment counters. They retain their CSV slots
+    // so old runs remain readable; current builds never retarget those calls.
     CounterEngineAsyncLoad,
     CounterEngineAsyncSync,
-    // The portal-traversal site keeps its own pair, because it is the one that
-    // matters: runs 27-32 established that the two renderer sites never defer
-    // anything (2,849 calls, 2,849 already resident), while this one is the
-    // only synchronous level load that happens during play rather than on a
-    // level change. Sharing a column with them would hide exactly that.
     CounterEnginePortalAsyncLoad,
     CounterEnginePortalAsyncSync,
     // TerrainType's own semantic preload and draw entry points. These are
@@ -977,9 +953,9 @@ namespace detail {
 // Read once at install and never written again from the render thread, so the
 // hot-path test is a plain load. Exposed only so enabled() can be inlined.
 extern bool active;
-// [debug] draw_timing, folded with `active` at readOptions so the hot path is
-// one load rather than two. Same discipline as `active`: written once at
-// install, read from the render thread thereafter.
+// Folded with full-trace mode at readOptions so the hot path is one load rather
+// than two. Same discipline as `active`: written once at install, read from
+// the render thread thereafter.
 extern bool drawTiming;
 }
 

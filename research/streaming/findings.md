@@ -5700,2712 +5700,442 @@ and `shadow_split` must remain unchanged. No visual observation accompanied
 the completion message, so run 59 supplies no new artifact-safety claim.
 
 
-## 108. Run 85 confirms the fix and proves self-arming without the reflection proxy
-
-Run 85 is archived as `tqflicker-frames.run85.csv`, SHA-256
-`61a90305a13a833f1ae08aabf1dd1e27cb1cd787da58f16534493fc53e8d4a97`,
-and `tqflicker-debug.run85.log`, SHA-256
-`1bddaaafd7f2c9c6ea7b81edba8cc4cf117dde1f3ec99bfef8341b6bc684ca67`.
-Both archives were compared byte-for-byte with the completed live files. The
-result-annotated Run-85 INI is SHA-256
-`e352417f76d4859b2ccb7469564ffc68da472a8bcf689e364c97dc0d421b91e3`;
-the exact launch-time INI hash is retained in section 107. The
-CSV has 7,305 contiguous frames, 0--7304. Its five parts are **menu** 0--1902,
-**load-game frame** 1903, **loading screen** 1904--2995, **first world frame**
-2996, and **play** 2997--7304.
-
-F12 is **play** frame 6583 at 22.240 ms. As in Run 84, this is a deliberate
-old-location marker without a felt hitch, not a human-reaction marker. The
-exact old transition class is **play** frame 6490, 1.917 s before F12: it
-changes the directional-shadow region, creates 60 buffers in the whole frame,
-and runs the second-manager / first-plane reflection `BuildScene`. The user
-again reports that no old stutter was noticeable.
-
-Frame 6490 is 40.117 ms CPU / 40.780 ms GPU. Exact reflection is 0.128 ms GPU,
-directional shadow is 19.090 ms GPU, and terrain ground is 0.765 ms GPU. As a
-same-run reference, 90 collision-active, full-scene **play** frames 6493--6582
-under 60 ms in the 1,200--1,699 indexed-draw band have medians of 20.484 ms
-CPU, 20.471 ms GPU, 6.971 ms directional GPU, 1.021 ms terrain-ground GPU,
-and 0.315 ms exact reflection GPU. The transition surcharge is 19.633 ms CPU
-and 20.309 ms GPU. This repeats Run 84's positive result using each run's
-controlled local class rather than an across-run p50.
-
-The self-arming behavior is exact. It records one trigger in the whole
-session, on **first world frame** 2996: eight new identities are admitted and
-449 pending directional draw calls are suppressed. The exact reflection
->=32-buffer counter is zero on that frame and zero for the entire session.
-Although the frame also has a shadow-region change, Run 85's verified code no
-longer reads that event as an admission trigger. Later region changes do not
-increment the one-shot trigger counter.
-
-At the marked **play** transition, four new reflection plus four new
-directional-shadow identities consume the shared budget, and ten further
-directional draw calls are suppressed. The next frame admits one reflection
-plus seven shadow identities with zero suppression; frame 6492 admits one
-further identity. Those frames are 32.247 and 20.943 ms CPU / 20.330 and
-20.889 ms GPU, so the transition has no large postponed rebound. A separate
-**play** population beginning at frame 6616 proves the generalized class in
-the data: it has no region change and no reflection threshold, admits eight,
-and suppresses 102 pending shadow calls. That population is spread through
-frame 6631; none of those frames exceeds 59.033 ms. It has no felt marker and
-is not claimed as a subjective event.
-
-Across the session there are 85 newly admitted reflection identities and
-1,336 newly admitted directional-shadow identities. The shared per-frame
-admission count never exceeds eight, the identity table has zero overflow,
-and the rejected mesh-only and whole-reflection omission counters remain
-zero. The exact marked-area class plus the user's second positive report now
-support keeping progressive secondary-pass admission and rejecting more trace
-or another reflection omission. The next confirmation should use the same
-budget eight with `performance_trace=0`: normal play must preserve the result
-without the measurement load, and that boot exercises the newly independent
-trace-off Draw-hook path.
-
-
-## 107. Run 85 self-arms on the controlled population instead of transition proxies
-
-Run 84 is the first positive subjective and measured result for the old
-**play** transition: the user reports that it appears fixed or is no longer
-visible, while the exact old event falls to 38.229 ms CPU / 31.758 ms GPU and
-spreads 39 newly admitted secondary identities over five frames without a
-one-frame rebound. Section 106 contains the five session parts and controlled
-same-run comparison.
-
-Run 85 changes only how default-off
-`[performance] secondary_pass_admission_budget=8` begins controlling new
-objects. The first eight previously unseen identities encountered across the
-exact reflection and directional-shadow classes in a presented frame render
-normally and become globally admitted. The ninth proves that the actual
-controlled population exceeds the budget, records the one session arming
-event, remains pending, and retries against the next presented frame's shared
-budget. An identity already admitted through one secondary consumer spends no
-slot in the other. Once armed, the state remains explicit, but the same budget
-rule itself handles every later population without needing another trigger.
-
-The >=32-buffer reflection build and a change between two non-null directional
-shadow-region pointers no longer arm this behavior. They remain trace
-telemetry and continue to drive only their older default-off experiments where
-applicable. A trace-off progressive-admission boot therefore no longer
-requests the D3D11 `CreateBuffer` vtable hook. This covers a scene transition
-with no reflection, fewer than 32 created buffers, or no region-pointer change
-without inventing a broader scene-transition proxy.
-
-An install audit also closed a pre-existing fail-open gap. Progressive
-admission now independently requests the mod's `Draw` and `DrawIndexed` vtable
-wrappers even if every visual feature and trace group is disabled. Visual
-installation publishes readiness only when both slots patch successfully;
-the Engine-side reflection, directional, terrain, and mesh behavior becomes
-active only with that readiness plus all three existing verified Engine
-dependencies. Failure of either draw slot leaves all game draws stock. No new
-Engine target, byte table, or detour is added.
-
-The self-test now proves that two shared identities fit a synthetic budget of
-two without arming, identity three self-arms and remains pending in both
-secondary consumers, and that identity enters on the next presented frame.
-It also proves that the progressive option no longer asks for the reflection
-buffer signal. The verifier checks the pressure ordering, removal of both
-proxy calls, CreateBuffer independence, draw-hook request/readiness ordering,
-atomic Engine activation, and shutdown reset. All 784 site checks, doctor, the
-766,464-byte release build, and the complete off-game self-test pass; GPU
-timestamp retirement passes with one non-flushing poll and one post-flush
-poll.
-
-Run 85 is installed from
-`cache/runs/run85-secondary-self-arming-budget8.ini`. Source and installed
-DLLs are byte-identical at SHA-256
-`d654f91f5f98e8c931501fb4cf27554a9ed0f251432e6727f34c6a84c6033569`;
-launch-time source and installed INIs were byte-identical at SHA-256
-`b9aec8863f2ed6bf27fc6bd54030c8e909bd6c7aaeb052f2e5a043ff3fca2f41`.
-The archived INI header is annotated with the completed result in section 108.
-No stale live CSV or debug log existed, and the game had not been launched.
-
-
-## 106. Run 84 removes the marked-area burst; transition proxies are no longer the right admission gate
-
-Run 84 is archived as `tqflicker-frames.run84.csv`, SHA-256
-`ef3a9372e7d03b8cedfc234424dcf183a8456621a0317b165aea54f7e201f8e9`,
-and `tqflicker-debug.run84.log`, SHA-256
-`91814fc42cd9ef8118fa0ecac44166d6622cbbe81c91937d3f879a75497fb149`.
-Both archives were compared byte-for-byte with the completed live files. The
-result-annotated Run-84 INI is SHA-256
-`0aa75236405ade7ad422fb727cb859b2a064e5becffb09c245431d963b57c46c`;
-the exact launch-time INI hash is retained in section 105. The
-CSV has 7,310 contiguous frames, 0--7309. Its five parts are **menu** 0--2141,
-**load-game frame** 2142, **loading screen** 2143--3205, **first world frame**
-3206, and **play** 3207--7309.
-
-F12 is **play** frame 6827 at 22.249 ms. This press was deliberately made at
-the old route location even though no hitch was apparent, not as a reaction
-to a felt event, so the marker has no reaction-window candidate. The exact
-old transition class is nevertheless unambiguous: **play** frame 6764, 1.320
-s before F12, changes the directional-shadow region, creates 93 buffers, and
-runs the second-manager / first-plane reflection `BuildScene`. The user's
-primary result is that the old stutter now appears fixed or is no longer
-visible.
-
-Frame 6764 is 38.229 ms CPU / 31.758 ms GPU. Exact reflection is 0.762 ms GPU,
-directional shadow is 15.168 ms GPU, and terrain ground is 2.147 ms GPU. As a
-same-run reference, 58 collision-active, full-scene **play** frames 6769--6826
-under 60 ms in the 1,300--1,699 indexed-draw band have medians of 20.681 ms
-CPU, 20.646 ms GPU, 7.062 ms directional GPU, 1.113 ms terrain-ground GPU,
-and 0.328 ms exact reflection GPU. The transition surcharge is therefore
-17.548 ms CPU and 11.112 ms GPU. Run 83's old marked transition candidate had
-a 75.367 ms same-run CPU surcharge and a 79.260 ms same-run GPU surcharge;
-this comparison uses each run's controlled local reference, not a p50 across
-routes.
-
-The behavior fired and spread rather than merely moving the work once. At
-frame 6764 it admits eight new identities and suppresses 55 pending secondary
-draw calls. Frames 6765--6768 admit 8, 8, 8, and 7 further identities; they
-are 28.645, 21.397, 24.939, and 24.502 ms. Pending draw suppression falls to
-28, 20, 8, and zero. Thus 39 identities are admitted over five frames with no
-later rebound in this transition. The shared eight-object limit is never
-exceeded anywhere in the CSV, and the 8,192-slot identity table reports zero
-overflow.
-
-The current arming condition is less restrictive in practice than its
-reflection wording suggests. A directional-region change arms the behavior
-on **first world frame** 3206, after which it remains armed for the session.
-The marked frame reports two trigger events because it has both another
-directional-region change and a >=32-buffer reflection build, but neither is
-needed to re-arm it. **Play** frame 4545 demonstrates the non-reflection case:
-its directional-region change has no reflection call, and the already-armed
-budget spreads its pending directional population over frames 4545--4549.
-
-The user's general objection is still correct: neither a 32-buffer reflection
-build nor a change between two non-null shadow-region pointers is a universal
-definition of a scene-admission burst. The next implementation should stop
-trying to name the transition. In either exact reflection or directional-
-shadow context, count previously unseen shared renderable identities in the
-current presented frame; allow the first `N` stock, and self-arm when identity
-`N+1` proves that an actual backlog exists. Subsequent identities are pending
-under the existing shared budget. This directly measures the work being
-controlled, covers transitions with no reflection and no region-pointer
-change, and can remove the CreateBuffer dependency from a trace-off behavior
-install. Region changes and reflection buffer counts can remain trace
-telemetry but should no longer control the fix.
-
-Do not combine either rejected reflection-defer experiment with this result.
-Runs 81 and 82 moved one reflection consumer's complete work to a later
-consumer/frame and produced no subjective improvement. Run 84 instead leaves
-Resource/material preparation in place and reduces exact reflection at the
-marked transition to 0.762 ms GPU by budgeting the actual draws. Skipping the
-mesh reflection or whole reflection once would now duplicate that treatment,
-delay useful preparation, and add one-frame stale reflection for no measured
-benefit.
-
-
-## 105. Run 83 rejects raw first-seen count and prepares coordinated progressive secondary-pass admission
-
-Run 83 is archived as `tqflicker-frames.run83.csv`, SHA-256
-`91a3336771bc1e18ab03850fcaa9edaf120899deafc46ccfaf25d5a0a2758658`,
-and `tqflicker-debug.run83.log`, SHA-256
-`765278ffba1089e26bd1fcedd79c2c3d11c2d871e2ed3caff5c304df1d3eb2f9`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 6,885 contiguous frames, 0--6884. Its five parts are **menu** 0--1650,
-**load-game frame** 1651, **loading screen** 1652--2790, **first world frame**
-2791, and **play** 2792--6884.
-
-F12 is **play** frame 6316 at 35.349 ms. Frame 6315 is 80.927 ms but ends only
-35 ms before the key is retrieved; its onset is only 116 ms before the marker,
-so it cannot be selected as the user's reaction target. The plausible felt
-event is **play** frame 6293 at 97.060 ms, ending 604 ms before F12. The user
-reports that the session still feels the same. Run 83 is passive, so that
-subjective result is a baseline rather than a behavior rejection.
-
-The new identity trace is complete at that event and has zero table overflow.
-Exact second-manager / first-plane reflection contains 288 draws and sees 70
-`TerrainPlug` calls, 24 `TerrainBlock` calls, and 144
-`GraphicsMeshInstance` calls. Their first-in-this-exact-consumer counts are
-12, 4, and 118: 134 previously unseen reflection renderables arrive on one
-frame. Exact directional shadow contains 762 mesh calls but only 15 first
-visits. Both exact second-owner geometry consumers contain zero first visits;
-the scene child has 42 unclassified draws. Thus the marked population is not
-a large wave entering all four consumers together.
-
-Raw first-seen count is not itself a cost model. Another **play** region
-change, frame 4144, admits 125 first-seen meshes to exact second-owner geometry
-setup and 40 to directional shadow but is only 20.344 ms CPU / 25.846 ms GPU.
-Frame 6360 admits 100 first-seen directional meshes in 22.638 ms CPU /
-23.807 ms GPU. The candidate's distinguishing fact is first GPU/resource use
-of a particular cold population and pass state, not merely the number of new
-object pointers.
-
-At **play** frame 6293, exact reflection `BuildScene` is 19.322 ms CPU and
-creates 176 buffers. Its following exact `RenderLightStyle` is 41.786 ms CPU /
-54.860 ms GPU. Sixteen nested main-thread Resources take 34.934 ms, including
-four meshes and twelve textures; fourteen texture creations take 23.445 ms.
-The retained names include new NPC/debris meshes and textures plus the two
-known Gadir rocky-pebbles terrain textures. Reflection's 20-draw GPU bins are
-not uniform: bins 1, 7, and 8 cost 25.064, 13.128, and 7.334 ms. The first is
-all `GraphicsMeshInstance`; the seventh is eighteen mesh calls; the eighth is
-eight `TerrainPlug` calls. Six fresh buffers are observed in both reflection
-and directional shadow on the same frame, but no large shared-buffer
-population reappears.
-
-Fourteen nearby collision-active, full-scene **play** frames 6300--6314 under
-60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
-change, and no off-main texture creation, average 21.693 ms total, 16.988 ms
-exact `Engine::Render`, 6.604 ms game draw submission, 21.974 ms whole GPU,
-7.877 ms directional GPU, 1.055 ms terrain-ground GPU, 0.970/0.941 ms exact
-second-owner geometry-setup/scene GPU, and 0.260 ms exact reflection GPU.
-Relative to this same-run local class, frame 6293 adds 75.367 ms total, 76.812
-ms render, 11.817 ms draw submission, 79.260 ms whole GPU, 15.640 ms
-directional GPU, 21.904 ms terrain-ground GPU, and 54.619 ms reflection GPU.
-These nested/queued intervals are not additive.
-
-The fresh correction is that no single named renderer is “the stutter.” The
-native engine makes a region's cold GPU population eligible without a frame
-budget. CPU Resource realization, reflection, terrain ground, and directional
-shadow therefore submit together; later game draws become queue-drain points.
-Which exact pass owns the longest timestamp changes across identical routes
-because the immediate D3D11 queue serializes the burst differently. This
-mechanism applies to native Windows D3D11 as well as Wine/CrossOver and does
-not require a host-round-trip explanation.
-
-Runs 81--82 did not test progressive GPU admission. They omitted one
-reflection consumer and returned all postponed work together on the next
-consumer/frame, where the felt burst remained. Run 84 instead adds default-off
-`[performance] secondary_pass_admission_budget=8`. After the existing exact
->=32-buffer reflection signal or a directional-region change, reflection and
-directional shadow share one budget of eight newly encountered renderable
-identities per frame. `TerrainPlug`, `TerrainBlock`, and
-`GraphicsMeshInstance::RenderPass` still execute Resource/material setup, but
-their game `Draw`/`DrawIndexed` calls are suppressed while an identity is
-pending. Already admitted objects and the normal colour class stay stock. A
-pending identity competes again on the next frame, so 134 objects are spread
-over roughly seventeen visible frames rather than all returning one frame
-later.
-
-This adds no Engine byte target. It reuses the verified reflection
-`BuildScene`/`RenderLightStyle` `patchCall` sites, the exact directional-shadow
-wrapper, the existing 19-byte `TerrainPlug`/`TerrainBlock` entries with six
-bytes stolen, the 24-byte `GraphicsMeshInstance::RenderPass` entry with six
-bytes stolen, and the mod-owned D3D11 Draw vtable hooks. The behavior reaches
-`install()` with the performance probe off and brings no trace group. Six new
-CSV fields are counts only. The existing 8,192-slot / 16-probe identity table
-also carries pending/admitted state and fails open to stock rendering on
-overflow. A separate Present-driven frame serial keeps the budget functional
-when `performance_trace=0`.
-
-The extended verifier passes 784 checks. Changing the new budget upper bound
-from 64 to 65 fails it. Doctor, the 766,464-byte release build, and the complete
-off-game self-test pass, including GPU timestamp retirement and the synthetic
-two-object shared budget / next-frame pending admission. Run 84 is installed
-from `cache/runs/run84-secondary-pass-admission-budget8.ini`. Source and
-installed DLLs are byte-identical at SHA-256
-`dad27c4f84f667f7577a540f88519869993b187a1b64a26c43c3360a1f0e6dd5`;
-launch-time source and installed INIs were byte-identical at SHA-256
-`dd1e2661c5c9e650c00c9183ae53287568becabbadc774c59f3357f1a8e51b69`.
-Run 83's live CSV/debug log matched their archives immediately before both
-stale live names were removed. The game has not been launched.
-
-
-## 104. Run 82 rejects whole-reflection omission; Run 83 traces first-seen renderables across every consumer
-
-Run 82 is archived as `tqflicker-frames.run82.csv`, SHA-256
-`dd4c8083f39b0574851819795c39d9d48321fec5a5e91da65d26cb9dbe66f235`,
-and `tqflicker-debug.run82.log`, SHA-256
-`d786d6e79c95a3cd1413a547cea9befd24540ad44f5b5995c1d3e14da1daef1c`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 7,004 contiguous frames, 0--7003. Its five parts are **menu** 0--1704
-(16.308 s), **load-game frame** 1705 (1,269.2 ms), **loading screen**
-1706--2873 (9.800 s), **first world frame** 2874 (588.7 ms), and **play**
-2875--7003 (63.294 s).
-
-F12 is **play** frame 6436 at 25.336 ms. The plausible felt pair is **play**
-frames 6417/6418 at 79.752/165.151 ms, ending 569/404 ms before the marker.
-The user again reports that the stutter **feels the same**. This subjective
-failure is the primary result.
-
-The whole-child behavior fired exactly once at the reaction candidate. Play
-frame 6417 creates 98 buffers, 87 inside exact second-manager / first-plane
-reflection `BuildScene`, crosses the fixed 32-buffer gate, and records
-`engine_reflection_admission_all_deferred=1`. The complete following
-`RenderLightStyle` is omitted: its wrapper takes 37 us and its exact GPU
-interval is only 0.042 ms. Thus Run 82 is a valid rejection of complete
-one-frame reflection omission, not another missed trigger.
-
-The removed work migrates to later consumers. On play frame 6417, the exact
-second deferred owner's geometry-setup scene-list class costs 39.381 ms GPU,
-terrain ground costs 20.157 ms GPU, and exact
-`GraphicsShadowMapDx11::RenderDirectional` costs 114.014 ms GPU across 755
-draws. The whole frame is 79.752 ms CPU / 203.690 ms GPU and spends 49.020 ms
-in game draw submission. On frame 6418, whole GPU work has fallen to 26.780
-ms, but the exact second-owner geometry-scene class spends 125.166 ms CPU,
-including 123.574 ms in its game draw calls; total game draw submission is
-125.098 ms. This is first-use production followed by queue backpressure even
-with reflection absent.
-
-Thirteen nearby collision-active, full-scene **play** frames 6421--6435 under
-60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
-change, and no off-main texture creation, average 22.327 ms total, 17.877 ms
-exact `Engine::Render`, 7.068 ms game draw submission, 22.447 ms whole GPU,
-7.999 ms directional GPU, 1.072 ms terrain-ground GPU, 0.998 ms exact second-
-owner geometry-setup GPU, 1.042 ms exact second-owner geometry-scene GPU, and
-0.271 ms exact reflection GPU. This is a within-run post-admission class, not
-a cross-run p50.
-
-Texture realization again follows rather than causes onset. The skipped
-reflection child performs no main-thread Resource load on frame 6417. On frame
-6418, when reflection returns, its two Gadir terrain Resources cost 10.145 ms,
-including 7.940 ms texture creation. From frames 6418--6436, 50 off-main
-texture creations take 67.988 ms of overlapping loader-thread time. Neither
-population can explain the already completed frame-6417 GPU producer.
-
-The correction is architectural but does not yet justify a renderer rewrite.
-The >=32-buffer reflection `BuildScene` event is a reliable observation point
-for a wider scene-admission transition; it is not the unique owner of the
-cost. Omitting the first consumer merely transfers cold GPU work to the exact
-second-owner scene list, terrain ground, and directional shadow. A further
-reflection-only A/B, texture throttle, archive prefetch, or lower-mip change
-would therefore test the wrong boundary. The next decision is whether newly
-seen directional casters can be admitted progressively, or whether first use
-is broad enough to require staging the whole scene.
-
-Run 83 is passive and answers that decision in one route. The existing exact
-`TerrainPlug`, `TerrainBlock`, and `GraphicsMeshInstance::RenderPass` wrappers
-now count their calls and object identities independently in four exact
-consumers: second-manager / first-plane reflection, second-owner geometry
-setup, second-owner geometry scene, and
-`GraphicsShadowMapDx11::RenderDirectional`. Each `_first` count means that
-object has never previously reached that exact consumer in the session.
-Per-consumer draw counts expose unnamed remainder. The bounded 8,192-entry,
-16-probe identity table reports overflow and adds no clock, D3D getter, GPU
-query, Engine patch, or behavior change. Header and rows now share one audited
-32-KiB line bound. Independent perturbations of 8,192, 16, the identity hash
-salt, and 32,768 are all rejected by the verifier.
-
-The extended verifier passes. Doctor, the 763,904-byte release build, and the
-complete off-game self-test pass, including GPU timestamp retirement and
-first-once-per-class/per-consumer identity behavior. Run 83 is installed from
-`cache/runs/run83-admission-consumer-identities.ini`. Source and installed
-DLLs are byte-identical at SHA-256
-`5ba7abeaa4b2f66527f9420697e26d09dafbcb3d94f22f7a94fae43e1e7a71e8`;
-source and installed INIs are byte-identical at SHA-256
-`a5a356546fd025482f3ad659a9ec1deb6f04b57669e1fd14f30322314feec8b0`.
-The completed Run-82 live outputs matched their archives before both stale
-live names were removed. The game has not been launched.
-
-
-## 103. Run 81 rejects mesh-only reflection staging; Run 82 skips the complete admitted reflection once
-
-Run 81 is archived as `tqflicker-frames.run81.csv`, SHA-256
-`801c30ef033205f4be9de082b26aa08769f1b27b583f6dc123242c81f762ccce`,
-and `tqflicker-debug.run81.log`, SHA-256
-`5ce41f83503a603a1b90fb43161ab98382104bc64f8518271d00794208604692`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 6,939 contiguous frames, 0--6938. Its five parts are **menu** 0--1933
-(18.441 s), **load-game frame** 1934 (1,517.0 ms), **loading screen**
-1935--3024 (9.525 s), **first world frame** 3025 (761.5 ms), and **play**
-3026--6938 (61.942 s).
-
-F12 is **play** frame 6409 at 24.416 ms. The plausible felt event is the
-**play** pair 6388/6389 at 115.778/138.573 ms, ending 579/440 ms before the
-marker. The user reports **no perceptible change in the stutter**. That report
-is the primary result; neither a maximum nor the nearest frame supersedes it.
-
-The behavior fired exactly once, on play frame 6388. Its reflection
-`BuildScene` created 91 of the frame's 105 buffers and crossed the fixed
-32-buffer gate. The following exact reflection `RenderLightStyle` omitted all
-87 `GraphicsMeshInstance` calls. Its retained class totals prove zero mesh
-calls/draws, 50 `TerrainPlug` calls/draws, and 18 `TerrainBlock` calls/draws.
-This is therefore a valid rejection of the mesh-only treatment, not a missed
-trigger or a different route event.
-
-What survived is larger than the omitted class. Exact second-manager / first-
-plane reflection still costs 41.959 ms GPU; its six populated chunks total
-41.920 ms, all from the terrain-only range. The first three chunks cost
-26.862, 8.739, and 5.816 ms. One `TerrainBlock` call spends 9.699 ms in two
-Resource loads, including 6.711 ms of texture creation, but that nested CPU
-work must not be added to the GPU chunks. Directional shadow is a separate
-81.536 ms GPU producer. The later exact second-owner geometry-scene class
-spends 52.994 ms CPU, including 51.871 ms in game draw submission, for only
-13.910 ms GPU. Frame 6388 is 115.778 ms CPU / 214.312 ms GPU; frame 6389 then
-blocks 113.445 ms in game draw submission. This is again producer followed by
-queue backpressure, now with the mesh-reflection population proved absent.
-
-Twelve nearby collision-active, full-scene **play** frames 6391--6408 under
-60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
-change, and no off-main texture creation, average 21.348 ms total, 16.889 ms
-exact `Engine::Render`, 7.085 ms game draw submission, 21.360 ms whole GPU,
-7.591 ms directional GPU, 0.237 ms exact reflection GPU, and 0.820 ms exact
-second-owner geometry-scene GPU. They are a within-run post-admission class,
-not a cross-run p50. Against it, play frame 6388 adds 94.430 ms total,
-46.079 ms game draw submission, 192.952 ms whole GPU, 73.945 ms directional
-GPU, and 41.722 ms exact reflection GPU.
-
-The texture tail remains secondary to onset. No off-main texture creation is
-charged to frame 6388. From play frames 6389--6407, 49 off-main initial-data
-texture creations take 66.054 ms of overlapping loader-thread time. The
-during-session debug file reaches its bounded output size while reporting
-later retained chunks, but it contains the complete frame-6388 class report;
-the CSV counters and timings are complete.
-
-Run 82 adds default-off
-`[performance] reflection_defer_admission_all=1`. It uses the same exact
-successful-buffer count in reflection `BuildScene`, but at 32 skips the one
-immediately following whole reflection `RenderLightStyle` call. Terrain and
-mesh reflection return on the next frame. Directional shadows, the main
-colour pass, resource loading, culling, and `shadow_split` are untouched. A
-one-frame stale water reflection is the explicit visual trade-off to report.
-With tracing off this behavior needs only the already verified `patchCall`
-sites at Engine RVAs `0x186501` and `0x18694d`; it does not install the mesh
-entry detour or any trace group. The new CSV count
-`engine_reflection_admission_all_deferred` is not a duration.
-
-The extended verifier passes, including the conditional mesh-detour
-dependency and the exact shared 32-buffer boundary. Doctor, the 761,856-byte
-release build, and the complete off-game self-test pass, including GPU
-timestamp retirement. Run 82 is installed from
-`cache/runs/run82-reflection-admission-all.ini`. Source and installed DLLs are
-byte-identical at SHA-256
-`85e1b1e48c2f616446f9e51dd767c1bb441d59ce51ca2187549a87ecdb758a7d`;
-source and installed INIs are byte-identical at SHA-256
-`9d9b9f2e33d0fd44bc3f2a763797dd9600b5d69a36a3b73a17a5a398cba90ac2`.
-The completed Run-81 live outputs matched their archives before both stale
-live names were removed. The game has not been launched.
-
-
-## 102. Run 80 separates the reflection onset from the texture tail; Run 81 stages mesh reflection
-
-Run 80 is archived as `tqflicker-frames.run80.csv`, SHA-256
-`68ca3bd58f89dde72a64b31fbbe337acb070cc8d552ccf9c75d0e6f6c88c9b19`,
-and `tqflicker-debug.run80.log`, SHA-256
-`6fd82332ad539ad94cdf7d437ea97b9cd311cc0527ec4aadb9eeabfe099bb365`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 7,495 contiguous presented frames, 0--7494. Its five parts are
-**menu** 0--2191 (20.183 s), **load-game frame** 2192 (1,492.219 ms),
-**loading screen** 2193--3337 (9.811 s), **first world frame** 3338
-(680.377 ms), and **play** 3339--7494 (63.023 s).
-
-F12 is **play** frame 6919 at 22.061 ms. The probable felt event is the
-full-scene, collision-active **play** pair 6895/6896 at 80.635/41.034 ms,
-ending 534/493 ms before F12. Their onset-to-marker distances are 614/534 ms.
-The user reported only completion, so this remains a reaction-window
-identification rather than a claim that the marker proves the pair.
-
-The onset is now exact. **Play** frame 6895 changes shadow region, jumps from
-214 to 1,445 indexed draws, and creates 104 buffers / 3,550,400 bytes. The
-second-manager/first-plane reflection `BuildScene` owns 95 of those creations
-and takes 8.896 ms CPU. Its following exact `RenderLightStyle` takes
-10.479 ms CPU / 35.892 ms GPU across 211 draws. The later exact second-owner
-deferred geometry-scene class then blocks for 44.927 ms CPU, including
-43.473 ms in game `Draw` / `DrawIndexed`, while producing only 2.175 ms GPU.
-That is the same-frame submission drain after the reflection producer, not a
-second GPU producer. The whole frame is 80.635 ms CPU / 83.652 ms GPU;
-directional shadow separately contributes 24.561 ms GPU.
-
-The new class partition overturns the remaining texture-proximity inference.
-Two Gadir terrain texture Resources cost 7.865 ms and four nested texture
-creations cost 6.115 ms inside one hot `TerrainBlock` call at reflection draw
-173. But the 20-draw GPU bin containing that call costs only 0.495 ms. The
-large reflection ranges occur earlier: four all-`GraphicsMeshInstance` bins
-covering draws 21--100 cost 3.065, 8.094, 4.339, and 1.347 ms, and the next
-bin, containing eighteen `TerrainPlug` and two `GraphicsMeshInstance` calls,
-costs 14.451 ms. Therefore cold terrain texture creation is a real CPU cost
-but does not own this 35.892 ms reflection GPU interval.
-
-The off-main descriptor trace names a second, later mechanism. No off-main
-texture creation starts on frame 6895. From frames 6896--6901, one loader
-thread makes 45 successful, initial-data, fully-mipped compressed textures in
-64.082 ms of overlapping worker time: 37 `DXGI_FORMAT_BC3_UNORM`, six BC1,
-and two BC2. Their mip-chain payload is about 168.668 MiB, including three
-4096-square textures. Thus texture realization can amplify the multi-frame
-tail, but it cannot cause the first 80.635 ms frame. A texture throttle alone
-would miss the principal onset; lower-mip staging remains a separate, more
-invasive tail experiment rather than the first fix.
-
-The within-run reference is the nine collision-active, full-scene **play**
-frames 6908--6916, all under 60 ms, with 1,400--1,699 indexed draws, no main
-Resource load, no region change, and no off-main texture creation. Their means
-are 20.423 ms total, 15.622 ms exact `Engine::Render`, 8.256 ms game draw
-submission, 20.735 ms whole GPU, 6.900 ms directional GPU, and 0.269 ms exact
-second-plane reflection GPU. Frame 6895 is therefore +60.212 ms total,
-+36.213 ms game draw submission, +62.917 ms whole GPU, and +35.662 ms exact
-reflection GPU relative to that same-scene class. These nested and queued
-scopes are not added.
-
-The buffer count supplies a stable, machine-independent behavior boundary.
-For the primary transition frame in Runs 73--80, exact second-plane reflection
-created 69, 64, 132, 63, 172, 80, 87, and 95 buffers. The largest neighboring
-Run-80 population was 30. Seven of those eight transition frames had
-24.751--63.225 ms of exact reflection GPU work; Run 79's 0.440 ms occurrence
-is the measured exception. A threshold of 32 therefore selects the repeated
-admission class without using elapsed time or ordinary draw count.
-
-Run 81 adds default-off
-`[performance] reflection_defer_admission_mesh=1`. The already verified exact
-reflection `BuildScene` call counts successful D3D buffer creations through
-the existing device vtable proxy. At 32, only `GraphicsMeshInstance` calls in
-the immediately following exact reflection `RenderLightStyle` are omitted.
-Terrain reflection remains, the normal colour pass later in the same recursive
-branch is untouched, and mesh reflection returns on the next frame. This is a
-narrow one-frame colour-first staging A/B, not whole-reflection reuse, culling,
-or a loader rewrite. It specifically attacks the four proved hot mesh bins;
-it does not claim to remove the independent TerrainPlug range or the later
-off-main texture tail.
-
-The behavior reuses the exact `patchCall` sites at Engine RVAs `0x186501` and
-`0x18694d` plus the already verified `GraphicsMeshInstance::RenderPass` entry
-at `0x172dd0`. That shared six-byte prologue is verified across 24 bytes with
-its relocation and only six complete bytes are stolen. With tracing off the
-manager/plane trace calls are not patched, no clock or GPU query runs, and the
-fix installs only its behavior dependencies. New CSV fields
-`engine_reflection_admission_deferred` and
-`engine_reflection_admission_mesh_deferred` are counts, not durations.
-
-The extended verifier passes 771 checks. Independently changing the new
-32-buffer constant to 33 fails the exact behavior-boundary check. Doctor, the
-760,320-byte release build, and the complete off-game self-test pass, including
-GPU timestamp retirement. Run 81 is installed from
-`cache/runs/run81-reflection-admission-mesh.ini`. Source and installed DLLs are
-byte-identical at SHA-256
-`d1856797e4e9d0870ccf955c930ead8823a11ce5b0babff997f1d79201eb9545`;
-source and installed INIs are byte-identical at SHA-256
-`2890b546c468625797ab01af0f906a8f6e1d39a22487d15ed660de435cd7dfa3`.
-Relative to Run 80's measurement settings, only
-`reflection_defer_admission_mesh=1` changes behavior. Relative to the normal
-live config, full trace, draw timing, and F12 are the explicit measurement
-settings. The completed Run-80 live files matched their archives before both
-stale live names were removed. The game has not been launched.
-
-
-## 101. Run 79 rejects a reflection-renderable fix for this burst; Run 80 captures texture realization
-
-Run 79 is archived as `tqflicker-frames.run79.csv`, SHA-256
-`594a45b9b4946ec5fa53f35ea310d302f3333043c312114fab7c8d6014713745`,
-and `tqflicker-debug.run79.log`, SHA-256
-`3fc45ff8c63cf2f51e08ccea2092f38ccb187850e65198756662bf5d81b84b43`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 6,900 contiguous frames, 0--6899. Its five parts are **menu**
-0--1786, **load-game frame** 1787, **loading screen** 1788--2907, **first
-world frame** 2908, and **play** 2909--6899.
-
-F12 is **play** frame 6416 at 19.364 ms. **Play** frame 6415 is 53.202 ms but
-ended only 19 ms before the marker, so it cannot be a human-reaction target.
-The probable felt event is the eight-frame **play** burst 6382--6389 at
-34.525, 29.895, 33.586, 29.922, 22.919, 22.811, 22.405, and 35.452 ms. It
-ends 790 through 593 ms before F12. The reporter supplied only completion, so
-this is a reaction-window identification, not a claim that the marker proves
-which frame was felt.
-
-This occurrence is a scene-admission transition. Immediately before it,
-**play** frame 6381 has 213 indexed draws, 0.111 ms in the game's draw-submit
-class, and an 8.245 ms whole-frame GPU interval. Frame 6382 changes region and
-jumps to 1,436 indexed draws. It creates 98 buffers / 3,382,400 bytes, though
-the `CreateBuffer` calls themselves cost only 0.834 ms. Two exact Gadir
-terrain textures load synchronously on the main render thread for 5.595 ms,
-including 2.951 ms of nested texture creation. Its game-owned draw-submit
-class rises to 8.909 ms and its whole GPU interval to 29.628 ms, including
-13.720 ms in the exact directional-shadow class.
-
-The consolidated trace rejects the proposed reflection-renderable deferral
-for this occurrence. The exact second-manager/first-plane
-`GraphicsForwardRenderer::BuildScene` selector costs 8.010 ms on frame 6382,
-and its following exact `GraphicsForwardRenderer::RenderLightStyle` costs
-7.438 ms CPU because it contains the two cold Gadir loads. But all ten
-populated 20-draw bins total about 0.392 ms GPU, agreeing with the whole exact
-child's 0.391 ms GPU interval. The nearby texture loads therefore do not own
-the GPU burst in this run. Deferring that reflection child would at most move
-its synchronous CPU load; it cannot remove the measured multi-frame producer.
-
-The admission continues asynchronously. **Play** frames 6384--6389 contain
-51 off-main `CreateTexture2D` calls totaling 80.306 ms of worker-side time,
-while progressive loose-texture upload advances one bounded step per frame.
-Across burst frames 6382--6389, game draw submission is 3.566--14.045 ms and
-whole-frame GPU time is 21.251--33.690 ms. Those worker intervals overlap the
-render frames and are not added to the CPU or GPU totals. They are nevertheless
-the only measured transition-specific Resource activity that persists across
-the same six-frame tail, so texture realization/upload pressure is now the
-leading fix route, not yet a proved cause.
-
-The within-run reference is 24 collision-active, full-scene **play** frames
-6390--6414 under 60 ms, with 1,400--1,699 indexed draws, no main-thread
-Resource load, and no region change. Their means are 20.822 ms total,
-16.112 ms exact `Engine::Render`, 8.323 ms in game draw submission,
-20.895 ms whole-frame GPU, and 7.241 ms directional-shadow GPU. This is a
-same-run, same-scene-class reference rather than a cross-run p50. It shows
-that most of the post-transition 20 ms cost is the newly visible full scene;
-the removable target is the extra 22--35 ms burst while resources become
-resident, not the permanent scene price.
-
-Run 79's debug report has one explicit instrumentation failure. It retained
-the two qualifying reflection events at frames 6382 and 6392, but emitted the
-newer event first. Its 224 per-renderable lines filled the 65,491-byte session
-log at call 167, before the older probable reaction event was written. Missing
-frame-6382 renderable identities are therefore missing output, not zero work,
-and frame 6392's cheap population must not be substituted for them.
-
-Run 80 corrects that output path and adds the one missing admission dimension.
-Qualifying reflection events are emitted oldest-first. Every draw bin gains
-exact `TerrainPlug` / `TerrainBlock` / `GraphicsMeshInstance` call-and-draw
-counts; complete class totals remain, while individual lines are emitted only
-for calls with nested work or at least 250 us CPU. A separate lock-free
-512-record ring retains successful off-main texture creations with start/end
-frame, loader thread, duration, dimensions, mip count, DXGI format, bind/misc
-flags, and whether initial data was supplied. F12 emits chronological records
-from the preceding 120 frames, bounded to 192 lines with an explicit omission
-count. The record is published only after all fields are written and never
-inherits a main-thread reflection or deferred owner.
-
-This is passive instrumentation, not a texture throttle and not an archive
-prefetch experiment. If the burst is dominated by large/mipped initial-data
-textures, the next A/B is a bounded texture-realization budget (or the more
-involved archive lower-mip staging path). If it is many small textures, staging
-newly visible shadow/color participation is the narrower route. The trace
-does not reopen the message pump, archive block cache, Stage 4.2 prefetch,
-buffer pooling, locks, sleep, Stage 5, or libdeflate, and leaves
-`shadow_split` and all accepted fixes unchanged.
-
-The extended verifier passes 769 checks. Independently perturbing each of the
-four new ring/horizon/report constants is rejected, 4/4. The off-game
-self-test covers exact descriptor/frame publication and passes, including GPU
-timestamp retirement.
-
-Doctor and the 759,296-byte release build also pass. Run 80 is installed from
-`cache/runs/run80-admission-texture-descriptors.ini`; the game has not been
-launched. Source and installed DLLs are byte-identical at SHA-256
-`31ab51813d674b75407b12ede791c72b6b8b1c2e0a5e5359b1f4ffd874131356`;
-source and installed INIs are byte-identical at SHA-256
-`9704d1ea0859376300314bd45728d475f44fb8cdc0fb9408923e5dc620ebc16f`.
-The completed Run-79 live CSV/debug log matched their archives before both
-stale live names were removed.
-
-
-## 100. Run 78 result and Run 79 preparation: cover the whole reflection child and name its renderable class
-
-Run 78 is archived as `tqflicker-frames.run78.csv`, SHA-256
-`9da2aa0ef4d278bc21372cb76fb5f40c1b45f55371c4e15af5eaacb23ed85561`,
-and `tqflicker-debug.run78.log`, SHA-256
-`f647970f9a14de5bcd266f0f22c042e96ee65e5eefd669c225cc9efcd48f8be6`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 7,271 contiguous presented frames, 0--7270. Its five parts are
-**menu** 0--1848, **load-game frame** 1849, **loading screen** 1850--2983,
-**first world frame** 2984, and **play** 2985--7270.
-
-F12 is on **play** frame 6728 at 22.443 ms. **Play** frame 6723 is 52.428 ms
-but ended only 107 ms before the press, too soon to be a confident human
-reaction candidate. The probable felt sequence is **play** frames 6702/6703
-at 75.266/41.243 ms, ending 609/568 ms before F12. The user reported only
-completion, so this remains a reaction-window identification rather than a
-claim that the marker proves which frame was felt.
-
-On **play** frame 6702, the exact second-manager/first-plane
-`GraphicsForwardRenderer::RenderLightStyle` class is 9.660 ms CPU / 31.101 ms
-GPU after a 7.987 ms `BuildScene`. Two main-thread state-0 Gadir terrain
-textures load for 6.111 ms inside that exact reflection cell, including 4.332
-ms in four nested texture creations. These clocks nest and must not be added.
-The same frame's whole directional-shadow class is independently 31.046 ms
-GPU and has a region change; this run does not subdivide it.
-
-The following exact second `GraphicsDeferredRendererX::Render` geometry-scene
-class blocks for 36.172 ms CPU, with 35.342 ms inside the game's own draw
-submissions, while its GPU interval is only 2.913 ms. Its four largest draws
-are 19.122, 9.170, 4.067, and 2.142 ms. **Play** frame 6703 repeats that
-shape: 29.778 ms CPU / 28.824 ms in game draws / 1.284 ms GPU, led by a
-15.752 ms draw, while reflection is only 0.695 ms CPU / 0.167 ms GPU. This is
-evidence for a downstream queue drain after prior GPU production, not for the
-deferred-color scene as the producer or fix boundary.
-
-Run 78 also invalidates the moving-window assumption. The selected reflection
-child on **play** frame 6702 issues exactly 192 draws. Its Run-78 query window
-starts at draw 193, so it opens no populated bin and retains no terrain call.
-Later selected **play** frames 6707 and 6711 reach 220 and 276 draws, but their
-post-192 bins total only 0.041 and 0.092 ms GPU; their exact late
-`TerrainBlock`/`TerrainPlug` calls contain no nested work. Together with Run
-77's cheap draws 65--192 and Run 76's different expensive draws 65--169, this
-shows that fixed ordinal slices do not follow a stable population. It does
-not establish that the unmeasured draws 1--64 are expensive on frame 6702.
-
-Run 79 is therefore one consolidated passive trace before a behavior A/B. It
-keeps the same sixteen query pairs and covers exact selected
-`RenderLightStyle` draws 1--320 continuously in 20-draw bins. It retains up to
-256 exact renderable calls across the same window, classifying the existing
-unexported `TerrainPlug` and `TerrainBlock` overrides plus the exported
-`GraphicsMeshInstance::RenderPass` override. Each record carries class,
-object, draw range, CPU duration, and nested Resource/texture/buffer creation
-totals. Existing exact downstream deferred-color slow-draw reporting and the
-whole directional-shadow GPU interval remain active, so the same run observes
-the reflection producer, the downstream drain, and the separate shadow
-producer.
-
-The sorted scene-list executor invokes virtual slot `+0x28`, so there is no
-direct `E8` for the mesh override. The installed `Engine.dll` was re-read
-before writing the table: the decorated export resolves to RVA `0x172dd0`;
-its 24-byte opening is
-`55 8b ec 83 e4 f8 81 ec fc 00 00 00 a1 00 f0 36 10 33 c4 89 84 24 f8 00`,
-with the relocated security-cookie address at byte 13. The independent
-23-byte tail at `0x173127` ends in `c2 10 00`, proving four explicit
-arguments. The trace detour verifies all 24 entry bytes and steals only the
-shared six-byte prologue. It installs atomically after the four existing
-reflection `patchCall` sites and is detached first on rollback or shutdown.
-
-The extended verifier passes 760 checks. All 57/57 one-at-a-time mutations of
-the new or changed numeric bounds, every byte in both new tables, both
-relocation fields, the decorated export, class order, and stolen length are
-rejected. Doctor, the 756,224-byte release build, and the full off-game
+## 69. Run 60: defer an exact caster before its cold root mesh is forced
+
+Run 59 removes every directional-shadow texture load in **play**, leaving two
+coupled costs on its marked full-scene, collision-active **play** onset. Frame
+6692 synchronously loads 29 meshes / 38.219 ms and one shader / 2.843 ms inside
+a 41.139 ms directional CPU call, while its directional GPU interval is
+137.047 ms and whole-GPU interval 329.861 ms. Five root-mesh ensures at the
+exact `GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost 11.111
+ms. Frame 6693 then drains the prior GPU queue. A further texture or draw-time
+instrument does not choose a new lever; the already proved root-mesh boundary
+does.
+
+Run 60 extends the existing `shadow_defer_cold_alpha=1` behavior at that one
+earliest boundary. The exact exported base-class method at RVA `0x173440`
+loads the root mesh pointer from instance+`0x4`, null-checks it, calls
+`Resource::EnsureAvailable`, then reads the pass count at mesh+`0x7c`. Its
+complete 24 bytes were already independently matched to the pinned image. The
+entry detour now steals six complete, non-relative bytes—`push esi; mov
+esi,[ecx+4]; test esi,esi`—with no relative operand. Its trampoline replays
+those bytes before returning to the original null check.
+
+The behavior predicate is deliberately narrower than “any cold mesh.” It is
+the exact base `GraphicsMeshInstance` export, on the main thread, while inside
+`GraphicsShadowMapDx11::RenderDirectional`, with a non-null root mesh in raw
+loaded state 0 or 1. State 0 is handed to its own verified
+`ResourceLoader` using the stock `(priority=1, notify=true, immediate=false)`
+tuple; state 1 is already loading. The method returns zero passes until state
+2, so no caster/pass record, later dependency, or GPU draw is created for that
+one caster. State 2 and every non-directional call forward through the exact
+original method. Derived renderables that override the virtual method never
+enter this base export.
+
+This is a temporary local missing-shadow trade, not whole-map reuse. It can
+test more than the direct 11.111 ms because a cold root caster can own later
+dependent mesh loads and directional GPU draws. It cannot remove non-mesh
+casters, already-resident newly visible geometry, or the non-shadow resource
+loads on the onset. Colour rendering, point/spot shadows, resident casters,
+culling, map size, and `shadow_split` are unchanged. A visible local shadow
+pop rejects or bounds it even if the burst becomes shorter.
+
+The behavior detour is an atomic dependency of the existing shadow-fix chain.
+It is installed only after the 24-byte signature and export/RVA identity pass;
+a failure restores the material, context, record, and bump call patches. With
+the trace enabled, the old internal Ensure call instrument is not patched
+inside the detoured entry; the behavior wrapper itself emits count-only
+`engine_shadow_mesh_omitted`, state-0/state-1, enqueued, and enqueue-failed
+columns. The fix stays default-off, reaches `install()` with the performance
+probe off, and brings no trace group.
+
+`verify-sites.py` passes 336 checks. Twenty independent mutations of the new
+mesh-field constant, reused RVA and byte identity, exact state predicate,
+main/directional gates, field use, enqueue tuple, zero-pass return, six-byte
+steal, atomic dependency, rollback/activation, diagnostic coexistence,
+pre-verification, and both rollback and shutdown pointer clearing are all
+rejected: 20/20 for run 60 and 109/109 cumulative relevant mutations. Doctor,
+the release build, and the full off-game self-test pass, including GPU
+timestamp retirement. Run 60 is installed from
+`cache/runs/run60-shadow-cold-root-mesh.ini`; installed and source DLLs match
+at SHA-256
+`3f8856f82878d7d143b388295f36f4b210ffcb7a4e2534b87f62378eaaa01694`,
+and installed and source INIs match at SHA-256
+`918a2ef1eec7dd71f46f79dd9caf2011416e8c44a3428bfdef7089d16809edcd`.
+The run-59 live CSV and debug log were byte-identical to their archives before
+the stale live names were removed. The game was not launched.
+
+## 70. Run 60 result: the narrow root-mesh omission is visually safe, but the
+marked burst is mostly outside it
+
+Run 60 is archived as `tqflicker-frames.run60.csv`, SHA-256
+`87bcb615b8d81fc037f407b89e41246144361369b76be458d735c0431e536a03`;
+its live-written debug log has SHA-256
+`ab56a4629a000ad382e9013ac77e1db4e0e265768d409b31c4271ba446636697`.
+Both archives are byte-identical to the current live names. The CSV contains
+7,131 contiguous presented frames, 0--7130. The five session parts are
+**menu** 0--1782 (16.542 s), **load-game frame** 1783 (1.507 s), **loading
+screen** 1784--2865 (9.501 s), **first world frame** 2866 (767.918 ms), and
+**play** 2867--7130 (64.725 s).
+
+F12 at **play** frame 6481 is a reaction anchor. The only full-scene,
+collision-active candidate over 40 ms in the preceding two seconds is
+**play** frame 6461 at 260.847 ms; it ends 417 ms before the marker and starts
+678 ms before it. The frame changes directional-shadow region. It spends
+217.391 ms in `Engine::Render`, 9.206 ms in `Engine::Update`, and 31.661 ms in
+the message-pump class. The pump's 31.635 ms across three `PeekMessageA` calls
+returned two messages and dispatched both; this is not run 39's empty-peek
+shape. Render is independently dominant, so this observation does not reopen
+the message pump as a lever.
+
+The new exact base-class `GraphicsMeshInstance::GetNumShadowRenderPasses`
+behavior is active on the marked frame. It omits six state-0 root meshes and
+successfully gives all six to their own `ResourceLoader`; no enqueue fails.
+The next two directional builds omit eight and six roots respectively; the
+third following build, frame 6464, omits none. The count-only data cannot prove
+caster identity, but it does show that the cold-root population is transient
+and clears within three subsequent builds. The reporter specifically saw no
+missing shadow, shadow pop, or other visual fault during the session. That is
+the required visual acceptance of this narrow temporary omission.
+
+It is not a controlled magnitude result. Run 59 has a different route and a
+two-frame marked burst, so comparing its maximum with run 60's maximum would
+repeat the project's original mistake. Run 60 proves that the mechanism fires,
+queues cold roots, stops omitting them once resident, and is visually
+acceptable. It does not isolate how many milliseconds it saved.
+
+The remaining marked frame is much broader than directional shadows. Its 30
+main-thread Resource loads cost 102.518 ms. Only 17 / 23.383 ms occur inside
+`GraphicsShadowMapDx11::RenderDirectional`: 16 meshes / 21.923 ms and one
+shader / 1.460 ms, all entered in state 0. Therefore 13 main-thread loads /
+79.135 ms occur outside directional shadow. The enclosing directional CPU
+call is 25.145 ms. Its GPU interval is 30.071 ms while the whole-frame GPU
+interval is 237.965 ms. CPU loads, enclosing CPU calls, and GPU intervals are
+nested or overlapping and must not be added; the comparison only establishes
+that directional shadow is no longer the dominant class in this felt burst.
+
+Frames 6462 and 6463 are 28.030 and 17.356 ms. Frame 6462 synchronously loads
+one remaining directional mesh / 4.831 ms inside a 6.970 ms shadow call;
+frame 6463 has no Resource load and a 1.834 ms shadow call. Unlike run 59,
+there is no second large render/backpressure frame after this onset. That
+difference is descriptive only because the submitted scenes differ.
+
+Across **play**, the new root hook omits 27 instances: 26 state 0 and one state
+1. Ten state-0 roots are newly enqueued and no enqueue fails. Directional
+shadow still performs 75 synchronous loads / 75.728 ms: 70 meshes / 72.173 ms
+and five shaders / 3.555 ms, all entered in state 0. Texture loads remain zero.
+All 3,046 directional builds report the context patch active; every context,
+table, and enqueue failure is zero. The existing material, bump, base-override,
+and alpha gates remain active without a failed enqueue.
+
+The supported conclusion is to keep the narrow root-mesh behavior, not widen
+it blindly. The next passive trace should classify the 13 main-thread Resource
+loads / 79.135 ms outside directional shadow on the marked **play** frame by
+exact Resource class and verified immediate caller. The remaining whole-GPU
+interval is real, and §37 already establishes where GPU queue pressure blocks
+the CPU (`DrawIndexed`); another per-draw timing boot would describe the sink
+again without identifying which resource or scene transition created the
+work.
+
+
+## 71. Run 61: name the main-thread Resource loads outside directional shadow
+
+Run 60's F12 anchor identifies full-scene, collision-active **play** frame
+6461 at 260.847 ms. Its 30 main-thread `ResourceLoader::LoadResource` calls
+carry 102.518 ms of summed complete-call duration, but only 17 / 23.383 ms are
+inside `GraphicsShadowMapDx11::RenderDirectional`. The arithmetic complement
+is 13 calls / 79.135 ms outside that directional bracket. Those calls could
+still be in `Engine::Render`, `Engine::Update`, or neither, and the existing
+CSV supplies neither their Resource class nor their immediate caller. Calling
+all 79.135 ms "render loading" would therefore be another inference from a
+frame total. Run 61 measures the missing dimensions before choosing a lever.
+
+The instrument reuses existing verified hooks rather than adding a new patch
+site. `ResourceLoader::LoadResource` already verifies 22 bytes and steals
+seven; `Engine::Update` and `Engine::Render` each verify 24 bytes and steal
+six; the directional call uses the existing 23-byte `patchCall` window. The
+loaded-state and filename accessors each verify 16 bytes and are called only
+after their export/RVA identities match. The outside-directional attribution
+becomes active only when all of those load, phase, directional, and accessor
+dependencies are live. A missing dependency produces zeroes, not a falsely
+large outside class.
+
+For every main-thread LoadResource call outside the live directional bracket,
+the CSV records one common count / `_us` duration pair. Render, update, and
+other phase pairs partition it once; mesh, shader, texture, and other filename
+classes partition it independently. These are complete game-call durations,
+which can nest, and they are not added to their enclosing Engine phase. All
+duration columns end in `_us`, so `tools/frames.py` does not charge them to the
+mod. On every frame with the full instrument active, the expected count and
+duration invariants are:
+
+`engine_res_load_main = engine_shadow_res_load + engine_res_outside_dir`
+
+`outside_dir = render + update + other = mesh + shader + texture + type_other`
+
+F12 supplies the identities without making the candidate frame write a log.
+Each outside-directional call copies its frame index, pre-call loaded state,
+phase, filename class, at most 128 filename bytes, and immediate return address
+into a 128-record rolling ring. On the existing F12 key-down retrieved by the
+game's own `PeekMessageA`, the preceding 120 frames are formatted and handed
+to the already asynchronous debug logger. A caller is labeled `E`, `G`, or
+`T` plus RVA only when it lies in the verified Engine.dll, Game.dll, or TQ.exe
+text and immediately follows one of the accepted call encodings; otherwise it
+is explicitly `unverified`. Already emitted records are not repeated on a
+later press. If 128 records cannot cover the retained pre-reaction window, the
+F12 row sets `engine_res_outside_dir_marker_truncated` and the live log says so.
+
+This is passive relative to run 60. The exact original LoadResource trampoline
+runs once with unchanged arguments. During the candidate frame the added work
+is bounded metadata copying and counters; filename formatting and log locking
+happen only after F12. The accepted cold-root and texture omissions remain
+enabled through `shadow_defer_cold_alpha=1`; colour rendering, all shadow-map
+settings, culling, resource behavior, and `shadow_split` are unchanged.
+
+`verify-sites.py` now passes 351 checks. All 25 one-at-a-time changes to the
+three ring/window/name constants, outside-directional and classification
+gates, filename/caller/phase/frame capture, ring bound and publish order,
+window capacity/membership, one-shot reporting, caller label, truncation
+counter, update/render brackets, F12 emission, dependency activation, and
+shutdown are rejected: 25/25 new and 134/134 cumulative relevant mutations.
+The off-game self-test additionally proves both independent partitions sum to
+the common population, includes the exact 120-frame boundary, excludes future
+events, and reports a one-record overflow. Doctor, release build, and the full
 self-test pass, including GPU timestamp retirement.
 
-Run 79 is installed from
-`cache/runs/run79-complete-reflection-renderables.ini`; the game has not been
-launched. Source and installed DLLs are byte-identical at SHA-256
-`3c3c178dd5cad41d1adfb87e8c6370ad0f2326dd97a91840ec2779de7dd6551d`;
-source and installed INIs are byte-identical at SHA-256
-`dc0cc89630226de801d03ceecabf909283045bc3773c737ca6dc2af6abb2242c`.
-The completed Run-78 live CSV and debug log matched their archives before the
-two stale live names were removed.
-
-This trace is intended to choose a narrow behavior boundary, not to justify
-skipping the whole reflection. Decompilation shows the plane helper creates,
-binds, and clears its temporary 1024-by-1024 surface before
-`RenderLightStyle`, then publishes that surface to reflection consumers; a
-whole-child skip would therefore risk a blank reflection. If a hot GPU bin
-overlaps cold `TerrainBlock`, `TerrainPlug`, or `GraphicsMeshInstance` work,
-the next A/B can defer only that first-use renderable class for one frame while
-queueing its Resources. If the hot bin is an unclassified gap, the result says
-which remaining executor interval needs identity without pretending a nearby
-cold texture caused it.
-
-
-## 99. Run 77 result and Run 78 preparation: the marked reflection work moved beyond draw 192
-
-Run 77 is archived as `tqflicker-frames.run77.csv`, SHA-256
-`8afdff308c0402e6ecc59d45bb5bdb59dd3cb687c01bba90c95fd800917fd491`,
-and `tqflicker-debug.run77.log`, SHA-256
-`caedce37049ad80274176d1585dc55b124e4a623d44829805724e90f9fa5094a`.
-Both archives were compared byte-for-byte with the completed live files. The
-CSV has 7,443 contiguous presented frames, 0--7442. Its five parts are
-**menu** 0--2046, **load-game frame** 2047, **loading screen** 2048--3194,
-**first world frame** 3195, and **play** 3196--7442.
-
-F12 is on **play** frame 6915 at 19.264 ms. **Play** frame 6914 is 62.928 ms
-but ended only 19 ms before F12, too soon to be the event to which a person
-reacted. The probable marker-associated event is **play** frame 6892 at
-60.329 ms, ending 539 ms before F12 and beginning 599 ms before it. The user
-reported only completion, so this remains a reaction-window identification,
-not a claim that the marker proves which frame was felt.
-
-On **play** frame 6892, exact second-manager/first-plane
-`GraphicsForwardRenderer::RenderLightStyle` takes 27.003 ms CPU and 24.708 ms
-GPU after a 13.522 ms `GraphicsForwardRenderer::BuildScene` selector. Its 16
-main-thread state-0 Resource loads take 25.715 ms: four meshes and twelve
-textures, with 17.769 ms in nested texture creation and 1.346 ms in nested
-buffer creation. Those clocks nest and must not be added. Two of the textures
-are the known Gadir `TerrainType` material-zero pair and take 2.744 ms in
-Resource loading. That type's last semantic preload is **loading-screen**
-frame 3155, while its runtime owner preloads through **play** frame 6891.
-
-The new GPU subdivision excludes the range it measured. On **play** frame
-6892, all sixteen eight-draw intervals for exact `RenderLightStyle` draws
-65--192 total only 5.502 ms GPU; the largest is draws 161--168 at 2.161 ms.
-The whole child is 24.708 ms GPU, leaving 19.206 ms outside that measured
-range. The exact event reaches draw 193 and sets the explicit draw overflow.
-Run 76's different marked **play** scene had only 169 draws and measured its
-first 64 at 0.091 ms, which makes the unmeasured post-192 population the next
-best target here, but does not prove it: the current event's first 64 were not
-timestamped.
-
-Run 77 also reveals an instrumentation-boundary error. It retained 37 exact
-terrain calls through draw 193, all without nested Resource or creation work.
-When draw 193 set the query-window overflow, `active.recording` became false;
-the same flag then prevented later `GpuChunkTerrainCallScope` records. Thus
-the trace stopped retaining terrain identity before the cold call it was
-designed to name. `terrainCallOverflow=0` does not mean the selected child had
-no later terrain calls; it means the separate 128-call storage limit was not
-hit before draw-window recording stopped.
-
-There is no gross ordinary-frame logging regression. Restricting Run 76 and
-Run 77 to collision-active, full-scene **play** frames below 60 ms, with
-1,000--1,499 indexed draws, no main-thread Resource load, and no shadow-region
-change, their mean total times are 22.293/21.811 ms and their mean mod Present
-classes are 0.079/0.052 ms over 46/37 frames. This only excludes a large
-regression; the route populations are not identical and it is not a fine
-effect estimate.
-
-Run 78 corrects that boundary without adding load or rendering behavior. The
-same sixteen query pairs move to exact `RenderLightStyle` draws 193--320 in
-eight-draw intervals. Draws 1--192 retain ordinals but open no timestamp.
-Terrain-call retention now begins at the same draw-window boundary, so calls
-before draw 193 cannot consume the 128 fixed records needed by the late tail.
-Directional shadow remains unqueried and its executor remains unpatched. No
-new Engine site, D3D getter, query pair, trace group, accepted-fix change, or
-`shadow_split` change is introduced.
-
-The extended verifier passes 753 checks, including the new requirement that
-the late-tail boundary is tested before a terrain-call slot is consumed. All
-seven trace bounds were perturbed independently in memory and every mutation
-was rejected. Doctor, the 754,688-byte release build, and the full off-game
-self-test pass, including GPU timestamp retirement. Run 78 is installed from
-`cache/runs/run78-reflection-late-tail-terrain-calls.ini`; rendering has not
-been launched. The source/installed DLL SHA-256 is
-`86880e95234db37420087447192537316e52b9a62b7c8ff5ef8667385d2a6a28`;
-the source/installed INI SHA-256 is
-`be46abecf6a32764ac50f477a73ece4b7392d6fc2de984554d6129194753bff1`.
-
-
-## 98. Run 77 prepared: eight-draw reflection tail with exact terrain-call identity
-
-Run 76's probable marked **play** event resolves the next boundary without
-another shadow experiment. Exact second-manager/first-plane
-`GraphicsForwardRenderer::RenderLightStyle` draws 65--169 own 38.647 ms, or
-99.8%, of its 38.739 ms GPU interval. The exact second
-`GraphicsDeferredRendererX::Render` geometry-scene class then blocks
-48.151 ms in game draws before the later directional-shadow construction.
-Run 77 is passive instrumentation only for that reflection tail. It changes no
-rendering, scene admission, Resource state, accepted fix, or `shadow_split`.
-
-The first 64 reflection draws are still counted so ordinals remain exact, but
-they open no timestamp. Sixteen unique pairs now cover draws 65--192 in
-eight-draw intervals. When one interval fills, its successor opens immediately
-after the boundary rather than waiting for the next D3D Draw hook. Thus
-Resource and creation commands issued between adjacent renderables belong to
-the following draw range. A 193rd draw sets the existing explicit overflow and
-disables the event's hot-path gate. Ordinary frames still read only the inline
-false flag.
-
-Directional setup and all sixteen directional-chunk GPU phase IDs and CSV
-columns are removed, reducing per-frame query allocation/retirement from the
-Run-76 schema. A region-changing exact
-`GraphicsShadowMapDx11::RenderDirectional` call no longer arms this trace, and
-the exact `GraphicsShadowMapRenderer` executor `E8` is no longer patched. Its
-23-byte call window, 24-byte entry, and 21-byte `ret 0x0c` tail remain in the
-static audit and are still re-read from the pinned binary; they are durable
-disassembly evidence rather than a Run-77 write target.
-
-No new Engine patch is added for renderable identity. While the sparse exact
-second-manager/first-plane reflection event is active, the already verified
-unexported `TerrainPlug` and `TerrainBlock` wrappers append to 128 fixed call
-slots embedded in that event. Each record retains class, object identity,
-start/end draw ordinal, CPU duration, the observed `TerrainType`/material, and
-nested Resource, texture-creation, and buffer-creation counts/durations. F12
-writes every retained record and an explicit overflow bit during the session.
-The creation durations reuse the D3D hook's existing sample; no state getter
-or additional Engine detour is introduced.
-
-The reflection selector remains exact second-manager/first-plane
-`GraphicsForwardRenderer::BuildScene >= 2,000 us`; it is a sparse selector,
-not a causal attribution. Activation now requires the verified reflection
-children, both exact terrain colour wrappers, the terrain/reflection trace
-groups, and draw timing. The off-game self-test proves that draws 1--64 open
-no bin, draws 65--73 partition 8+1, and an exact `TerrainBlock` record spanning
-draws 65--66 retains its nested Resource and texture-creation totals.
-
-`research/streaming/tools/verify-sites.py` passes 752 checks. All seven new or
-changed numeric bounds were perturbed independently in memory; every mutation
-was rejected. Doctor, the 754,688-byte release build, and the full off-game
-self-test pass, including GPU timestamp retirement. Run 77 is installed from
-`cache/runs/run77-reflection-tail-terrain-calls.ini`. The source and installed
-DLLs are byte-identical at SHA-256
-`ebbda98ba661a745d4206d39c1d9f9eeca4913490274e36be85457bfcb7aca91`;
-the source and installed INIs are byte-identical at SHA-256
-`2806e64c0de188d05ff38d628c03df67c0ecc2fa753320106f559313e5b75166`.
-The Run-76 live CSV/debug log matched their archives before both stale live
-names were removed. The game has not been launched.
-
-
-## 97. Run 76 result: the marked drain follows reflection, not directional shadow
-
-Run 76 is archived as `tqflicker-frames.run76.csv`, SHA-256
-`dd4118f6896bf27c895e4e8c11adc97a394c096339912516bec7af2f93c623a8`,
-and `tqflicker-debug.run76.log`, SHA-256
-`d797b52321f0623637b6b501b98e0ad009b69c15f48f01969c91144f9627a71d`.
-Both archives are byte-identical to the completed live files. The CSV has
-7,310 contiguous presented frames, 0--7309. Its five parts are **menu**
-0--1818, **load-game frame** 1819, **loading screen** 1820--2954, **first
-world frame** 2955, and **play** 2956--7309.
-
-F12 is on **play** frame 6575 at 24.320 ms. The immediately preceding frame
-ended too close to be a human reaction target. The route event is **play**
-frame 6548 at 90.945 ms, ending 601 ms before F12 and beginning 692 ms before
-it. The reporter supplied no additional subjective classification with the
-completion message, so this is the probable marker-associated event, not a
-claim that the marker proves which frame was felt. A separate 423.042 ms
-**play** frame 7171 occurs after F12 and is not substituted merely because it
-is the session maximum.
-
-The corrected reflection trace captures the whole exact second-manager,
-first-plane `GraphicsForwardRenderer::RenderLightStyle` on frame 6548. The
-preceding exact `GraphicsForwardRenderer::BuildScene` takes 5.961 ms CPU and
-selects the event; it is still only a selector. `RenderLightStyle` takes
-8.888 ms CPU and 38.739 ms GPU across 169 indexed draws. Draws 1--64 cost
-0.091 ms GPU, draws 65--128 cost 7.932 ms, and draws 129--169 cost 30.715 ms.
-The latter two ranges account for 38.647 ms, 99.8% of the child interval.
-Ordinary selected **play** events at frames 6557 and 6561 take only 0.211 and
-0.282 ms GPU across 221 and 271 draws, so the frame-6548 cost is not explained
-by draw count.
-
-Two state-0 Gadir rocky-pebbles base/normal textures are synchronously ensured
-from the exact unexported `TerrainBlock` colour-render class inside that
-reflection child. Their Resource calls take 7.400 ms and four nested texture
-creations take 6.041 ms. The exact `TerrainType` had one successful
-`TerrainType::PreLoad(true)` during the **loading screen**, on frame 2858.
-The enclosing runtime `TerrainRT::PreLoad` owner was then visited 3,747 times,
-including **play** frame 6547 immediately before the event, but that stock
-owner class does not call the layer type's semantic preload. Thus Run 67's
-one-time post-`LoadTextures` preload did not keep these two Resources resident
-until their first reflected use. This is evidence for a missing near-use
-refresh, but it does not yet prove whether the 38.739 ms GPU interval is upload
-work, the newly admitted terrain draws, or both.
-
-The CPU wait point is ordered after that reflection producer. Frame 6548
-spends 49.302 ms in the game's `Draw`/`DrawIndexed` submission class. Of that,
-48.151 ms is inside the exact second `GraphicsDeferredRendererX::Render`
-invocation's geometry-scene call at `0x166412`; the whole child is 48.893 ms
-CPU but only 4.732 ms GPU. Individual calls block for 28.080, 9.091, 5.054,
-2.976, and 2.102 ms. The static call order places reflection before the
-deferred owner and places geometry scene `0x166412` before shadow-map
-construction `0x166454`. Therefore the 48.151 ms geometry submission wait is
-the same-frame drain after reflection and cannot have been caused by the
-directional-shadow work that executes later. CPU and GPU scopes overlap and
-must not be added.
-
-The corrected exact `GraphicsShadowMapDx11::RenderDirectional` boundary on
-that same **play** frame is 7.090 ms CPU / 18.195 ms GPU / 750 draws. Its
-pre-executor setup is 9.017 ms GPU. The exact DX11
-`GraphicsShadowMapRenderer` record executor's twelve chunks total 8.897 ms;
-no individual 64-draw range exceeds 1.866 ms, and only 0.281 ms remains after
-the executor. This overturns an interpretation of the old mixed first chunk:
-the marked Run-76 submission drain is not a pathological shadow-record range.
-It does not claim that Run 75's independently larger directional event never
-happened.
-
-The ordinary-path gate also addresses the reported logging concern. In the
-allowed collision-active, full-scene **play** class below 60 ms, with
-1,000--1,499 indexed draws, no main-thread Resource load, and no shadow-region
-change, Run 75 has 40 frames and Run 76 has 46. Their means are 22.103 versus
-22.293 ms total, 0.047 versus 0.079 ms in the mod Present class, 16.590 versus
-17.321 ms in exact `Engine::Render`, 9.802 versus 9.971 ms in game draw calls,
-and 22.235 versus 22.107 ms whole-frame GPU. These matched means exclude a
-large broad regression but do not establish exact zero observer cost. No
-cross-run p50 is used. Run 76 arms only four reflection and six directional
-events in **play**; every overflow and collision counter is zero. Its F12 log
-is written after the candidate.
-
-The next passive trace should stop spending queries on directional shadow and
-subdivide only the exceptional reflection tail. Keep the same sparse exact
-second-manager/first-plane `BuildScene` selector, count the first 64 draws
-without timestamps, then cover draws 65--192 in sixteen eight-draw GPU bins.
-While that event is active, the already installed exact unexported
-`TerrainPlug` and `TerrainBlock` wrappers should retain each call's start/end
-draw ordinal, CPU duration, and nested Resource/create totals in a bounded F12
-ring. This needs no new Engine patch and no ordinary-frame D3D getter. It will
-show whether the 30.715 ms range is the exact cold `TerrainBlock` call or a
-different resident renderable population before choosing between a narrowly
-refreshed semantic preload and temporary reflection-only omission. Do not turn
-the global runtime-owner preload into an all-layer-per-frame behavior on the
-present evidence: the affected owner has 142 layers and was called on almost
-every intervening frame.
-
-
-## 96. Run 76 prepared: remove ordinary-draw overhead and put both GPU traces on the corrected boundaries
-
-Run 75's passive subdivision did answer the directional clustering question,
-but its implementation made two calls across the DLL boundary around every
-game `Draw`/`DrawIndexed`, even when no event was active. Run 76 puts a single
-inline volatile flag in that ordinary path. The flag is false outside an
-armed exact class, so neither chunk helper is called. The existing setter
-snapshots remain the source of VS/PS/SRV0/VB0/IB identity; there is still no
-per-draw D3D getter. The off-game self-test checks the false/true/false gate
-transition around both selected classes.
-
-The directional selection remains a region change in exact
-`GraphicsShadowMapDx11::RenderDirectional`, but its chunks no longer begin at
-that outer class. The verified DX11-only chain is
-`GraphicsShadowMapRenderer::Render` at `0x18ce70`, record construction
-`0x18d04f -> 0x18c870`, and record execution
-`0x18d05d -> 0x18c520`. Run 76 opens one separate
-`gpu_chunk_shadow_setup_ms` interval at the outer region-changing call, ends
-it in the wrapper around the exact executor `E8`, and enables the sixteen
-64-draw chunks only for the executor. The wrapper closes the chunks before it
-returns. The old-renderer/DX9 branch still uses `0x187360` and never reaches
-this site. The new runtime tables verify the 23-byte call window at
-`0x18d054`, the 24-byte executor entry, and the 21-byte tail at `0x18c631`;
-that tail ends in `ret 0x0c`, proving the wrapper's three explicit arguments.
-Only the exact `E8` is patched.
-
-For reflection, decompilation confirms that exact
-`GraphicsForwardRenderer::BuildScene` gathers visible regions and calls
-`GraphicsSceneRenderer::AddRegionToScene`, but returns no admitted-object or
-admitted-region count. Its duration can select a rare event, but cannot name
-the cause. Run 76 therefore treats a second-manager/first-plane
-`GraphicsForwardRenderer::BuildScene` duration of at least 2,000 us only as a
-sparse arming signal, records that exact trigger duration in the F12 metadata,
-and opens chunk zero before the immediately following whole exact
-`GraphicsForwardRenderer::RenderLightStyle`. In Run 75's **play** part this
-would select four frames: 6744 at 12,766 us, 6747 at 3,024 us, 6748 at 2,590
-us, and 6915 at 3,274 us. Thus it includes both implicated **play** frames
-6744/6747 while remaining sparse; it does not claim that `BuildScene` caused
-their later GPU cost. The old state-0 `Resource` trigger and its draw-ordinal
-bookkeeping are removed.
-
-This remains instrumentation only. Rendering choices, resource state,
-`shadow_split`, and all three accepted performance fixes are unchanged. The
-GPU result remains non-blocking and is retired in later frames. F12 still
-writes the bounded 32-event/120-frame identity ring during the session. The
-CSV's engine durations retain `_us`; the new setup value is game GPU time and
-therefore ends in `_ms` without being charged to the mod.
-
-`research/streaming/tools/verify-sites.py` is extended for the new executor
-entry/call/tail, exact call target and ABI, corrected class boundaries,
-BuildScene trigger, inline draw gate, install dependencies, restoration, and
-self-test assertions. It passes 750 checks against the installed binaries.
-All five new numeric constants and all 68 bytes in the three new executor
-tables were perturbed independently; every one of the 73 mutations is
-rejected.
-Doctor, the 755,200-byte release build, and the complete off-game self-test
-pass, including GPU timestamp retirement. Run 76 is installed from
-`cache/runs/run76-corrected-gpu-boundaries.ini`. The source and installed DLL
-are byte-identical at SHA-256
-`96a7347716e33e07edbd97535739e6a77b9897cbe99cff88758563be5a0ddede`;
-the source and installed INI are byte-identical at SHA-256
-`f9fc60731be367987bfd1b584f5bb23a64b41ed77a112f80354a5a06cf692ade`.
-The stale live Run-75 CSV/debug log matched their archived hashes before both
-live names were removed. The game has not been launched.
-
-
-## 95. Run 75 result: directional work is clustered; the cold-triggered reflection trace starts too late
-
-Run 75 is archived as `tqflicker-frames.run75.csv`, SHA-256
-`be2e4bb57de660b15c70e94371a84f1c33adaaa8571adf246fac84d37c0abf3c`,
-and `tqflicker-debug.run75.log`, SHA-256
-`ab315f205f7f84d22c4ccfd458840c8468af507261dd35048961ab6d4be5b000`.
-Both archives were byte-compared with the completed live files. The CSV has
-7,343 contiguous presented frames, 0--7342. Its five parts are **menu**
-0--1943, **load-game frame** 1944, **loading screen** 1945--3146,
-**first world frame** 3147, and **play** 3148--7342.
-
-F12 is on **play** frame 6760. Frame 6759 ends only 21 ms before it and cannot
-be the human reaction target. The probable felt sequence is **play** frames
-6744/6745 at 107.764/136.323 ms, ending 522/385 ms before F12. A 35.960 ms
-frame follows, then frame 6747 is 45.498 ms and ends 304 ms before F12. The
-reporter says this session felt as though it had “a little more delay,” and
-specifically asks whether the trace caused it. That subjective comparison is
-retained; it is not converted into a cross-run frame claim.
-
-The steady-state evidence does not show a measurable trace regression. Using
-the allowed comparison class—collision-active, full-scene **play** frames
-below 60 ms, 1,000--1,499 indexed draws, no main-thread Resource load, and no
-shadow-region change—Run 74 has 46 frames and Run 75 has 40. Their means are
-22.137 versus 22.103 ms total, 0.048 versus 0.047 ms in the mod Present class,
-17.740 versus 16.590 ms in exact `Engine::Render`, 10.620 versus 9.803 ms in
-the game's Draw/DrawIndexed calls, and 22.206 versus 22.236 ms whole-frame
-GPU. These are matched full-scene means, never cross-run p50s. They do not
-prove zero cost, but they exclude an observable broad slowdown of this class.
-
-The trace is not literally free. While armed, its first implementation makes
-two short instrument calls around every game draw even when neither sparse
-event is active; the per-frame GPU retirement loop also scans 32 additional
-phase slots, and the full CSV rows are wider. Across **play**, actual chunk
-queries opened on only seven frames: two reflection arms, six directional
-arms, and 3,547 classified event draws. The 38 KiB debug log is written when
-F12 is retrieved, after all candidate frames, so its synchronous report cannot
-cause the pre-reaction sequence. The CSV uses the existing asynchronous
-batched writer. Event-frame timestamp commands could perturb a particular GPU
-queue slightly; this run has no counterfactual capable of proving their cost
-is exactly zero.
-
-The directional result is useful and internally complete. On **play** frame
-6744, exact `GraphicsShadowMapDx11::RenderDirectional` costs 5.299 ms CPU and
-84.599 ms GPU across 743 draws. Its twelve 64-draw chunks account for 84.278
-ms. Five bounded ranges contain 79.282 ms (94.1%): chunk 0, which includes
-pre-executor setup plus draws 1--64, is 42.968 ms; draws 129--192 are 6.251 ms;
-193--256 are 12.407 ms; 449--512 are 14.699 ms; and 641--704 are 2.957 ms.
-The other seven ranges total only 4.996 ms. Directional work is therefore not
-uniform across the 8,192-square map and not explained by raw draw count. Chunk
-zero still mixes map setup with records, so the already verified
-`0x18d05d -> 0x18c520` executor call is the next exact boundary needed to
-separate setup from draws 1--64 and retain record identity for those five
-ranges.
-
-The reflection result corrects Run 75's own design assumption. The exact
-second-manager/first-plane `GraphicsForwardRenderer::RenderLightStyle` on
-**play** frame 6744 costs 12.382 ms CPU / 63.180 ms GPU. Its two Gadir texture
-Resources cost 9.378 ms CPU, but the first state-0 load is not encountered
-until reflection draw 200. Only 39 draws remain, and the post-trigger GPU chunk
-is 0.382 ms. Thus almost all of the exceptional immediate-context GPU interval
-precedes the cold-Resource trigger; “arm on the cold load” cannot subdivide the
-producer. Device-level texture creation may have ordering outside the
-immediate-context timestamps, so this does not prove texture upload harmless,
-but it does prove the trigger is too late for the requested whole
-`RenderLightStyle` breakdown.
-
-A second reflection event occurs on **play** frame 6747. Six cold Resources
-cost 15.547 ms inside an 18.179 ms CPU / 17.503 ms GPU `RenderLightStyle`.
-The first load occurs at draw 31; its four retained chunks cover draws 31--269
-and total 9.700 ms. This event has material work on both sides of the trigger,
-again requiring a whole-child subdivision rather than a post-load one.
-
-The longer subjective tail has corresponding game work. On **play** frame
-6744 the game's D3D calls block 65.324 ms, including 64.234 ms in the exact
-second deferred owner's geometry-scene class. Frame 6745 has no Resource load
-or region change and only 29.334 ms whole-frame GPU, but blocks 82.364 ms in
-game draws: 33.476 ms inside the exact second reflection plane and 45.703 ms
-inside the exact second deferred owner's geometry-scene class. This is a
-multi-consumer queue drain. Frame 6747 then adds the separate six-Resource
-reflection event. The data supports real additional transition work in this
-session more strongly than logger overhead, while not claiming the trace has
-mathematically zero event-frame cost.
-
-Before another measurement, make the hot path honest: expose an inline active
-event bit so ordinary Draw/DrawIndexed calls do not enter either chunk helper.
-For directional shadow, begin record chunks at the verified executor call and
-give pre-executor setup its own interval. For reflection, the next trace must
-cover the whole exact second-manager/first-plane `RenderLightStyle`, not start
-at a Resource encountered after draw 199. Because doing that every frame adds
-queries, first recover a pre-child sparse signal—preferably exact new scene
-admission recorded by the preceding `BuildScene`—or explicitly accept and
-measure a very small whole-child query budget. Do not interpret another
-post-cold reflection run as a whole-child result.
-
-
-## 94. Run 75 prepared: subdivide both exceptional GPU producers at their actual triggers
-
-Run 74 rejects the hypothesized large shared-buffer population, but leaves two
-independent GPU producers on the probable **play** onset: the exact reflection
-`GraphicsForwardRenderer::RenderLightStyle` child is 47.117 ms GPU after two
-cold Gadir terrain texture Resources, and the exact
-`GraphicsShadowMapDx11::RenderDirectional` class is 81.471 ms GPU after a
-region change with zero nested Resource loads. Run 75 passively subdivides
-both. It does not change reflection, shadow, culling, resource loading, scene
-admission, color rendering, or `shadow_split`.
-
-The directional record flow is now recovered rather than inferred from the
-outer class. `GraphicsShadowMapDx11::RenderDirectional` gathers/adopts its
-casters, then reaches `GraphicsShadowMapRenderer::Render` at Engine RVA
-`0x18ce70`. Its verified DX11 branch calls the 0x88-byte record builder at
-`0x18d04f -> 0x18c870`, then the sorted record executor at
-`0x18d05d -> 0x18c520`. The executor's indirect call at `0x18c613` is virtual
-slot `+0x28` on the accepted renderable. The other renderer branch calls a
-different helper at `0x187360`; therefore this builder/executor chain is
-specifically the DX11 shadow path, not stale DX9-only support. The reproducible
-streaming audit remains 1,592 functions and now carries explicit address roots
-for both unexported record helpers. Independent 20--24-byte windows cover the
-owner, helpers, direct calls, and final dispatch in
-`disassembly-targets.md` and `verify-sites.py`.
-
-The instrument adds no Engine code patch. It reuses the verified
-`RenderDirectional`, reflection-child, and `ResourceLoader::LoadResource`
-wrappers plus the existing D3D11 Draw hooks and setter-maintained binding
-snapshot. A directional event arms only after the wrapper proves its region
-pointer changed, before the exact call begins. A reflection event arms only
-before the first state-0 Resource load observed on the main thread inside the
-exact per-plane `RenderLightStyle` child. That distinction matters: the first
-reflection chunk includes the texture load/upload commands that can make later
-draws expensive; the first directional chunk includes pre-draw map setup even
-though the class has no cold Resource load.
-
-Each class has sixteen unique non-blocking timestamp-query pairs, with 64 game
-draws per chunk. The 166-draw reflection child observed in Run 74 therefore
-uses about three chunks; the 748-draw directional class about twelve. A fixed
-32-event ring retains events for the 120-frame F12 reaction window. Each chunk
-records its draw ordinal range, draw/indexed counts, element total, null pixel
-shader/SRV0 counts, binding-transition count, and first/last VS, PS, SRV0,
-VB0, and IB identities. No COM identity is retained or dereferenced and no D3D
-state getter or extra per-draw CPU clock is added. A second trigger for the
-same class/frame is folded into the live event and counted as a collision;
-more than 1,024 draws is an explicit overflow.
-
-The interpretation is narrow. A single exceptional directional chunk points
-to a bounded record/terrain/alpha population worth inspecting at the recovered
-executor boundary; cost spread across all twelve chunks instead supports a
-genuinely incremental map build. For reflection, an exceptional first chunk
-ties the delay to cold texture admission/upload; an exceptional later chunk
-instead identifies a draw/binding population after residency. The following
-deferred-color wait remains a queue-drain class and is not added to either
-producer.
-
-`verify-sites.py` passes 743 checks. All four new numeric bounds reject an
-independent one-at-a-time perturbation. `npm run doctor`, the 754,688-byte
-release build, and the complete off-game self-test pass, including GPU
-timestamp retirement and an exact synthetic 64+1 reflection-chunk partition.
-Run 75 is installed from `cache/runs/run75-gpu-draw-chunks.ini`. Installed and
-source DLLs are byte-identical at SHA-256
-`45768956bd265ca16c49d8e8d83dcb4c57aa041d28cedacae72a9c5534b3fb76`;
-installed and source INIs are byte-identical at SHA-256
-`630b798d1c66d968193d6583be3ff56eb2350222803c88507411d5755a3e600a`.
-Run 74's live CSV and debug log matched their archived SHA-256 identities
-before their stale live names were removed. The game has not been launched.
-
-
-## 93. Run 74 rejects a large shared-buffer population and splits the two GPU producers
-
-Run 74 is archived as `tqflicker-frames.run74.csv`, SHA-256
-`7d6da968ffd189a09efe382be9ae72dcb4cd6d63028f5b1114b72e788735f0f3`,
-and `tqflicker-debug.run74.log`, SHA-256
-`2f8860bab93dbe367486afc5554b5c7e606b20b4950cbbd745f57c94818b88cf`.
-Both archives were byte-compared with their completed live files. The CSV has
-7,304 contiguous presented frames, 0--7303, totaling 95.231 s. Its five parts
-are **menu** 0--2027 (19.271 s), **load-game frame** 2028 (1,335.705 ms),
-**loading screen** 2029--3162 (9.717 s), **first world frame** 3163
-(1,163.347 ms), and **play** 3164--7303 (63.744 s).
-
-F12 is on **play** frame 6724. The normal-route pair is **play** frames
-6705/6706 at 92.269/165.636 ms, ending 551/386 ms before the marker. Their
-onset-to-marker distances are 643/551 ms. The reporter supplied no subjective
-classification beyond completing the run, so this is a probable
-marker-associated pair, not a claim that either frame was felt.
-
-The exact identity result rejects the large shared-buffer population proposed
-after Run 73. Frame 6705 creates 82 buffers / 2,867,200 bytes, including 64 /
-0.549 ms inside the exact second-manager/first-plane reflection class. It has
-36 first uses of fresh buffers in deferred color and one in directional
-shadow, but zero first uses in reflection. Only one 11,200-byte vertex buffer
-joins shadow and deferred on that frame. Although it was created while the
-reflection context was active, its first observed reflection draw is on frame
-6706, after the exceptional frame-6705 reflection GPU interval has already
-ended. It therefore cannot be the source of that 47.164 ms reflection work.
-
-The F12 window retains 203 creations and reports exactly that one joined
-identity, with no omitted record, index overflow, or recent ring eviction.
-Across all **play**, 2,597 buffers are created and 1,114 fresh buffers first
-appear in deferred color, but only three buffers ever join all three classes.
-Those joins occur on frames 6706, 6938, and 7031. All-session index-overflow
-and recent-eviction counters are zero. The measured answer is thus not “the
-same newly created geometry is rendered by all three passes in one burst.”
-The proposed generic color-first staging of a large shared buffer population
-has no measured population to act on.
-
-The new child brackets instead make the reflection producer exact. On **play**
-frame 6705, the second manager's first plane costs 19.805 ms CPU and
-47.164 ms GPU. `GraphicsForwardRenderer::BuildScene` accounts for 7.287 ms
-CPU and no measurable GPU interval. The following exact
-`GraphicsForwardRenderer::RenderLightStyle` call accounts for 10.851 ms CPU
-and 47.117 ms GPU. The two known Gadir terrain textures load synchronously in
-this `RenderLightStyle` chain for 7.820 ms; four texture creations take
-5.635 ms. These clocks nest and must not be added. In **play**, the next
-largest second-plane reflection GPU interval is only 0.371 ms and the next
-largest `RenderLightStyle` GPU interval is 0.325 ms.
-
-Directional shadow is a separate producer on the same frame. The exact
-`GraphicsShadowMapDx11::RenderDirectional` class costs 5.920 ms CPU and
-81.471 ms GPU while issuing 748 draws, with zero nested Resource load. Its one
-fresh shadow buffer is the lone identity described above; the other bound
-buffers are not fresh within the verified 120-frame horizon. The directional
-draw count is lower, not higher, than the 799.783-draw mean of the matched
-reference population. The next largest directional-shadow GPU interval in
-**play** is 11.800 ms. Thus neither raw draw count, synchronous cold resource
-loading, nor a large population of newly created buffers explains this
-directional spike.
-
-The within-run reference is 46 collision-active, full-scene **play** frames
-below 60 ms in the same 1,000--1,499 indexed-draw band, with no Resource load
-or shadow-region change. Their means are 22.137 ms whole frame, 17.740 ms
-`Engine::Render`, 10.620 ms game draw submission, 0.856 ms second-plane CPU,
-0.206 ms `BuildScene` CPU, 0.585 ms `RenderLightStyle` CPU, 0.110 ms
-second-plane GPU, 0.074 ms `RenderLightStyle` GPU, 2.478 ms directional CPU,
-7.181 ms directional GPU, and 10.096 ms in second-owner geometry-scene game
-draws. Relative to those same-run means, frame 6705 adds 18.949 ms
-second-plane CPU, 47.054 ms second-plane GPU, 47.043 ms `RenderLightStyle`
-GPU, 74.290 ms directional GPU, and 35.147 ms second-owner geometry-scene
-game-draw time. These scopes overlap through submission and are not additive.
-
-Frame 6706 is the queue drain. Whole-frame GPU is back to 22.467 ms,
-second-plane reflection GPU is 0.059 ms, and directional GPU is 7.087 ms, but
-the exact second-owner deferred geometry-scene class blocks 145.067 ms in the
-game's draws. Its two worst `DrawIndexed` calls wait 63.183 and 55.072 ms.
-Against the same matched means, the frame adds 134.971 ms in that exact
-game-draw class. Seventeen off-main texture creations take 74.345 ms beside
-the drain; that off-main clock and the preceding GPU work must not be added to
-the color draw wait.
-
-The corrected diagnosis is now two independent first-use producers followed
-by one submission drain: terrain texture/resource admission inside the exact
-reflection `RenderLightStyle` class, an exceptional resident-population
-directional-shadow GPU build, then deferred-color draw backpressure. A
-renderer, frustum, shadow-system, or resource-loader rewrite is still not
-supported, but one generic cross-pass staging switch is not supported either.
-
-Before another behavior A/B, the unexplained larger producer needs one more
-narrow measurement. Statically recover the render-record execution inside
-`GraphicsShadowMapDx11::RenderDirectional`, then bracket bounded draw-ordinal
-chunks only on region-changing directional calls. Reuse the existing draw
-hook and IA/shader/SRV snapshots; preserve per-chunk draw/index totals and a
-bounded record identity, and retire non-blocking GPU timestamps later. The
-candidate is a region change, so ordinary frames need no additional GPU
-queries. This will distinguish one pathological terrain/alpha/caster record
-range from a cost spread across the whole 8,192-square directional map. Only
-then choose between per-record admission and a genuinely incremental map
-update. Whole-map reuse remains rejected by §50 because it visibly flickered
-and merely moved the work.
-
-
-## 92. Run 74 prepared: prove or reject the shared first-use population
-
-Run 73 established the order of the **play** transition but left one factual
-gap: 69 buffers are created inside the exact second-manager/first-plane
-reflection class, directional-shadow GPU work then becomes exceptional, and
-the exact second deferred owner's geometry-scene draws block, but pointer
-identity was not retained between those classes. Run 74 is a passive identity
-trace for that gap. It changes no culling, scene admission, resource loading,
-reflection, shadow, or color-render decision.
-
-Every successful main-thread D3D11 buffer creation is retained in a fixed
-4,096-record ring for 120 frames with byte width, bind flags, and its exact
-creation context. An 8,192-slot index bounds each draw-time lookup to 16
-pointer probes; index saturation has its own counter. The existing IA setter
-snapshot already holds four vertex buffers and the index buffer. After each
-already-timed game draw, Run 74
-deduplicates those five identities and classifies their use as one exact
-reflection manager/plane, the exact
-`GraphicsShadowMapDx11::RenderDirectional` class, or one exact
-`GraphicsDeferredRendererX::Render` owner/pass/site. Directional use takes
-precedence over its enclosing deferred owner. Per-frame counters record the
-first use of each fresh buffer in each family and the exact moment it first
-joins reflection+shadow, reflection+deferred, shadow+deferred, or all three.
-The 4,096-entry ring reports any overwrite still inside the 120-frame horizon.
-F12 writes up to 128 joined identities during the session, including creation
-and first-use frames and exact reflection/deferred contexts, and explicitly
-reports omitted output and recent ring eviction.
-
-This adds no per-draw clock read, GPU query, or D3D state getter. It reuses the
-single Draw/DrawIndexed duration sample and state-setter snapshot already
-required by Runs 71--73. The sole additional GPU query pairs are coarse child
-scopes around the already verified per-plane `BuildScene` and
-`RenderLightStyle` calls. Their unique `E8` sites are Engine RVAs `0x186501`
-and `0x18694d`. Both use `detour::patchCall`; before either write, the runtime
-verifies each 16--24-byte caller window, relocation-aware exported entry, and
-independent callee-cleanup tail. `BuildScene` at `0x17d9d0` ends in `ret 0x04`
-and `RenderLightStyle` at `0x179a40` ends in `ret 0x10`. The four reflection
-manager/plane cells each receive separate child count/CPU-`_us`/GPU fields.
-Directional draws receive a count under the already verified directional
-scope.
-
-The trace activates only if the reflection, child, directional, deferred-owner
-and D3D binding dependencies are all live. Group 131072 owns it and pulls in
-the two exact scope dependencies when selected alone; `engine_trace=1` already
-selects everything. Failure leaves the cross-pass columns at zero and logs the
-trace unavailable rather than emitting a partial class. All retained state is
-bounded and pointer-only; no COM object is dereferenced or retained.
-
-The decision after the run is binary. If the candidate **play** frame gains a
-large `engine_crosspass_join_all_three`, the supported fix boundary is staged
-scene participation: make newly admitted renderables visible to the normal
-color class first, then admit those same identities to reflection and
-directional shadows over later frames. If the join stays zero without a recent
-eviction, the shared-population explanation is rejected and the child brackets
-separate reflection `BuildScene` budgeting from resident-caster directional
-shadow budgeting. Either result is more specific than a renderer, frustum,
-shadow-system, or resource-loader rewrite.
-
-The verifier passes 712 checks. A clean-baseline one-at-a-time audit rejects
-all 150/150 new byte, RVA, relocation, ABI, and retention-bound mutations.
-`npm run doctor`, the 748,032-byte release build, and the complete off-game
-self-test pass; the documented GPU timestamp-retirement check failed once
-with `stamps=0` and passed on the required immediate rerun with `stamps=1`.
-The installed/source DLL SHA-256 is
-`a419046fb76d351d6f5d2f7fc10021b3b36edaaa7473054e848873265d7577d9` and the
-installed/source Run-74 INI SHA-256 is
-`f2534e7ee34207f93ec43761706276627f46bab4a26e6ddd383776ac0309113d`.
-Both pairs are byte-identical; the stale live CSV is absent and the game was
-not launched.
-
-## 91. Run 73: reflection and directional shadows jointly produce the play burst
-
-Run 73 is archived as `tqflicker-frames.run73.csv`, SHA-256
-`7f78a2f4dd18e5d4d75b1b771bde17e93de08445be61a7867103a5a347a6d948`,
-and `tqflicker-debug.run73.log`, SHA-256
-`7008890e94d2726c6b33c62891e197f851a0700435ebe38c644997d8b36efba1`.
-Both archives were byte-compared with their completed live files. The CSV has
-7,356 contiguous presented frames, 0--7355. Its five parts are **menu**
-0--2083, **load-game frame** 2084, **loading screen** 2085--3156, **first
-world frame** 3157, and **play** 3158--7355.
-
-F12 is on **play** frame 6775. Frame 6774 ends only 18 ms before the marker;
-it cannot be selected as a human reaction target and is a separate 44.949 ms
-frame with 25.166 ms in the exact `Engine::Update` class. The normal-route
-transition is **play** frames 6752/6753 at 101.205/136.010 ms, ending 635/499
-ms before F12. The reporter did not describe the subjective size, so this is
-the probable marker-associated pair rather than an assertion that either
-frame was felt.
-
-Frame 6752 proves that reflection is a real producer, but not the only one.
-The first manager invocation has no reflection plane and costs 0.002 ms. The
-second recursive DX11 branch's first water-plane forward renderer costs
-20.826 ms CPU and 53.770 ms GPU; its enclosing exact
-`GraphicsReflectionManager::RenderReflections` class costs 20.918 ms CPU and
-the same 53.770 ms GPU. Inside that plane are two main-thread terrain texture
-loads / 9.545 ms, four texture creations / 7.878 ms, and 69 buffer creations /
-0.584 ms. The load and creation clocks nest inside the plane and must not be
-added. The Resource identities are
-`gadir_rockypebbles01.tex` / 5.229 ms and
-`gadir_rockypebbles01normal.tex` / 4.316 ms, both in the exact
-`TerrainBlock -> GraphicsForwardRenderer::RenderLightStyle` reflection chain.
-
-The exact `GraphicsShadowMapDx11::RenderDirectional` class on the same
-**play** frame costs only 6.162 ms CPU but 84.698 ms GPU. It performs zero
-nested Resource load. The accepted exact `GraphicsMeshInstance` mitigation
-successfully defers 38 cold Actor-root poses and omits 38 cold root meshes
-(37 state 0, one state 1), so this is not the synchronous cold-root class that
-Runs 68--69 removed. Whole-frame GPU reaches 202.410 ms. The second
-`GraphicsDeferredRendererX::Render` geometry-scene class then takes 60.647 ms
-CPU, including 60.178 ms blocked in game `Draw`/`DrawIndexed`; one draw waits
-44.066 ms. These classes execute in order and overlap through GPU submission;
-their durations are not additive.
-
-Frame 6753 is the drain. Its exact second reflection-plane class is back to
-0.924 ms CPU / 0.161 ms GPU, directional GPU is 7.870 ms, and whole-frame GPU
-is 23.160 ms. Nevertheless `Engine::Render` costs 129.589 ms and game draw
-submission costs 120.461 ms. The exact second-owner deferred geometry-scene
-class contains 119.964 ms of it. Its two worst `DrawIndexed` calls wait 67.111
-and 36.786 ms. Seventeen off-main texture creations / 15.338 ms happen beside
-the drain; their clocks are not assigned to the earlier main-thread reflection
-scope.
-
-This is not a raw draw-count spike: frames 6752 and 6753 issue 1,421 and 1,418
-indexed draws. The matched same-run reference is 45 collision-active,
-full-scene **play** frames below 60 ms in the same 1,000--1,499 indexed-draw
-band, with no Resource load or shadow region change. Their means are 22.030 ms
-total, 17.585 ms `Engine::Render`, 10.994 ms game draw submission, 0.715 ms
-reflection-manager CPU, 0.127 ms second-plane reflection GPU, 6.953 ms
-directional-shadow GPU, and 10.524 ms in second-owner geometry-scene game
-draws.
-
-Relative to those matched means, frame 6752 adds 79.175 ms total, 77.568 ms
-`Engine::Render`, 50.139 ms game draw submission, 20.203 ms reflection CPU,
-53.643 ms reflection GPU, 77.745 ms directional-shadow GPU, and 49.654 ms in
-the exact second-owner geometry-scene game-draw class. Frame 6753 adds only
-0.034 ms second-plane reflection GPU and 0.917 ms directional-shadow GPU, but
-adds 109.467 ms game draw submission and 109.440 ms in that exact deferred
-geometry-scene draw class. These are within-run matched-class means, never
-cross-run p50s.
-
-The exceptional GPU attribution is not a normal fluctuation. Reflection GPU
-on frame 6752 is the largest **play** value at 53.770 ms; the next is 2.753 ms.
-Directional-shadow GPU is likewise the largest at 84.698 ms; the next is
-13.266 ms. Both candidate frames contain exactly two manager invocations, only
-the second has one plane, and both overflow counters are zero. Across all
-**play**, 83 other frames expose a third manager and plane through the explicit
-overflow counters, but that bounded limitation does not affect this pair.
-
-The corrected diagnosis is a first-use multi-pass admission burst: reflection
-forward rendering and directional shadows both produce exceptional GPU work
-on frame 6752, then second-owner deferred color draws absorb the queue drain
-on frames 6752--6753. The static order and 69 reflection-contained buffer
-creations make it plausible that newly admitted geometry is consumed by all
-three passes, but Run 73 does not preserve those buffer identities across the
-later shadow and color draws. That overlap remains an inference, not a
-measurement.
-
-A wholesale shadow, frustum, resource-loader, or renderer rewrite is not
-supported. The next passive run should retain a bounded cross-frame table of
-main-thread buffer creations, reuse the already tracked IA bindings at each
-game draw, and classify use as exact reflection plane, exact
-`GraphicsShadowMapDx11::RenderDirectional`, or exact deferred owner/site. It
-should also bracket the already verified reflection `BuildScene` and
-`RenderLightStyle` calls and count directional draws. It needs no per-draw GPU
-queries, state getters, or additional clock reads. If the same fresh buffers
-cross all three classes, stage newly admitted renderables so the normal color
-pass consumes them first and reflection/shadow participation follows over
-later frames. If they do not, the child brackets separate reflection budgeting
-from a resident-caster directional-shadow budget. This does not reopen any
-closed pump, archive-cache, generic-prefetch, pooling, lock, sleep, Stage 5, or
-libdeflate route, and `shadow_split` remains untouched.
-
-
-## 90. Run 73 prepared: isolate recursive branch reflections without changing rendering
-
-Run 72 and the verified static return chain identify reflection forward
-rendering as the immediate owner of its eight terrain texture loads, but they
-do not yet say which recursive DX11 portal/region branch or water plane owns
-the CPU, draw-submission, and GPU producer. Run 73 is the narrow passive trace
-for that question. It restores the desired `Graphics` enhanced-grass mode;
-Run 72 rejected original grass as a solution because the **play** transition
-remained, although it showed that enhanced grass amplifies steady rendering
-cost. No shadow, terrain, culling, resource-loading, or reflection decision is
-changed.
-
-The trace patches two unique E8 sites, not either shared function prologue.
-The branch call at `0x17f2d3` reaches exported
-`GraphicsReflectionManager::RenderReflections` at `0x187270`; its 24-byte
-caller window, 21-byte entry, and independent `ret 0x08` tail verify before a
-write. The manager call at `0x1872bb` reaches the per-plane forward-render
-helper at `0x1861d0`; its 20-byte caller window, relocation-aware 20-byte
-entry, and independent `ret 0x0c` tail verify. The two patches install
-atomically and restore in reverse. These independently prove the manager's
-`thiscall` receiver plus two explicit arguments and the plane helper's three
-stack arguments.
-
-The first two manager invocations in a frame and the first two planes in each
-manager receive exact CPU and game-draw `_us` counters plus non-blocking GPU
-intervals. Existing `ResourceLoader::LoadResource`, `CreateTexture2D`, and
-`CreateBuffer` samples are tagged in the same four plane cells; whole-manager
-totals retain work outside a plane. A third manager or plane is visible in an
-explicit overflow counter rather than folded into the bounded identities.
-F12's retained Resource records also carry the exact manager/plane numbers.
-Manager and plane intervals nest and must not be added. All reflection context
-is main-thread context: off-main texture creation stays
-unassigned rather than borrowing a stale scope, and must be correlated by
-frame timing.
-
-This run can distinguish the exact `GraphicsReflectionManager` / reflection
-forward-render class from the following
-`GraphicsDeferredRendererX::Render` class during the reporter-selected
-**play** transition. It does not assume that the largest frame or the frame
-immediately before F12 was felt. The five session parts must again be reported
-as **menu**, **load-game frame**, **loading screen**, **first world frame**,
-and **play**, and any comparison remains limited to matched full-scene
-**play** frames below 60 ms.
-
-The final verifier passes 681 checks. A dedicated mutation audit changes every
-byte in the six new caller/entry/tail tables one at a time, both call offsets,
-all RVA and relocation constants, the decorated export, every CSV/GPU name and
-enum mapping, installation/rollback routes, the main-thread gate, and the
-self-test oracle; all 280/280 mutations are rejected. `npm run doctor`, the
-738,816-byte release build, and the complete corrected off-game self-test pass,
-including GPU timestamp retirement on the first valid run. The self-test first
-caught a missing neutral reflection argument in an existing test helper, then
-caught the new oracle reading the preceding frame; both test-only defects were
-fixed before this pass.
-
-Run 73 is installed. The source and game-directory DLLs are byte-identical at
-SHA-256
-`e4a0195a7c5bb04a5062e1b231fc3b2897ac2223176ea1e6faf9c5ab9d8cc4b7`;
-the source and installed INIs are byte-identical at SHA-256
-`6c3b1e7a9eb7779914da43ec8daa52af3422b5e4e664c2011a89f583c059f08d`.
-Run 72's live CSV and debug log matched their archived files before deletion.
-The Run-73 live CSV and debug log are absent, and the game was not launched.
-
-
-## 89. Run 72 plus the complete flow map place terrain first-use work in reflection rendering
-
-Run 72 is archived as `tqflicker-frames.run72.csv`, SHA-256
-`8039a9243cd88555c222581e9cc599092e74e0c17f8459d84b2eb98096eb102d`,
-and `tqflicker-debug.run72.log`, SHA-256
-`ccae2b8d088bbc4f6989edebeaf873fe025c24fb2c8d4b2a0157edff1320d9a7`.
-Both archives were byte-compared with their completed live files. The CSV has
-8,102 contiguous presented frames, 0--8101. Its five parts are **menu**
-0--1979, **load-game frame** 1980, **loading screen** 1981--3098, **first
-world frame** 3099, and **play** 3100--8101.
-
-F12 is on **play** frame 7318. Frame 7317 ended only 14 ms before the marker,
-so it cannot be selected as a human reaction; it is a separate 62.312 ms
-frame with 48.462 ms in the exact `Engine::Update` class. The normal-route
-transition is the **play** triplet 7295/7296/7297 at
-46.065/117.857/64.646 ms, ending 575/457/392 ms before F12. The reporter only
-said that the run was done, so this is a probable marker-associated triplet,
-not a claim about which frame was felt or its subjective size.
-
-Changing only `Graphics` enhanced grass to original grass did not remove the
-transition. It changed where the driver queue drained. On **play** frame 7296,
-the second `GraphicsDeferredRendererX::Render` invocation's so-called geometry
-setup call at `0x1663a8` takes 26.799 ms, including 25.748 ms blocked in the
-game's `Draw`/`DrawIndexed` calls, while its exact GPU interval is 4.825 ms.
-One retained `DrawIndexed` accounts for 25.275 ms. The adjacent second-owner
-geometry scene takes only 0.487 ms / 0.204 ms game draw, with a 0.073 ms GPU
-interval. Thus Run 71's enhanced-grass scene was an amplifier and drain
-location, not the necessary producer of the native transition.
-
-The producer begins one **play** frame earlier. Frame 7295 performs 66 buffer
-creations / 0.648 ms, ten main-thread texture creations / 4.980 ms, and nine
-`ResourceLoader::LoadResource` calls / 21.465 ms. Eight exact terrain texture
-loads / 20.226 ms occur in `Engine::Render` outside every active
-`GraphicsDeferredRendererX::Render` owner. It changes the directional-shadow
-region, but the exact `GraphicsShadowMapDx11::RenderDirectional` class takes
-only 4.038 ms and performs zero Resource loads. Its whole-frame GPU interval
-is 196.066 ms, including 54.590 ms in that directional-shadow class and
-10.990 ms in the `TerrainRenderInterfaceRT::RenderGround` class; nested GPU
-intervals must not be added.
-
-Frame 7296 then has a 117.857 ms total and 98.157 ms in `Engine::Render`. The
-game's draw calls block for 26.475 ms, 33 off-main `CreateTexture2D` calls take
-37.104 ms, progressive upload work takes 13.487 ms, and the enhanced-bloom
-class takes 53.466 ms CPU while the whole-frame GPU interval is only
-22.501 ms. These clocks overlap through submission and backpressure. Frame
-7297 is the tail: 64.646 ms total, with 32.706 ms in the game's `Present`
-call and only 16.764 ms in its whole-frame GPU interval. This is the same
-producer-then-drain shape as earlier runs, with different API calls absorbing
-the waits.
-
-Within Run 72, the matched reference is 58 collision-active, full-scene
-**play** frames below 60 ms in the 1,000--1,499 indexed-draw band, with no
-Resource call or region change. Their means are 16.736 ms total,
-12.413 ms `Engine::Render`, 2.393 ms game draw submission, 2.844/1.355 ms in
-the exact deferred geometry classes' CPU/draw clocks, and 2.161/1.073 ms in
-the second-owner geometry-setup CPU/draw clocks. Relative to those same-run
-means, frame 7296 adds 101.121 ms total, 85.744 ms `Engine::Render`,
-24.082 ms game draw submission, and 24.638/24.675 ms in that exact
-second-owner geometry-setup CPU/draw class.
-
-Original grass does reduce steady full-scene **play** cost, although the two
-routes are not composition-identical. For collision-active full-scene
-**play** frames below 60 ms, Run 72 minus Run 71 means in the 1,000--1,499
-indexed-draw band (43 / 58 rows) are -5.947 ms total, -5.352 ms
-`Engine::Render`, -8.529 ms game draw submission, and -5.120 ms whole-frame
-GPU. In the 1,500--1,999 band (768 / 1,235 rows), they are -8.396, -8.035,
--8.387, and -8.405 ms in those same exact classes. In the 2,000-plus band
-(239 / 347 rows), they are -9.644, -9.301, -11.204, and -9.526 ms.
-
-These are matched-class means, never cross-run p50s. Different route and
-indoor/outdoor shares prevent treating the deltas as a precise grass price;
-they are enough to show a steady cost and not enough to explain away a
-117.857 ms **play** transition that persists without enhanced grass.
-
-The fresh static reconstruction supplies the missing owner. The generated
-resource audit was broad but had not been interpreted end to end. It is now
-regenerated from 205 explicit roots as a 1,592-function closure, and
-`research/streaming/disassembly-targets.md` records the verified chain:
-`GraphicsPortalRenderer::Render` recursively visits visible portal/region
-branches; every DX11 branch calls
-`GraphicsReflectionManager::RenderReflections` before region admission and
-before its `GraphicsDeferredRendererX::Render`; each visible water reflection
-uses a `GraphicsForwardRenderer`, builds a reflected scene, and executes the
-shared sorted render-list helper.
-
-The eight frame-7295 terrain stacks prove this is not merely a plausible
-caller. From `TerrainType::SetShaderParams`, they return through the
-renderable virtual at `0x1885b4`, the shared list at `0x17ab1b`,
-`GraphicsForwardRenderer::RenderLightStyle` at `0x179ba6`, the reflection
-forward helper at `0x186952`, the per-plane loop at `0x1872c0`, and the branch
-reflection call at `0x17f2d8`. Therefore those exact **play** terrain loads
-belong to reflection forward rendering, not to either deferred owner. The
-second correction is that deferred “geometry setup” callee `0x1653a0` also
-builds and executes a sorted scene list; its historical label must not be read
-as state setup only.
-
-No wholesale renderer rewrite is justified. The next run should be passive
-attribution, not another behavior A/B: patch the unique reflection-manager
-call at `0x17f2d3` and its per-plane call at `0x1872bb`, tag existing Resource,
-D3D-creation, and game-draw samples as reflection versus deferred branch, and
-capture bounded CPU/draw/GPU totals per branch and reflection plane. Restore
-the desired enhanced-grass mode for that trace; its cost is real, but Run 72
-rejects it as the necessary cause. If the 196.066 ms **play** GPU producer is
-inside reflection rendering, the workable fix boundary is reflected-scene
-admission or reflection update budgeting. If it is outside, the new bracket
-will exclude that class before any further decompilation or behavior change.
-
-The expanded verifier checks all 18 new flow windows across 16--24 bytes,
-their eight direct-call destinations, the renderable virtual slot, and every
-documented RVA. It passes 647 checks, and 72/72 one-at-a-time perturbations of
-the new window RVAs, byte strings, call sites, call targets, dispatch, and
-documented RVAs are rejected. No runtime table or installed binary was changed
-for this static reconstruction. `npm run doctor`, the release build, and the
-complete off-game self-test pass; the game was not launched.
-
-
-## 88. Run 71 isolates the felt transition's wait point in second-owner geometry/grass submission
-
-Run 71 is archived as `tqflicker-frames.run71.csv`, SHA-256
-`16a4c1c7c117aa8a24e47ba4a77f96703425b2665036bf700be5b93674bdceee`,
-and `tqflicker-debug.run71.log`, SHA-256
-`8a26253fb3cc524066f201b76fb5920ac115f419ca6763a735f2ab93e7c4abcf`.
-Both archives were byte-compared with their completed live files. The CSV has
-7,269 contiguous presented frames, 0--7268. Its five parts are **menu**
-0--1975, **load-game frame** 1976, **loading screen** 1977--3121, **first
-world frame** 3122, and **play** 3123--7268.
-
-The reporter felt a little stutter and pressed F12 on **play** frame 6703.
-Frame 6702 ended only 21 ms before the marker, so it cannot be selected as a
-human reaction; it is a separate 80.524 ms frame with 61.601 ms in the exact
-`Engine::Update` class. The normal-route region transition is **play** frames
-6679/6680 at 82.592/51.919 ms. They ended 600/548 ms before F12 and are
-therefore the probable felt pair, preserving the reporter-derived
-qualification rather than claiming the marker proves it.
-
-The first transition frame isolates the render-thread wait point. On **play**
-frame 6679, `Engine::Render` takes 74.693 ms. The two exact
-`GraphicsDeferredRendererX::Render` owners are observed with no overflow. Its
-geometry children take 43.901 ms, including 42.098 ms in the game's
-`Draw`/`DrawIndexed` calls. Specifically, second-owner geometry scene at call
-site `0x166412` takes 42.545 ms and contains 42.073 ms of that draw blocking;
-first-owner setup is 0.465/0.006 ms CPU/draw and second-owner setup is
-0.891/0.019 ms. Thus 99.9% of the geometry draw wait and 96.9% of geometry CPU
-are in one exact invocation/site.
-
-This is not 42 ms of GPU execution by that scene child. Its exact non-blocking
-GPU interval is 6.554 ms. The whole-frame GPU interval is 95.113 ms, while the
-narrower `GraphicsShadowMapDx11::RenderDirectional`, terrain-ground, and
-enhanced-grass intervals are 35.622, 13.456, and 6.554 ms respectively. These
-intervals are not additive where nested. The second-owner geometry-scene and
-`TerrainRenderInterfaceRT::RenderGrass` GPU intervals are identical on this
-frame, locating the scene child around that live grass class.
-
-The carry-over frame makes the queue interpretation stronger. **Play** frame
-6680 has no main-thread Resource load and no buffer creation, yet second-owner
-geometry scene still takes 24.116 ms and blocks 23.687 ms in the game's draw
-calls. Its GPU interval is only 1.411 ms, identical to the nested enhanced-grass
-interval, and its whole-frame GPU interval is 24.096 ms. Four off-main texture
-creations take 4.334 ms; they cannot explain the main thread entering a single
-game draw for 9.574 ms. The driver calls are acting as drain/backpressure
-points for work admitted earlier, not pricing only the draw whose call happens
-to wait.
-
-Against 43 collision-active, full-scene **play** rows under 60 ms in the same
-1,000--1,499 indexed-draw band, with no Resource call or region change, the
-mean is 22.683 ms frame, 17.765 ms `Engine::Render`, 12.076 ms geometry CPU,
-and 10.429 ms geometry draw. Frame 6679 is +31.825/+31.669 ms in the latter
-two exact classes; frame 6680 is +13.592/+13.292 ms. The second-owner scene
-alone accounts for those increases. This is a within-run matched full-scene
-comparison, not an across-run median.
-
-The retained draws show concentration, not an intrinsically slow mesh. On
-frame 6679, one second-owner scene `DrawIndexed` call waits 26.765 ms and the
-next waits 7.526 ms: together 34.291 ms, 81.5% of the exact scene draw wait.
-They use the same index buffer, vertex shader, pixel shader, and pixel resource,
-with different two-stream vertex buffers. The worst draw's vertex buffer
-appears again on frame 6680 and waits only 0.944 ms. That large variance for
-the same binding identity is further evidence that the recorded call is where
-the queue drains, not that its 198 indices inherently cost 26.765 ms.
-
-First-use admission still supplies the upstream burst. Frame 6679 performs
-two exact colour-terrain Resource loads, the Gadir rocky-pebbles base and
-normal textures, totaling 8.523 ms; four main-thread texture creations take
-6.496 ms, and 91 buffer creations take only 0.801 ms. All occur outside an
-active `GraphicsDeferredRendererX::Render` owner. In the same frame the
-enhanced-grass class adopts 35 new grass streams, creates 35 twins, and issues
-38 cross draws alongside 39 original grass draws; its measured mod CPU costs
-are only 3.327 ms fill and 0.090 ms cross submission, but the extra draws and
-overdraw can deepen the GPU/driver queue before a later original game draw
-blocks. This can amplify a native-game transition without being a Wine-only
-cause; the base game still admits the terrain and original grass scene.
-
-One limitation is corrected forward. The Run-71 creation ring intentionally
-accepted only creations inside an owner. Because this transition's 91 buffers
-and four main-thread textures were all created before/outside the owner, every
-slow draw reports `new -1`; that means “not found in the owner-only ring,” not
-“old resource.” The trace successfully names the consumer/wait point but does
-not yet map the outside-owner producer buffers to it.
-
-The cheapest discriminating next run is an A/B with only the optional
-`Graphics` enhanced-grass behavior changed to original, while retaining the
-same trace and all accepted shadow/terrain behavior. This is not a proposal to
-remove enhanced grass permanently. If the probable **play** transition falls
-substantially, the proper fix is to budget activation of newly adopted grass
-twins/cross draws across later frames, leaving original grass visible
-immediately. If it does not, restore enhanced grass and extend identity capture
-to all main-thread same-frame buffer creation plus SRV-to-texture mapping
-outside the deferred owner. Neither result calls for rewriting shadows,
-frustum culling, or resource loading wholesale.
-
-Run 72 is installed for that A/B. Its settings are byte-for-byte Run 71 except
-for `grass=enhanced -> grass=original`; the accepted shadow/terrain behavior
-and full owner-exact trace remain enabled. The unchanged installed/source DLL
-is 732,160 bytes, SHA-256
-`bf1e4691c0a897b40acf17aa259a3ad4daa24dec3c9a8051c01e1ab5c60ace40`.
-The installed/source `run72-grass-original-ab.ini` SHA-256 is
-`d655f091ca5d0be4ffd287598a3446f915843a3c21960c0e9c9b07b96c2f294e`.
-Run 71 was archived and byte-compared before its live CSV was removed; the
-Run-72 live CSV is absent and the game was not launched.
-
-
-## 87. Run 71 setup: split the two deferred owners and retain the slow geometry draw identities
-
-Run 70 did not justify another behavior A/B. The reporter identifies **play**
-frame 7264 as probably felt; its exact `GraphicsDeferredRendererX` geometry
-children spend 50.893 ms blocked in the game's `Draw` / `DrawIndexed` calls,
-but the first trace merges the two `GraphicsDeferredRendererX::Render`
-invocations in its GPU spans and retains no identity for the slow draws. Run
-71 is therefore passive instrumentation only. It changes no Resource state,
-scene admission, shadow eligibility, frustum, draw, or upload behavior.
-
-The owner is not detoured at its shared six-byte prologue. The complete static
-callgraph has one direct caller, unexported `FUN_1017ead0`; its call at RVA
-`0x17fc9b` is changed with `patchCall`. A 24-byte window beginning at
-`0x17fc8b` proves the call and its surrounding argument setup, while a separate
-20-byte tail at `GraphicsDeferredRendererX::Render+0x49f` (RVA `0x1665cf`)
-ends in `ret 0x1c` and proves seven explicit stack arguments. The exported
-owner entry remains independently verified across 24 bytes. The owner call,
-all fourteen direct-child calls, and all thirteen unique callee ABI tails are
-verified before the first write; any failed child patch restores the owner and
-all prior children.
-
-Each frame numbers owner invocations one and two and exposes overflow rather
-than silently folding a third call into either. The exact geometry setup site
-at `0x1663a8` and scene-list site at `0x166412` now have separate CPU,
-game-owned draw, and non-blocking GPU fields for each invocation. These four
-GPU query pairs begin and end within one direct child call, correcting Run
-70's overlapping six-span design. The older six CPU/draw totals remain for
-continuity; the old six GPU names are removed because their values were not
-separable pass costs.
-
-Synchronous `ResourceLoader::LoadResource`, `CreateTexture2D`, and
-`CreateBuffer` work on the main render thread is partitioned into six
-locations: setup, scene, or other owner work in invocation one or two. All
-game durations end in `_us`. D3D creation reuses the timing sample already
-taken by its hook. Off-main texture creation cannot be assigned to a main
-owner stack and remains in its existing off-main class rather than receiving a
-false invocation.
-
-For the reaction window, Run 71 retains only the twelve slowest geometry draws
-per frame in a fixed 128-frame ring. F12 selects at most eight frames from the
-preceding 120 whose geometry-draw sum is at least 15 ms. Each retained draw
-records invocation, exact setup/scene site, draw kind and arguments, the first
-four vertex-buffer bindings, index buffer, vertex and pixel shader, and first
-eight pixel shader resources. Those identities are maintained by the game's
-existing D3D setter calls; `Draw` and `DrawIndexed` issue no state getter, new
-clock read, or GPU query. A fixed 4,096-entry successful-creation ring can
-associate the bound vertex/index buffer with its creation frame and descriptor;
-the F12 report also lists at most 32 texture creations on each selected frame.
-No formatting or file write occurs on the candidate frame itself.
-
-The exact-site verifier now passes 602 checks. It re-reads both new on-disk
-windows and checks the owner ABI, patch order and rollback, invocation/site
-mappings, all CSV names and units, setter vtable slots, reuse of existing
-timing samples, and every retention bound. A fresh mutation audit rejects all
-190/190 one-at-a-time Run-71 byte, bound, name, mapping, and route changes;
-the prior Run-70 audit remains 716/716. Doctor, the 732,160-byte release build,
-and two complete off-game self-test runs pass, including GPU timestamp
-retirement on both runs.
-
-The installed/source Run-71 DLLs are byte-identical at 732,160 bytes and
-SHA-256
-`bf1e4691c0a897b40acf17aa259a3ad4daa24dec3c9a8051c01e1ab5c60ace40`.
-The installed/source `run71-deferred-geometry-identity.ini` files are
-byte-identical at SHA-256
-`dd063f9164acbdfee266356e20c25187e353517cb8d469d9e78029c22a5c4868`.
-Run 70's live CSV matched its archived SHA-256 before removal; the stale live
-CSV is absent and the game was not launched.
-
-Run the same five-part route and press F12 after the felt **play** transition.
-The result should say whether invocation one or two and setup or scene owns the
-block, whether a few repeated draw/resource identities dominate, and whether
-their buffers or textures were created on that frame. Only then choose among
-targeted warming, bounded colour-scene admission, or brief deferral of exact
-cold colour renderables. This does not reopen the message pump, buffer pooling,
-or the rejected broad prefetch routes.
-
-
-## 86. Run 70 ties the probably felt transition to geometry submission, not the nearest marker candidate
-
-Run 70 is archived as `tqflicker-frames.run70.csv`, SHA-256
-`4f8dac182590173fd9de4dd5c017dbe2d00c7a8619f23e85716174b178c18509`,
-and `tqflicker-debug.run70.log`, SHA-256
-`55bf83319b31272decec52255b0249539f5263a495927f5244313ba37b329c52`.
-Both archives were byte-compared with the during-session files. The CSV has
-7,883 contiguous presented frames, 0--7882. Its five parts are **menu**
-0--2572, **load-game frame** 2573, **loading screen** 2574--3677, **first
-world frame** 3678, and **play** 3679--7882.
-
-F12 is on **play** frame 7283. The automatic nearest candidate, frame 7282,
-ends only 17 ms before the marker, which the reporter correctly rejects as an
-impossible human reaction interval. The reporter identifies the earlier
-region-transition frame 7264 as **probably** the stutter and says it felt
-smaller in this run. Frame 7264 begins 583 ms before the marker and ends
-461 ms before it. This is the first user-selected, instrumented instance of
-the normal-route transition class; retain the reporter's uncertainty rather
-than converting “probably” into proof.
-
-Frame 7264 is a 122.155 ms **play** frame. `Engine::Render` takes 114.700 ms,
-`Engine::Update` 4.390 ms, and the `Game::PumpMessages` class 0.934 ms. The
-exact `GraphicsDeferredRendererX` direct-child partition assigns 52.406 ms to
-the geometry class, including 50.893 ms inside the game's own `Draw` /
-`DrawIndexed` calls. Shadow-map construction takes 7.656 ms; light
-accumulation 0.066 ms; resolve/AO 0.442 ms; later scene lists 1.032 ms; and
-post/fog/composite 0.297 ms. The six child classes total 61.899 ms, leaving
-52.801 ms elsewhere in `Engine::Render`; that remainder is not an owner-only
-routine and must not be presented as a new component. The frame's complete
-game-owned D3D timing is 52.243 ms in `Draw` / `DrawIndexed` and 2.450 ms in
-`Map`. The geometry children contain 97.4% of the draw block.
-
-The same frame changes from 219 to 1,555 indexed draws and admits 221 buffers;
-the 221 `CreateBuffer` calls themselves take only 1.765 ms. Sixteen
-main-thread, colour-render Resource calls take 30.218 ms: four meshes /
-2.913 ms and twelve textures / 27.305 ms. Fourteen main-thread
-`CreateTexture2D` calls take 22.610 ms. These clocks may nest inside the
-renderer partition and are not additive. The exact
-`GraphicsShadowMapDx11::RenderDirectional` class takes 7.442 ms, performs no
-synchronous directional Resource load, and defers 26 cold Actor-root
-`GraphicsMeshInstance` poses, confirming 19 new queue insertions. Thus the
-accepted shadow deferral is still operating while the probably felt event is
-dominated by the colour/deferred geometry submission class.
-
-For a matched reference, Run 70 has 774 collision-active, full-scene **play**
-frames under 60 ms with 1,500--1,999 indexed draws, no Resource call, and no
-region change. Their means are 23.926 ms frame, 18.812 ms `Engine::Render`,
-13.144 ms geometry-child CPU, and 10.356 ms geometry-child draw time. Frame
-7264 is therefore +39.262 ms in the exact geometry-child class and +40.537 ms
-in its game-owned draw calls. This is class-local evidence, not a comparison
-of route-dependent medians.
-
-The new GPU columns need one correction forward from §85. The engine invokes
-`GraphicsDeferredRendererX::Render` twice on these frames. Run 70 owns only
-one timestamp pair per group per frame, so each pair opens at the first
-group occurrence in the first owner invocation and closes at the last group
-occurrence in the second invocation. The reported 97.880, 116.898, 116.968,
-117.027, 118.037, and 118.478 ms spans consequently overlap and are **not six
-separable pass costs**. Do not sum them or use them to assign GPU work. The CPU
-and draw partitions remain exact sums of their scoped direct child calls.
-
-Frame 7282 remains real but is a separate, apparently unperceived **play**
-event: 73.550 ms total, with 54.816 ms in `Engine::Update`, while
-`Engine::Render` is 17.055 ms and draw submission 10.448 ms. It has no
-Resource load, region change, or main object wait. Its 68.261 ms whole-GPU
-interval can include an idle/submission gap while the CPU is stopped and does
-not prove 68 ms of active GPU work. Do not use this nearest frame to replace
-the reporter-selected transition.
-
-There is no gross steady-scene trace regression. Comparing only
-collision-active, full-scene **play** frames under 60 ms with no Resource call
-or region change, Run 70 minus Run 69 mean frame/GPU differences are
-+0.189/+0.186 ms at 500--999 indexed draws (1,110 versus 1,159 frames),
--0.158/-0.156 ms at 1,500--1,999 (774 versus 715), and +0.056/+0.013 ms at
-2,000-plus (232 versus 234). The 1,000--1,499 samples are only 39 and 42 and
-are not used. This excludes a large instrumentation cost; the mixed signs do
-not establish a fine change.
-
-The next passive trace should split the two geometry direct-call sites and
-the first/second `GraphicsDeferredRendererX::Render` invocations. It should
-also retain only slow `Draw` / `DrawIndexed` records, using the QPC sample the
-existing draw hook already takes, with draw kind, ordinal/index count, exact
-geometry call site, and owner invocation. Cheap tracking of the bound
-vertex/index buffers, shaders, and shader resources should be attached to
-those slow records; it should not issue per-draw GPU queries or state getters.
-GPU timestamps must be per invocation, preferably narrowed to the two geometry
-sites. Resource loads and D3D creation should likewise be tagged with the
-active owner invocation/site or owner gap. This will distinguish a small set
-of first-use draws that can be warmed or deferred from general queue
-backpressure.
-
-A bounded lower-mip-first archive path remains a plausible contained fix for
-the twelve colour textures and later worker uploads, but it cannot by itself
-explain the 221 buffer admissions or the 50.893 ms geometry draw block.
-`CreateBuffer` allocation is only 1.765 ms, so this result does not reopen the
-closed buffer-pooling route. The evidence supports a narrow colour-scene
-admission/warmup fix if the next trace identifies stable slow draws; it does
-not support rewriting the shadow system, frustum culling, or deferred
-renderer.
-
-
-## 85. Run 70 setup: partition first-use submission before changing texture admission
-
-Run 69's remaining **play** transition is not evidence that all 121 buffer
-creations and 23 off-main texture creations themselves cost 55.814 ms. The
-23 texture creations and their 55.814 ms belong to frame 6798; that frame also
-blocks 97.651 ms inside the game's `Draw` / `DrawIndexed` calls but has only a
-28.044 ms whole-frame GPU interval. The preceding frame 6797 has a 168.095 ms
-GPU interval, of which directional shadows, terrain ground, and enhanced grass
-name 54.441, 10.236, and 4.798 ms. The remaining 97.007 ms is merely unnamed,
-not yet proved to be texture upload, buffer admission, a particular deferred
-pass, or work submitted earlier. Those nested and adjacent intervals must not
-be added into a fabricated component total.
-
-Run 70 therefore adds a passive six-class partition of the exact
-`GraphicsDeferredRendererX::Render` class: geometry, shadow-map construction,
-light accumulation, resolve/AO, later scene lists, and post/fog/composite.
-Fourteen verified direct `E8` calls are changed with `patchCall`. Each group
-gets a whole-child-call count and engine duration ending in `_us`, the share of
-the existing game-owned `Draw` / `DrawIndexed` timing that occurs inside it,
-and one non-blocking GPU timestamp pair. A group with multiple calls measures
-GPU time from its first entry to last exit, so that GPU interval admits the
-small owner-code gaps it spans; its CPU and draw totals include only the
-direct calls. This is six GPU pairs per frame, not per-draw timestamping. The
-existing narrower `GraphicsShadowMapDx11::RenderDirectional`, terrain-ground,
-resource, archive, and off-main creation fields remain available for the same
-frame.
-
-The owner is the decorated export at Engine RVA `0x166130`, independently
-verified across 24 bytes. Every call verifies an original 16-byte window and
-its resolved destination before the first write. Every unique destination
-also verifies a separate 16-byte epilogue whose `ret` immediate agrees with
-the wrapper's explicit x86 argument count. Installation is atomic and rolls
-back all earlier calls if any later call fails. The exact sites, targets, and
-ABI tails are indexed in `disassembly-targets.md`. Trace group `65536` owns the
-instrument. It is selected by the usual `engine_trace=1`, and cannot install
-when the performance probe is off. No fix option, resource decision, shadow
-decision, or `shadow_split` behavior changes.
-
-The proposed lower-mip-first direction is technically coherent but is not the
-same experiment as rejected Stage 4.2. Stage 4.2 reduced archive read syscall
-count while leaving the same compressed blocks to read, inflate, and consume;
-it could not remove the first-use D3D resource realization seen here. A
-lower-mip-first texture path could reduce initial allocation/upload work and
-defer higher mip uploads. The existing progressive path cannot simply be
-switched on for archive textures, however: it retains a loose file's mapped
-bytes while later mip uploads consume them. Archive reads return decompressed
-data with a different owner and lifetime. Supporting them requires a bounded
-staging owner for copied or retained decompressed mip payloads, a resource
-ready-state rule, cancellation/eviction handling, and a later upload schedule.
-That is a contained archive-texture staging feature, not a complete shadow,
-frustum-culling, or renderer rewrite. It is worth prototyping only if Run 70
-assigns the transition to texture realization or its downstream geometry
-submission; otherwise it would again optimize a correlated count rather than
-the blocking producer.
-
-The verifier passes 583 checks, and all 716 one-at-a-time mutations of the new
-signature bytes, RVAs, relocations, routing tables, ABI counts, pass mappings,
-CSV names, and timing routes are rejected. Doctor and the release build pass.
-The complete off-game self-test passes, including GPU timestamp retirement;
-that one documented host-flaky assertion failed on the first two final runs
-and passed on the required rerun, while every new partition test passed on all
-three. Run 70 is built from
-`cache/runs/run70-deferred-pass-partition.ini`. Relative to the normal live
-configuration it keeps the three accepted behavior settings and enables the
-same trace, F12 marker, and draw timing as Run 69; the experimental delta from
-Run 69 is only the passive binary partition above. The installed/source DLLs
-match at 719,872 bytes, SHA-256
-`c069f5a0ca48e01c6ff1fc64b24c5de741c46d5751b3cbed6723cb40fff6d017`.
-The installed/source INIs match, SHA-256
-`f0af10a5f7c5e680ecf04f593008155edb95bbb4470fceef674e9f5956dea550`.
-Run 69's live CSV and debug log matched their archives before removal; both
-live names are absent, and the game was not launched.
-
-## 84. Post-Run-69 safety correction: an unconfirmed queue must take the stock pose path
-
-Run 69 proves the successful transition deferral, but its 165 consecutive
-enqueue-failure counters prove that the original failure policy was too broad.
-The behavior no longer equates "we called `EnqueueResource`" with "this root
-may safely be omitted." After the call it re-reads both verified fields. It
-skips `Actor::UpdateMeshInstance` only if the root is in loader state 1 or is
-state 0 with a non-null queue link. If the root has already reached state 2,
-it runs the stock pose update immediately; if it remains state 0 without a
-queue link, it records the failure and also runs the stock update. A resident
-caster therefore cannot be admitted with stale pose data, and an unqueueable
-caster cannot remain missing for many directional builds.
-
-This correction changes no byte site, offset, exported identity, enqueue
-tuple, or INI setting. The independently verified 23-byte
-`Actor::AddToScene` caller window and 24-byte `Actor::UpdateMeshInstance`
-callee window remain the complete binary surface. The source verifier now
-also requires both stock-forward branches before a deferred event can be
-counted and passes 456 checks. The mutation audit rejects all 91/91 relevant
-one-at-a-time changes, including the queue predicate and both stock fallbacks.
-The off-game self-test covers the exact queue
-postcondition for states 0, 1, and 2. `npm run doctor`, the release build, and
-the complete self-test pass, including GPU timestamp retirement. The resulting
-710,656-byte checkpoint DLL is SHA-256
-`8cd457072f927455b1f8a4bc4a2af3f399f6501235d268a2cd6c21935ad8ffba`.
-It is built but not installed; the game directory still contains the tested
-Run 69 DLL/configuration and its live files.
-
-
-## 83. Run 69 removes the synchronous directional mesh class; the remaining burst is submission/queue work
-
-Run 69 is archived as `tqflicker-frames.run69.csv`, SHA-256
-`38f95a3cd21c499e9057432f9447da1f15124e148210889382b4ed48c05a79ae`,
-and `tqflicker-debug.run69.log`, SHA-256
-`2b7d1ff73c04fc87926218f0b23a1681d89e7a115fc222086a64bd0ef23fa3ae`.
-Both archives were byte-compared with the live files. The CSV contains 7,406
-contiguous presented frames, 0--7405, totaling 95.087 s. Its five parts are
-**menu** 0--2013 (18.275 s), **load-game frame** 2014 (1,513.717 ms),
-**loading screen** 2015--3168 (10.125 s), **first world frame** 3169
-(915.749 ms), and **play** 3170--7405 (64.257 s).
-
-F12 at **play** frame 6826 again leaves two candidates that must not be
-collapsed. The nearest is frame 6825 at 65.694 ms, ending 17 ms before the
-marker; it has no Resource load and spends 46.309 ms in the `Engine::Update`
-class. The normal-route loading transition is the earlier contiguous pair
-6797/6798 at 95.290/120.984 ms, beginning 850 ms and ending 633 ms before the
-marker. It totals 216.274 ms. The marker does not by itself prove which the
-reporter felt.
-
-The new behavior does exactly the narrow operation it was built to test on
-frame 6797. In the `GraphicsShadowMapDx11::RenderDirectional` class it finds
-30 state-0 `GraphicsMeshInstance` Actor roots before pose work, confirms 23
-new queue insertions, and skips all 30 `Actor::UpdateMeshInstance` calls. The
-later exact-class gate omits all 30 roots. There is no enqueue failure on this
-frame. Directional synchronous Resource loads are **zero**, versus 21 calls /
-17.382 ms on Run 68's corresponding onset; that previous population was 20
-meshes / 16.419 ms and one shader / 0.963 ms. The directional CPU call falls
-from 19.318 to 5.146 ms. This is direct evidence that the earlier gate removes
-the targeted class, independently of total-frame variation.
-
-The only main-thread Resource work left on frame 6797 is two colour-terrain
-textures / 4.174 ms outside directional shadow, again the Gadir rocky-pebbles
-base/normal pair. One additional 0.977 ms Resource call is non-main. Frame
-6798 has no main-thread Resource load. Thus the deferred meshes did not merely
-reappear as synchronous directional work on the next frame.
-
-The pair is not fixed. Run 69 totals 159.309 ms in the game's `Draw` /
-`DrawIndexed` calls and 2.885 ms in `Map`, or 162.194 ms of the 216.274 ms
-pair. The two directional CPU calls total only 8.827 ms. Frame 6797 submits a
-168.095 ms whole-GPU interval, including 54.441 ms directional shadow,
-10.236 ms terrain ground, and 4.798 ms enhanced grass; the currently named GPU
-classes leave 97.007 ms unclassified. Frame 6798 then spends 97.651 ms in
-draw submission while its own GPU interval is only 28.044 ms. It also records
-23 off-main texture creations / 55.814 ms and 38.827 ms of archive inflate;
-those worker intervals overlap the frame and are not amounts to add. This is
-the established first-use GPU submission/backpressure shape, now with the
-cold directional mesh wait removed. It exists in D3D11 on native Windows as
-well as under CrossOver; the present run does not support a host-only cause.
-
-For scale only, the corresponding Run 68 pair was 242.708 ms. The observed
-Run-69 difference is -26.434 ms, but prior nominally identical transitions
-vary too widely to assign that whole delta to the behavior. The class-local
-zero and the 14.172 ms directional-CPU reduction are the stronger evidence.
-In collision-active, full-scene **play** frames under 60 ms with no Resource
-load or region change, Run 69 minus Run 68 mean frame/GPU differences are
--0.008/-0.008 ms at 500--999 indexed draws (1,159 versus 1,141 frames),
-+0.296/+0.281 ms at 1,500--1,999 (715 versus 831), and +0.259/+0.330 ms at
-2,000-plus (234 versus 222). The 1,000--1,499 population is only 42 versus 43
-frames and is not used. This excludes a gross steady-scene regression; it is
-not a fine improvement claim and no across-run p50 is used.
-
-One safety result needs correction before this becomes an accepted default.
-Across **play**, the Actor gate sees 255 state-0 roots and no state-1 roots.
-It confirms 76 new queue insertions; 14 were already linked to a queue. On
-frames 6920--7084, exactly one state-0 attempt per frame fails to establish
-either a nonzero state or a queue link, producing 165 consecutive
-`engine_shadow_actor_pose_enqueue_failed` events. The trace does not retain
-the Resource identity, so calling all 165 one object remains an inference,
-but the run proves the current code can keep omitting an unconfirmed root for
-several seconds. The safe policy is narrower: skip pose work only for state 1,
-an existing queue link, or a state-0 enqueue whose postcondition is confirmed;
-on failure, forward the stock `Actor::UpdateMeshInstance` call. That fallback
-does not affect frame 6797, where every attempted enqueue succeeds.
-
-Visual acceptance is still separate evidence. The completion message did not
-say whether a missing actor or shadow pop was seen, so this run does not claim
-that result. After the failure fallback and visual answer, the next useful
-instrument is a GPU-pass breakdown of the 97.007 ms unclassified interval,
-not another mesh/resource A/B and not another message-pump experiment.
-
-
-## 82. Run 69 setup: defer cold Actor roots before directional pose work
-
-Run 68 identifies an earlier exact boundary rather than a reason to rewrite
-the shadow system. All 20 cold mesh Resources on the marked **play** transition
-frame are synchronously ensured by `GraphicsMeshInstance::UpdatePose`, called
-from `Actor::UpdateMeshInstance`, called from `Actor::AddToScene`, while the
-verified `GraphicsShadowMapDx11::RenderDirectional` bracket is live. The
-accepted `GraphicsMeshInstance::GetNumShadowRenderPasses` root gate comes
-later; these roots have already reached state 2 by then and escape it.
-
-Run 69 adds `[performance] shadow_defer_cold_actor_pose=1`. It retargets only
-the direct `Actor::AddToScene -> Actor::UpdateMeshInstance` `E8` at RVA
-`0x111fd5`, inside a 23-byte verified caller window. An independent 24-byte
-callee window verifies the shared six-byte prologue, exported
-`Actor::UpdateMeshInstance` identity at `0x112060`, and the mesh instance at
-`Actor+0x184`. The wrapper follows that exact instance to its root Resource at
-`GraphicsMeshInstance+0x4`. On the main thread and inside the DX11 directional
-class only, state 0 is handed to the stock loader with the established
-`(priority=1, notify=true, immediate=false)` tuple and state 0/1 skips this one
-pose update. `Actor::AddToScene` still adds the renderable; the already
-accepted exact-class pass-count gate then returns zero until the root reaches
-state 2. Resident actors, the color class, point shadows, workers, and every
-other `Actor::UpdateMeshInstance` caller retain stock behavior.
-
-This test is not justified by 16.419 ms alone. Keeping those 20 roots cold at
-the later gate also omits their shadow draws from the transition frame, so it
-can affect part of Run 68's 101.390 ms directional GPU interval and the next
-frame's 84.977 ms `DrawIndexed` drain. The visual trade remains temporary
-missing local casters while the ordinary background request completes; check
-explicitly for shadow popping or missing actors. `shadow_split` is untouched.
-
-The switch defaults off, reaches `install()` with the performance probe off,
-and brings no trace group. Enabling it implies the complete later
-`shadow_defer_cold_alpha` patch set because skipping pose work without the
-later root rejection would be unsafe. With tracing already enabled, five new
-count-only `engine_shadow_actor_pose_*` columns record state and enqueue
-outcome; no engine duration is named `_ms` or charged to the mod.
-
-The exact caller/callee windows, field, call destination, export, option,
-directional/state predicates, enqueue tuple, activation dependency, rollback,
-and CSV identity are independently checked. `verify-sites.py` passes 454
-checks. Doctor, the release build, and the complete off-game self-test pass,
-including GPU timestamp retirement and the new default-off/no-trace and
-counter-partition tests. The mutation audit rejects all 87 one-at-a-time
-changes, including all 16 added for this boundary.
-
-Run 69 is built from `cache/runs/run69-defer-cold-actor-pose.ini`. Relative to
-Run 68, the only behavior variable changed is
-`shadow_defer_cold_actor_pose: 0 -> 1`; both accepted behaviors and the same
-four instruments remain enabled. The 710,656-byte installed DLL is
-byte-identical to the build at SHA-256
-`29f0f725734c3412e609e1b3b4afb69919c66a0e64d876fedfbd616cda6a6dd5`.
-The installed/source INIs are byte-identical at SHA-256
-`2f75bdc85228220473aa389d7cb9b2dd7769397110a91657676dce9e1776d6a7`.
-Run 68's live CSV/log matched their archives before removal and both stale live
-names are absent. The game was not launched. Run the same normal route, press
-F12 after the **play** transition, and report any visible missing actor or
-shadow pop separately from the transition's felt duration.
-
-
-## 81. Run 68 resolves the remaining cold meshes to Actor pose work before caster eligibility
-
-Run 68 completed with 7,293 contiguous presented frames, 0--7292, totaling
-96.435 s. Its five session parts are **menu** 0--1897 (17.840 s), **load-game
-frame** 1898 (1,511.398 ms), **loading screen** 1899--2967 (9.492 s), **first
-world frame** 2968 (828.877 ms), and **play** 2969--7292 (66.763 s).
-
-F12 at **play** frame 6654 is still a reaction anchor, not proof that the
-nearest candidate is the felt event. The nearest candidate is frame 6644 at
-51.206 ms, ending 219 ms before the press; it has no Resource load and spends
-31.117 ms in the `Engine::Update` class. The normal-route loading transition
-is the earlier contiguous pair 6631/6632 at 108.875/133.833 ms, beginning
-740 ms and ending 498 ms before the press. That pair totals 242.708 ms. It is
-the same resource-plus-submission shape as the old marked transition, but the
-marker cannot by itself prove whether the reporter reacted to the pair or the
-nearer update frame. Neither is selected by whole-file `max()`.
-
-On frame 6631, 23 main-thread Resource calls / 26.846 ms partition exactly
-into 21 / 17.382 ms inside the `GraphicsShadowMapDx11::RenderDirectional`
-class and two / 9.464 ms outside it. The directional population is 20 `.msh`
-Resources / 16.419 ms plus one `.ssh` Resource / 0.963 ms. The complete mesh
-call durations include the mesh loader's own parsing, decompression, and
-buffer work, but not the two separately observed terrain `.tex` loads and not
-an unobserved bundle of mesh textures. There are zero directional `.tex`
-loads. The two outside calls are again the Gadir rocky-pebbles base/normal
-terrain pair; the exact `TerrainType` received `PreLoad(true)` in the
-**loading screen** at frame 2045 and its runtime owner was preloaded through
-frame 6630, yet both enter color material use in state 0. Run 67's reduction
-from thirteen onset textures to two therefore repeats, while the remaining
-pair again shows that one early queue request is not a residency guarantee.
-
-The retained caller evidence is complete: F12 emits 21 records from its
-120-frame **play** window, with no ring truncation. Twenty occur on frame 6631
-and one on frame 6641; every one entered state 0 with no pre-existing queue
-flag and has the same verified deepest subsequence:
-
-```
-Resource::EnsureAvailable return                 E+0x213137
-GraphicsMeshInstance::UpdatePose return          E+0x1765a2
-Actor::UpdateMeshInstance return                 E+0x112133
-Actor::AddToScene return                         E+0x111fda
-GraphicsShadowMapDx11::RenderDirectional virtual E+0x18ee1b
-```
-
-Static bytes select that sequence from the deliberately over-complete raw
-stack candidates. `0x1765a2` follows the `E8` from `UpdatePose` to
-`Resource::EnsureAvailable`; `0x112133` follows the `E8` from
-`Actor::UpdateMeshInstance` to `UpdatePose`; `0x111fda` follows the `E8` from
-`Actor::AddToScene` to `UpdateMeshInstance`; and `0x18ee1b` follows the
-directional renderer's virtual scene-add call. Other repeated candidates,
-including the earlier `RenderDirectional+0x113a`, are a raw-stack superset and
-are not promoted to callers merely because they look call-shaped. This proves
-the remaining meshes are admitted during the DX11 directional scene gather,
-before `GetNumShadowRenderPasses`; it does not support a stale-DX9-only label.
-
-The resource time is not the dominant bound. Frame 6631 spends 102.641 ms in
-the `Engine::Render` class and 52.733 ms in the game's `DrawIndexed` calls
-while submitting a 200.097 ms whole-GPU interval, including 101.390 ms in the
-directional-shadow class and 18.741 ms in the enhanced-grass class. Frame
-6632 has no Resource load but spends 84.977 ms in `DrawIndexed` and 9.459 ms
-in `Map`, producing a 117.300 ms `Engine::Render` interval. The CPU resource,
-CPU render, GPU, and following submission intervals overlap or queue behind
-one another and must not be added as independent costs.
-
-Run 67's unusually long **first world frame** did not repeat: this run is
-828.877 ms rather than 1,352.9 ms. It is a different session part and is not
-evidence for the **play** behavior. The passive caller retention also has no
-measurable steady-state regression. For collision-active, full-scene **play**
-frames under 60 ms with no Resource load or shadow-region change, Run 68 minus
-Run 67 mean frame differences are +0.104 ms at 500--999 indexed draws (1,155
-versus 1,168 frames), -0.265 ms at 1,500--1,999 (842 versus 751), and +0.051
-ms at 2,000-plus (223 versus 227). The corresponding GPU differences are
-+0.100, -0.231, and +0.021 ms. No across-run p50 is used.
-
-The supported next test is not a mesh-system rewrite or broad preload. Move
-the existing cold-root decision to the exact `Actor::AddToScene` call before
-`UpdateMeshInstance`, queue state 0, and let the later exact-class gate omit
-the still-cold caster. That isolates both the measured 16.419 ms CPU load and
-any shadow draws those newly admitted meshes would have added. It leaves the
-color scene and all resident actors unchanged.
-
-The archived CSV is `tqflicker-frames.run68.csv`, SHA-256
-`f68a640d69949ffd4adc9e1ec346ca14939d6eb342754a5bd3a30df33542fec9`.
-The during-session log is `tqflicker-debug.run68.log`, SHA-256
-`0af78f91699c3da0791f3294a321d114e262f27e25cf338967fb3f3e81ceaba9`;
-the live files were byte-identical to those archives at capture.
-
-
-## 80. Run 68 setup: retain exact caller chains for the remaining directional cold meshes
-
-Run 67 leaves a specific class, not a reason to broaden the current shadow
-omission blindly: its marked **play** frame 6974 synchronously loads 26
-state-0 meshes / 23.583 ms inside
-`GraphicsShadowMapDx11::RenderDirectional`, after the exact base
-`GraphicsMeshInstance` root behavior has already omitted twelve other casters.
-The next question is which verified caller/dependency owns those 26 meshes.
-
-Run 68 adds a bounded delayed report to the already installed Resource-load
-and directional-shadow trace. Only a main-thread Resource whose pre-call state
-is 0, whose engine filename class is mesh, and whose call occurs inside the
-verified directional bracket is retained. Each record carries the filename,
-pre-call queue flag, frame, duration, immediate return address only when it is
-call-shaped inside a verified module, and at most 24 likewise verified
-call-shaped upstream stack candidates. A fixed 128-record ring covers the 120
-frames before F12 and explicitly reports truncation. The existing F12
-retrieval writes the records before placing its CSV marker.
-
-This is passive and low-frequency. The candidate frame performs a bounded
-copy and stack scan only on a cold mesh load; filename/caller formatting and
-log locking occur later at F12. There is no new GPU query, per-draw hook,
-Resource operation, behavior setting, culling change, shadow change, or
-`shadow_split` change. Both accepted behaviors, including
-`terrain_preload_layers=1`, remain unchanged.
-
-`verify-sites.py` passes 439 checks. All 71 relevant one-at-a-time mutations
-are rejected, including the ring size, marker horizon, exact state/type/shadow
-predicates, F12 emission, dependency activation, every terrain-layer behavior
-constant, and both forbidden high-frequency colour GPU scopes. Doctor, release
-build, and the full off-game self-test pass, including the directional-mesh
-window boundary/overwrite tests and GPU timestamp retirement.
-
-Run 68 is installed from `cache/runs/run68-directional-mesh-callers.ini`.
-The 709,120-byte installed DLL is byte-identical to the build at SHA-256
-`bec80cafbdc9fae6845ba24b1653b9b7cced2a6d86bc6d55a07d28f863f1ebc7`.
-The installed INI is byte-identical to the run record at SHA-256
-`d92bfd247b6edd7eeeff4595f2dc3d13b1c145dc644e060f56d878593376e12a`.
-Run 67's live CSV/log matched their archives before removal; both stale live
-names are absent. The game was not launched.
-
-Run the same normal route and press F12 after the reduced **play** transition.
-Also report whether the **first world frame** loading burst again feels
-unusually long. The primary Run 68 result is the exact directional mesh
-resource/caller population at the marker; do not choose a frame by maximum.
-
-
-## 79. Run 67 removes eleven of thirteen marked colour-terrain loads; the remaining burst is directional cold meshes plus GPU submission
-
-Run 67 completed with 7,605 contiguous frames, 0--7604, totaling 98.045 s.
-Its five session parts are **menu** 0--2074 (19.422 s), **load-game frame**
-2075 (1,386.5 ms), **loading screen** 2076--3441 (11.686 s), **first world
-frame** 3442 (1,352.9 ms), and **play** 3443--7604 (64.199 s). The user ran
-the same normal route used more than fifty times and reported that the old
-stutter felt much smaller.
-
-The behavior executed at the intended point. During the **loading screen**,
-144 exact `TerrainRT::LoadRenderData -> TerrainType::LoadTextures` calls are
-paired one-for-one with 144 semantic `TerrainType::PreLoad(true)` calls and
-zero false calls. Another 150/150 pair occurs as new terrain is admitted in
-**play**. The save loads and no visual fault was reported.
-
-F12 at **play** frame 7013 anchors a two-frame transition. Frame 6974 is
-73.472 ms and ends 887 ms before the marker; frame 6975 is 83.720 ms and ends
-803 ms before it. The first frame has 29 main-thread Resource loads /
-29.284 ms. Only two / 5.094 ms are outside directional shadow, both render-
-phase terrain textures. Run 66's corresponding marked colour-terrain class
-had 13 / 47.359 ms on its onset and another nine textures / 29.075 ms two
-frames later. No such second colour-load frame follows Run 67's onset. This
-does not make the submitted scenes identical, but the exact mechanism and the
-reporter's observation agree: the new stock preload removed eleven of the
-thirteen onset loads and roughly 42 ms from that nested colour class.
-
-The two survivors are
-`XPack3\\terraintextures\\gadir\\gadir_rockypebbles01.tex` and its
-`normal.tex`, together costing 5.094 ms. Both belong to the same exact
-`TerrainType*`. Its runtime layer was attached in **loading screen** frame
-2598; `LoadTextures` and the new `PreLoad(true)` both completed at frame 2631;
-runtime-owner `TerrainRT::PreLoad` then enumerated it 4,397 times through
-**play** frame 6973. Nevertheless both Resources enter ordinary colour use in
-state 0. This proves one early semantic call is not a lifetime residency
-guarantee, but the current trace cannot distinguish never serviced from loaded
-then evicted. Periodically walking every layer would be a broad, high-volume
-response to a remaining 5.094 ms and is not supported.
-
-The dominant remainder is already separate. Frame 6974 performs 27 state-0
-directional-shadow loads / 24.190 ms: 26 meshes / 23.583 ms and one shader /
-0.607 ms, inside a 26.166 ms `GraphicsShadowMapDx11::RenderDirectional` CPU
-class. Twelve exact base `GraphicsMeshInstance` root casters are omitted and
-eight state-0 roots are newly queued, so these 26 loads are reached through
-some other shadow dependency/class. The directional GPU interval is 59.807 ms
-and the whole-frame GPU interval is 104.808 ms. Frame 6975 has no Resource
-load, but spends 50.607 ms in the game's `DrawIndexed` submission after that
-work; its whole frame is 83.720 ms. These nested/adjacent numbers must not be
-added as independent costs.
-
-Removing the high-frequency colour GPU scopes also fixes the reported general
-slowness. Against Run 63, using only collision-active full-scene **play**
-frames under 60 ms with no Resource load or shadow-region change, Run 67 minus
-Run 63 mean frame time is -0.109 ms at 500--999 indexed draws (1,168 versus
-1,177 frames), +0.078 ms at 1,500--1,999 (751 versus 751), and -0.002 ms at
-2,000-plus (227 versus 240). Corresponding GPU differences are -0.108,
-+0.095, and -0.037 ms. No across-run p50 is used. Run 66's +8.266 and
-+13.184 ms regressions in the latter two bands were observer cost.
-
-One caution remains in a different session part. Run 67's **first world
-frame** is 1,352.9 ms versus Run 66's 581.6 ms. Main-thread Resource counts
-are similar (148 versus 143), but their durations are 810.286 versus
-215.114 ms, texture creation is 352.090 versus 73.707 ms, and whole-GPU time
-is 1,339.844 versus 560.602 ms. One frame in each run cannot attribute that
-variance to the new preload, and it is not the reported **play** transition,
-but a later acceptance run must not silently ignore the loading regression if
-it repeats.
-
-The next passive trace should retain only state-0 mesh Resource loads inside
-`GraphicsShadowMapDx11::RenderDirectional` for the preceding F12 window, with
-their engine filename, immediate verified caller, and bounded call-shaped
-upstream candidates. That directly identifies the 26-load class before any
-wider caster omission or mesh-prefetch behavior. Re-running terrain preload
-or adding more high-frequency GPU scopes is not justified.
-
-The archived CSV is `tqflicker-frames.run67.csv`, SHA-256
-`b146a9a0238514d15fddb2bbec61c3d843f79aac103d8c9d4e93a21ee4604f47`.
-The during-session log is `tqflicker-debug.run67.log`, SHA-256
-`1f5cc7b4b6c8ffc1e1bb13f5a54289909125b8f7dcd0598e91341d915043be5a`;
-the live files were byte-identical to those archives at capture.
-
-
-## 78. Run 67: queue runtime layer textures at the exact post-LoadTextures boundary
-
-Run 66 does not point to a terrain, shadow, culling, or resource-loader
-rewrite. Its exact lifecycle says the layer `TerrainType` and its base, bump,
-and grass texture Resources already exist during the **loading screen**; the
-missing operation is the stock semantic preload that queues those Resources.
-Run 67 adds only that operation.
-
-`[performance] terrain_preload_layers=1` retargets the already verified E8 in
-runtime `TerrainRT::LoadRenderData` with `detour::patchCall`. The wrapper first
-calls the exact original `TerrainType::LoadTextures`, then calls the verified
-exported `TerrainType::PreLoad(true)` on the same `this`. The latter's machine
-body walks the base and bump vectors plus grass Resource and reaches the
-game's existing `ResourceLoader::EnqueueResource` path. It does not wait,
-construct a custom loader, omit a colour or shadow draw, alter frustum
-culling, or change `shadow_split`.
-
-The behavior defaults off. It reaches `engineprobe::install()` with the
-performance probe off and, by itself, installs only the exact call patch; it
-cannot open trace group 32768 or any other instrument. With the terrain trace
-active, the behavior deliberately enters the exported `PreLoad` entry rather
-than its trampoline, so the existing true/false counters prove the call ran.
-The behavior becomes active only after the call site, original target, export
-RVA, complete 24-byte signature, and relocation have all verified. Shutdown
-restores the call and clears both behavior and diagnostic state.
-
-The two high-frequency TerrainPlug/TerrainBlock GPU phases and CSV fields are
-removed before this run. Their CPU call counts and engine `_us` spans remain.
-This corrects Run 66's demonstrated observer overhead; it is not a game or fix
-effect and steady-state Run 66 timing must not be used as the baseline.
-
-`verify-sites.py` passes 429 checks. All 64 one-at-a-time terrain mutations are
-rejected, including every runtime/preload RVA, signature byte and relocation,
-the option name and default, the `true` argument, the post-LoadTextures order,
-the activation endpoint, independent install route, and reintroduction of a
-GPU scope into either colour wrapper. Doctor, release build, and the full
-off-game self-test pass, including GPU timestamp retirement.
-
-Run 67 is installed from `cache/runs/run67-terrain-layer-preload.ini`. The
-705,024-byte installed DLL is byte-identical to the build at SHA-256
-`3171d5301076962d41c67659444d50e1e873eb2bae5d730f6c45510d51c5dd07`.
-The installed INI is byte-identical to the run record at SHA-256
-`e57b0537009088cf6b061322da2b118d4f94a75871e45a619672d194be99fd52`.
-Before removal, both Run 66 live files were byte-identical to their archives;
-the stale live CSV/log are absent. The game was not launched.
-
-For the result, use the same normal route and press F12 after the old **play**
-loading transition. The primary outcome is not an across-run maximum: require
-the fix's `TerrainType::PreLoad(true)` calls during loading, then inspect the
-F12-anchored transition for the 13 outside-directional colour-terrain texture
-loads that cost 47.359 ms in Run 66. A load freeze rejects thread-context
-safety; missing or visibly incorrect terrain rejects behavior even if those
-loads disappear.
-
-
-## 77. Run 66 loads successfully and exposes missing runtime-layer preload; its high-frequency GPU scopes were intrusive
-
-Run 66 validates §76's ABI correction. The CSV has 7,047 contiguous frames,
-0--7046, totaling 94.061 s. Its five session parts are **menu** 0--1936
-(17.383 s), **load-game frame** 1937 (1,302.6 ms), **loading screen**
-1938--3208 (10.932 s), **first world frame** 3209 (581.6 ms), and **play**
-3210--7046 (63.862 s). The save loaded, the character appeared, and the normal
-route completed. Therefore the two five-explicit-argument colour wrappers,
-not the game or a loader-thread GPU query, caused the Run 64/65 freeze.
-
-F12 marks **play** frame 6618. Frame 6601 is the old loading-transition class:
-109.223 ms, beginning 642 ms before the key was retrieved and ending 533 ms
-before it. Frame 6617 is a separate 61.014 ms `Engine::Update` class only 29 ms
-before the marker and has no Resource load. Do not substitute the closer frame
-for the reported transition.
-
-The transition frame spends 102.921 ms in the `Engine::Render` class. It has
-36 main-thread Resource loads / 62.355 ms: 23 / 14.996 ms in one 16.679 ms
-`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 47.359 ms outside
-directional shadow. All 13 outside-directional loads are textures in the
-render phase. Exact colour-terrain CPU classes are 137 TerrainPlug calls /
-45.531 ms and 59 TerrainBlock calls / 17.627 ms. These CPU spans and Resource
-loads are nested and must not be added.
-
-The whole-frame GPU interval is 87.644 ms. Nested first-entry-to-last-exit GPU
-classes include 12.579 ms directional shadow, 15.689 ms enhanced grass,
-21.809 ms DX11 `TerrainRenderInterfaceRT::RenderGround`, 76.484 ms TerrainPlug,
-and 76.624 ms TerrainBlock. TerrainPlug and TerrainBlock overlap and cannot be
-added. Frame 6602 has no Resource load and falls to 32.304 ms. Frame 6603 is
-54.590 ms with ten outside-directional loads / 30.042 ms, including nine
-textures / 29.075 ms.
-
-The exact per-type lifecycle resolves the missing link. The affected
-`TerrainType` records were attached by runtime `TerrainRT::Load` during the
-**loading screen**, and their `TerrainType::LoadTextures` calls completed
-during the **loading screen**. Runtime-owner `TerrainRT::PreLoad` subsequently
-visited those owners and enumerated their layers through **play** frame 6600,
-immediately before the transition. Nevertheless, exact semantic
-`TerrainType::PreLoad` counts are zero for both `true` and `false`. The
-Resources therefore existed long before frame 6601, but the runtime preload
-path never queued the layer base, bump, and grass textures; ordinary colour
-rendering synchronously first-used them. This is a missing runtime-layer
-preload call, not a need to rewrite terrain, frustum culling, shadows, or the
-resource system.
-
-The user also reported general slowness and confirmed this was the same normal
-route used for prior runs. A controlled comparison against Run 63 uses only
-collision-active, full-scene **play** frames under 60 ms, excludes Resource
-loads and shadow-region changes, and bands by indexed-draw count. Run 66 minus
-Run 63 mean frame time is +0.574 ms for 500--999 draws (1,089 versus 1,177
-frames), +8.266 ms for 1,500--1,999 (512 versus 751), and +13.184 ms for
-2,000-plus (152 versus 240). The corresponding GPU deltas are +0.570,
-+8.279, and +13.141 ms; `present_call` changes by only +0.013, +0.005, and
--0.009 ms. No across-run p50 is used.
-
-This scaling identifies observer cost. `gpuBegin` records the first entry for
-a phase, but `gpuEnd` deliberately records every exit so its timestamp becomes
-the last exit. In Run 66 that meant about 221 immediate-context `End(query)`
-calls per frame in the 1,500--1,999 band and 377 above 2,000 draws from the
-new TerrainPlug and TerrainBlock scopes alone. Their diagnostic result is now
-captured, so the scopes and their CSV columns are removed. The CPU call counts
-and `_us` spans remain. The verifier rejects either high-frequency GPU scope
-being restored.
-
-The next supported behavior is narrow: immediately after the already verified
-`TerrainRT::LoadRenderData -> TerrainType::LoadTextures` call completes, invoke
-the stock `TerrainType::PreLoad(true)` on that exact layer type. Its disassembly
-walks base, bump, and grass Resources and enqueues them without waiting. This
-uses the game's existing queue at the point Resources first exist, during the
-**loading screen**, rather than inventing a parallel loader or deferring colour
-correctness. It must be a default-off behavior switch that installs with the
-performance probe off; the trace only verifies that frame-6601-class colour
-loads disappear.
-
-The archived CSV is `tqflicker-frames.run66.csv`, SHA-256
-`515cdb29ffd35d1a7fa35f014da6a4b3c2586ad6c6f93386712515e11eec8951`.
-The during-session log is `tqflicker-debug.run66.log`, SHA-256
-`91a46af9bd67d423a46f10ca126d3605db41d0de5c9bf1c3b137f9eacd585686`;
-both live files were byte-identical to their archives.
-
-
-## 76. Run 65 rejects the GPU-thread diagnosis; both colour-terrain wrappers had the wrong x86 argument count
-
-Run 65 repeated the failure after the GPU-context guard. It is archived as
-`tqflicker-frames.run65.csv`, SHA-256
-`8132aab1179af8b96df72ca510ac4e8e983a0a6464b878f8239ae3cafce55b27`;
-the during-session log is `tqflicker-debug.run65.log`, SHA-256
-`43074682b369e49851a7b2f1039132fdad7ecf55629239b7f57e6a50dadb12f4`.
-The CSV has 3,200 contiguous completed frames, 0--3199, totaling 30.260581 s.
-Every completed row is **menu**. The **load-game frame** again never closed,
-so Run 65 has no **loading screen**, **first world frame**, or **play** data.
-
-The new partition is decisive about §75's first diagnosis. All 17 completed
-calls to the exact runtime `TerrainRT::LoadRenderData` class were in the
-non-main class: 17 / 37,318 us in
-`engine_terrain_rt_load_render_other` / `_other_us`, zero in the main class.
-The corrected shared accessor returned null there, so none of those calls
-issued a GPU timestamp. Save loading nevertheless froze. Cross-thread GPU
-timestamping was a real unsafe defect in Run 64, but it was not the cause of
-this reproducible load-game freeze. Do not carry §75's causal hypothesis
-forward.
-
-The fresh ABI audit then found a second, concrete defect in the two unexported
-colour-terrain hooks. Ghidra decompiled both functions with five parameters,
-and the Run 64/65 `TerrainColourRenderFn` mistakenly treated all five as
-explicit stack arguments in addition to `this`. The decompiler's count already
-included the implicit `this` pointer. Machine code resolves the ambiguity:
-both *TerrainPlug colour render* at Engine RVA `0x236240` and *TerrainBlock
-colour render* at `0x23e1e0` end in `c2 10 00` (`ret 0x10`). Each therefore
-has exactly four explicit stack arguments.
-
-The bad fastcall wrappers accepted and forwarded five explicit arguments and
-would return by popping 20 bytes where the engine caller provides 16. The
-first call corrupts the caller's stack. Both classes have zero completed calls
-in the Run 65 **menu** rows, which is consistent with the first colour-terrain
-call occurring in the unfinished **load-game frame**; because that frame never
-reached `Present`, its counters cannot appear in the CSV. This makes the ABI
-defect a substantially stronger freeze explanation than the rejected GPU
-hypothesis, but the causal link remains a prediction until the corrected DLL
-successfully reaches the **loading screen**.
-
-Run 66 changes only those two wrapper declarations and forwards: `this` plus
-four explicit arguments, matching both `ret 0x10` bodies. It changes no game
-rendering, loading, resource, terrain, culling, or shadow behavior. The durable
-disassembly map now states the implicit/explicit distinction so a later reader
-cannot repeat the prototype-count error.
-
-`verify-sites.py` now passes 424 checks. It reads both concrete return sites
-from the pinned Engine binary, requires `c2 10 00` at each, and requires both
-wrapper types and forwards to carry exactly four explicit arguments. All 56
-one-at-a-time terrain-chain mutations are rejected, including the typedef and
-each individual forward call. Doctor, release build, and the complete off-game
-self-test pass, including GPU timestamp retirement.
-
-The Run 66 DLL is installed: source and installed copies are byte-identical,
-704,000 bytes, SHA-256
-`97149c6b2d1caeb1f131511c9d1279e63fee2364dc15b8500858bc6982f9ce28`.
-Per the user's instruction, the INI was not recopied; the already installed
-Run 65 INI remains byte-identical to its source at SHA-256
-`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`
-and requests the same trace settings recorded in
-`cache/runs/run66-terrain-colour-abi.ini`. The Run 65 live CSV/log were
-verified against their archives before the stale live names were removed. The
-game was not launched.
-
-
-## 75. Run 64 aborted in the load-game frame: the first GPU-thread diagnosis is withdrawn by §76
-
-Run 64 is not a performance run and does not revise Run 63's game diagnosis.
-It wrote 2,162 contiguous presented frames, 0--2161, totaling 21.607161 s,
-before the user selected a save. Those completed rows are all **menu**. The
-game then froze while the next **load-game frame** was in progress; that frame
-never reached `Present` and therefore never entered the CSV. There is no Run
-64 **loading screen**, **first world frame**, or **play** data. In particular,
-no maximum from the partial file is a candidate for the reported freeze.
-
-The partial CSV is archived as `tqflicker-frames.run64.csv`, SHA-256
-`c5016c2057b254636624b04e78fde08101e8b7e9a4b0b6d84d954005bd817419`;
-the during-session debug log is `tqflicker-debug.run64.log`, SHA-256
-`75b82e5b9be13d3eb3f7935d7207e5ad903a1baba703d32414b6545380297cec`.
-All ten runtime-terrain sites reported installed. In the completed **menu**
-rows, exact runtime `TerrainRT::Load` ran 18 times / 163,193 us,
-`TerrainRT::LoadRenderData` ran 17 times / 23,921 us, its exact calls to
-`TerrainType::LoadTextures` ran 134 times / 545 us, and
-`TerrainRT::PreLoad` ran 6,454 times / 24,195 us while enumerating 51,848
-layer associations. These values establish only that the new ABIs and hooks
-were live before the freeze; they do not classify the unfinished load-game
-frame or support a game-performance conclusion.
-
-Fresh review found one unsafe operation in the instrument. The Run 64
-`TerrainRT::LoadRenderData` hook unconditionally constructed a GPU timestamp
-scope using the active frame's D3D11 immediate context. The active timestamp
-slot and immediate context belong to the thread that opened the render frame,
-but `LoadRenderData` can be reached by save loading. If that call is on a
-loader thread, the hook issues `ID3D11DeviceContext::End` concurrently with
-the render thread and can deadlock the device. The successful **menu** calls
-do not clear the bug: they can have been main-thread calls, while the first
-save-load call takes the different thread path. The aborted trace did not yet
-record a main/other split, so this is the leading instrumentation diagnosis,
-not a claim that Run 64 directly proved the thread identity.
-
-This failure is specific to the mod's new instrumentation. It is not an
-explanation of the game's native Windows stutter, does not make the host the
-cause, and is not evidence that `TerrainRT::LoadRenderData` itself hangs. A
-trace-off abort configuration was installed immediately, retaining only the
-already accepted exact `GraphicsMeshInstance` cold-root shadow deferral.
-
-Run 65 makes the smallest falsifiable correction. The shared
-`probe::currentGpuContext` accessor now returns null off the thread that opened
-the frame, so no current or future diagnostic class can borrow the immediate
-context from a loader. The exact `TerrainRT::LoadRenderData` hook also gates
-its GPU scope on the verified game main thread. Its CPU interval is preserved
-and partitioned exactly into
-`engine_terrain_rt_load_render_main` / `_main_us` and
-`engine_terrain_rt_load_render_other` / `_other_us`; the common
-`engine_terrain_rt_load_render` / `_us` population remains their sum. Only the
-main-thread class can contribute `gpu_terrain_rt_load_render_ms`. This adds no
-behavior switch and changes no game loading, terrain, culling, or shadow code.
-If Run 65 passes save loading, it validates removal of the unsafe operation;
-if it freezes again, the whole new runtime-terrain trace group must be bisected
-rather than treating the hypothesis as fact.
-
-The added fields moved the 317-field CSV schema just beyond its former 8 KiB
-line buffer. The first off-game test correctly rejected that build for a
-truncated header. Header and data rows now share one audited 16 KiB bound.
-`verify-sites.py` passes 422 checks, and all 53 one-at-a-time terrain-chain
-mutations are rejected, including removal of either thread gate, either side
-of the count/duration partition, each new CSV identity, and the line bound.
-Doctor, release build, and the complete off-game self-test pass. The self-test
-opens a real timestamp frame, proves the render thread receives its immediate
-context, and proves a worker thread receives null; timestamp retirement also
-passes.
-
-Run 65 is installed from
-`cache/runs/run65-terrain-runtime-chain-threadsafe.ini`. Source and installed
-DLLs are byte-identical: 704,000 bytes, SHA-256
-`d0cc1c760309372f5ef5b50b0aab2e9e384fe231120716c4e305ea18730c5f98`.
-Source and installed INIs are byte-identical at SHA-256
-`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`.
-The stale live Run 64 CSV and debug log were rechecked byte-identical to their
-archives before only those two live names were removed. The game was not
-launched. First establish whether the save reaches the **loading screen**;
-then complete the normal route and press F12 after the felt **play** loading
-burst. A freeze before the loading screen rejects the thread-gate diagnosis
-and requires trace-group bisection.
+Run 61 is installed from
+`cache/runs/run61-outside-directional-resources.ini`. The 692,224-byte DLL and
+installed copy are byte-identical at SHA-256
+`47fbd6acff07fd4b97598edb8e448f181fca9f10cbf2512def30e1a162a2f20b`.
+The source and installed INIs are byte-identical at SHA-256
+`ed7a07f068851749af8f0b558188502cf6a83583fe63f7cd87625365c17513f7`.
+The old live CSV and debug log were rechecked byte-identical to their run-60
+archives before removal. The game was not launched. Run the normal route and
+press F12 after the felt **play** loading burst; multiple presses are safe and
+emit only new retained events.
+
+
+## 72. Run 61: the marked burst is two frames, terrain loads are only one part,
+and the recorded caller is a generic wrapper
+
+Run 61 is archived as `tqflicker-frames.run61.csv`, SHA-256
+`18465ad1ce602ee43195b45ef7247812f933d72cb09664990ea2b2cdc40efaff`;
+its live-written debug log is `tqflicker-debug.run61.log`, SHA-256
+`c92d7b205b5680dfd9d883074515034769556906ae854207f88fd83cbed43412`.
+Both archives were byte-compared with their live names. The CSV contains 7,135
+contiguous presented frames, 0--7134. The five session parts are **menu**
+0--1768 (17.088 s), **load-game frame** 1769 (1.565 s), **loading screen**
+1770--2909 (10.129 s), **first world frame** 2910 (686.861 ms), and **play**
+2911--7134 (64.397 s).
+
+F12 at **play** frame 6560 is a late reaction anchor. It follows a contiguous
+two-frame, full-scene, collision-active **play** burst: frame 6522 is 175.182
+ms and frame 6523 is 127.451 ms. The burst begins 1.034 s before the marker
+and ends 731 ms before it. Treating only the largest of those rows as the felt
+event would discard almost half of the pause; the marked event is the pair.
+
+The first frame spends 166.108 ms in `Engine::Render`, 5.462 ms in
+`Engine::Update`, and 1.157 ms in the message-pump class. Its 33 main-thread
+`ResourceLoader::LoadResource` calls / 49.683 ms partition exactly into 20 /
+22.772 ms inside `GraphicsShadowMapDx11::RenderDirectional` and 13 / 26.911 ms
+outside it. Every outside-directional call is in `Engine::Render`, entered in
+state 0, and is a texture Resource. Their engine filenames are terrain layers:
+river bed, mud, grass, swamp, forest, rock, normal, and grass-mask textures.
+The longest one is 6.814 ms and the other twelve are 1.003--2.052 ms.
+
+That is a real synchronous colour-render dependency, but it is not the whole
+burst and it does not reproduce run 60's 79.135 ms complement. On frame 6522,
+the complete GPU interval is 254.833 ms, including 90.117 ms in the
+`GraphicsShadowMapDx11` directional class and 23.490 ms in the enhanced-grass
+class. The CPU resource calls, enclosing CPU render interval, and GPU intervals
+overlap and are not added.
+
+The second frame is the sharper exclusion. Frame 6523 spends 119.320 ms in
+`Engine::Render`, but has no outside-directional main-thread Resource load and
+only one 7.194 ms texture load inside the `GraphicsShadowMapDx11` directional
+class. Its own GPU interval is 28.272 ms, including 15.434 ms directional and
+0.684 ms enhanced grass. This has the same shape as the queue-drain row proved
+in §37: a large GPU submission on frame N and CPU time surfacing inside
+`DrawIndexed` on N+1. Run 61 did not enable `draw_timing`, so that is a
+well-founded hypothesis for this particular pair, not yet a measurement.
+
+The immediate-caller field also failed to answer one part of its question.
+All 13 terrain loads report `E+0x213137`. Re-reading the pinned `Engine.dll`
+(SHA-256 `0aedbb1805b4a5616f74e34d4f609f392e2c2dd4561c64c118f4772ab4f694f6`)
+shows that RVA is the instruction after the `E8` at 0x213132 inside exported
+`Resource::EnsureAvailable` at RVA 0x2130f0; that call resolves to exported
+`ResourceLoader::LoadResource` at RVA 0x213ed0. So the label is verified but
+generic. It proves the normal EnsureAvailable path, not which terrain-renderer
+class requested it. Calling it a terrain-renderer call site would repeat the
+same immediate-versus-upstream mistake that earlier sections made with nested
+durations.
+
+The diagnostic itself is internally consistent: on all 7,135 frames, main
+load count/duration equals directional plus outside-directional, and both the
+phase and filename-type partitions independently sum to the outside pair.
+The F12 report retained all 13 records and says `truncated=0`. The accepted
+`GraphicsMeshInstance` root behavior also remained active on frame 6522,
+omitting five state-0 roots, while the alpha-tested-caster behavior omitted 19;
+neither enqueue-failure counter fired. This run makes no new visual-safety
+claim because the reporter did not report one either way.
+
+The supported next move is not to defer terrain textures yet. Even a perfect
+elimination of the measured synchronous part is bounded by 26.911 ms on a
+302.633 ms marked burst, and colour terrain has a visible fallback/popping
+question that directional-shadow textures did not. Run 62 keeps all behavior
+fixed, retains up to 24 verified-module call-shaped upstream stack candidates
+for each marked outside-directional load, and enables the already validated
+`draw_timing=1` instrument. The raw stack is explicitly a superset because the
+engine omits frame pointers; repetition plus static disassembly must identify
+the real increasing-order caller subsequence. This will name the class that
+forces the terrain Resources and directly test whether frame 6523 is
+`DrawIndexed` queue backpressure.
+
+The new capture adds no patch site. It extends the existing fixed 128-record
+ring and performs one bounded committed-stack scan while retaining a matching
+load; formatting and live logging still occur only at F12. `verify-sites.py`
+passes 353 checks. All 16 one-at-a-time changes to the new depth, stack handoff,
+committed-range gates, two bounds, module/call filters, ordered stores,
+duplicate collapse, rendering, and log identity are rejected; together with
+run 61 this is 150/150 relevant mutations rejected. Doctor, the release build,
+and the full off-game self-test pass, including GPU timestamp retirement.
+
+Run 62 is installed from
+`cache/runs/run62-outside-directional-upstream-draw.ini`. The 692,736-byte DLL
+and installed copy are byte-identical at SHA-256
+`790fb0e57280a7486d8ee75123084603222fece16c407cfeacbd3994f95382b0`.
+The source and installed INIs are byte-identical at SHA-256
+`1838456d57220419d652bcb78201358e3223c0847963e92d418768825e048786`.
+The old live CSV and debug log were rechecked byte-identical to their run-61
+archives before removal. The game was not launched. Run the normal route and
+press F12 after the felt **play** burst; a late press like run 61's is within
+the retained window, and multiple presses remain safe.
+
+
+## 73. Run 62: the marked play burst is a resource/first-use submission followed by GPU queue backpressure; the colour-terrain owner is exact
+
+Run 62 is archived as `tqflicker-frames.run62.csv`, SHA-256
+`33a1bc8eda5e59984c1803c2e34d5dd3fa191c751071a4726c16edcd62379912`;
+its live-written debug log is `tqflicker-debug.run62.log`, SHA-256
+`97d64a35c58e5bfea9eda5f7a2fa113df35eefeed36ec9ff8602dd564653b1ea`.
+The CSV contains 7,202 contiguous presented frames, 0--7201. The five session
+parts are **menu** 0--1734 (16.507 s), **load-game frame** 1735 (1.540 s),
+**loading screen** 1736--2900 (10.053 s), **first world frame** 2901
+(758.028 ms), and **play** 2902--7201 (66.877 s).
+
+F12 at **play** frame 6455 is a reaction anchor. The large full-scene,
+collision-active **play** transition is the contiguous pair 6441/6442 at
+219.289/125.131 ms. It begins 641 ms before the marker and ends 296 ms before
+it. A separate frame 6454 is 56.144 ms and ends only 20 ms before F12, but its
+37.696 ms is in the `Engine::Update` class, it has no Resource load, and its
+17.140 ms render is ordinary. Preserve that as a separate small update-class
+candidate; proximity to the reaction key does not license merging it with the
+large loading pair.
+
+Frame 6441 spends 212.181 ms in `Engine::Render`, 3.943 ms in
+`Engine::Update`, 0.686 ms in the message-pump class, and 2.300 ms in
+`present_call`. Its 33 main-thread Resource loads / 66.163 ms partition
+exactly into 20 / 17.973 ms inside the
+`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 48.190 ms outside
+it. All 13 outside calls are state-0 render-phase terrain texture Resources.
+The frame creates 15 textures, 172 buffers, and 10 shaders, while submitting
+302.910 ms of whole-frame GPU work. Named GPU spans are 90.649 ms in the
+`GraphicsShadowMapDx11` directional class, 0.901 ms in the point-shadow class,
+20.324 ms in the enhanced-grass class, 0.423 ms in SMAA, and 0.269 ms in
+bloom. Those CPU calls and nested GPU intervals are not additive, and the
+current named spans do not classify most of the whole-GPU interval.
+
+Frame 6442 proves the coupled second half. It has nearly the same scene load
+(121 non-indexed and 1,498 indexed draws, versus 121/1,485 on frame 6441), no
+main-thread Resource load at all, only 3.034 ms in the directional-shadow CPU
+class, and only 22.267 ms of its own GPU work. Nevertheless it spends 104.021
+ms inside the game's D3D11 `Draw`/`DrawIndexed` calls and 117.343 ms in
+`Engine::Render`. Across the pair, draw submission consumes 123.531 + 104.021
+ms. The first CPU frame finishes after 219.289 ms despite having placed
+302.910 ms on the GPU queue; the following frame then blocks in D3D draw calls
+while that prior work retires. Frame 6443 returns to 18.824 ms with 8.488 ms
+of draw submission and 19.966 ms of GPU work. This is the same mechanism
+measured in §37, now tied to the user's marked **play** transition rather than
+selected by `max()`.
+
+This does not require a Wine-only explanation. D3D11 resource creation,
+first-use work, command submission, and queue backpressure exist on native
+Windows as well. CrossOver/DXMT may change their exact cost, but the measured
+class is not “a host round trip,” and the game's native-Windows stutter is
+compatible with it. Conversely, the frame does not prove that every one of
+the 302.910 GPU milliseconds is texture upload; the exact ground renderer is
+still unnamed.
+
+Run 62's upstream capture resolves the 13 colour-terrain texture requests.
+For the ordinary base/bump layers, the leading verified return is
+`E+0x23fc4e` or `E+0x23fcca`: each is immediately after a call to
+`Resource::EnsureAvailable` inside exported
+`TerrainType::SetShaderParams` (RVA 0x23fb90). The grass mask begins at
+`E+0x23faf7`, immediately after the same call inside exported
+`TerrainType::SetGrassShaderParams` (RVA 0x23fa40); the verified caller
+`E+0x23b1f7` is inside the DX11
+`TerrainRenderInterfaceRT::RenderGrass` class. These are exact class names,
+not an inference from filenames. The rest of each raw stack remains a
+call-shaped superset and is not promoted to a call stack.
+
+Skipping either `EnsureAvailable` is not yet a safe fix. Immediately after the
+call, `SetShaderParams` reads the Resource's resident render-texture fields and
+binds the selected layer. The empty-vector path can bind null, but that does
+not prove that a cold non-empty entry has an acceptable fallback. More
+importantly, the entire observed colour-terrain CPU part is 48.190 ms of the
+344.420 ms pair; it cannot remove the larger first-use/GPU component by
+itself.
+
+The engine already exports the more promising semantic boundary:
+`TerrainType::PreLoad(bool)` at RVA 0x23fe80. Re-reading its body shows that
+`false` skips all work, while `true` walks that same object's base-texture
+vector at +0x24/+0x28, bump vector at +0x30/+0x34, and optional grass texture
+at +0x88. Bump and grass entries call the exported
+`ResourceLoader::EnqueueResource`; the base path performs the engine's
+equivalent queue/touch logic. This is not a return to §23's generic bounded
+prefetch proposal: it is the engine's own type-specific preloader for the
+exact Resources forced by run 62. Static code alone cannot say whether it was
+called for the exact `TerrainType` objects, or whether it ran too late.
+
+Run 63 therefore changes no behavior. One atomic trace group detours the exact
+four exports `TerrainType::PreLoad`, `TerrainType::SetShaderParams`,
+`TerrainType::SetGrassShaderParams`, and
+`TerrainRenderInterfaceRT::RenderGround`. The two shared-prologue targets
+verify 24 bytes and steal six; the two parameter methods verify 21 bytes and
+steal their first two complete instructions, eight bytes. A fixed 2,048-slot
+identity table records true/false preload history. When an existing retained
+outside-directional load occurs inside either parameter method, its record
+copies the exact `TerrainType*`, material/grass path, material index, counts,
+and last preload frames before calling the original loader. F12 formats it
+later. An exhausted identity table has an explicit CSV counter rather than
+silently reading as “never preloaded.” No allocator or log write runs on the
+candidate frame.
+
+The fourth hook adds `engine_terrain_ground` / `_us` and a non-blocking
+`gpu_terrain_ground_ms` timestamp around the DX11
+`TerrainRenderInterfaceRT::RenderGround` class. It always forwards the same
+arguments and neither calls `PreLoad` nor changes texture fallback. All new
+engine duration columns end in `_us`; the GPU result remains game time and is
+not charged to the mod. The group installs only with the performance trace.
+The accepted `shadow_defer_cold_alpha=1` behavior remains unchanged and
+`shadow_split` is untouched.
+
+`verify-sites.py` passes 377 checks. Fourteen independent changes to the four
+target RVAs, relocation operands, trace group, table size, and signature bytes,
+plus eight changes to the stolen widths, group installation, main-thread
+association gate, preload snapshot, and GPU phase, plus the explicit full-table
+signal are all rejected (23/23).
+`npm run doctor`, the release build, and the complete off-game self-test pass,
+including GPU timestamp retirement. The 697,344-byte run-63 DLL has SHA-256
+`8d44db8931aa8eee9b68bf2ca75496b26e0e55d3202d94ac10ed30b3df80860a`.
+
+Run 63 is installed from `cache/runs/run63-terrain-preload-ground.ini`.
+Installed and source DLLs are byte-identical at the hash above; installed and
+source INIs are byte-identical at SHA-256
+`8fdbe65f72d77da088150b43189462f65b617dae0bdcc2d0ab6b164bfb5fb303`.
+The stale live run-62 CSV and debug log were byte-compared with their archives
+before removal. The game was not launched. Run the normal route and press F12
+after the felt **play** loading transition; multiple or late presses are safe.
 
 
 ## 74. Run 63: `TerrainType::PreLoad` is absent; the runtime `TerrainRT` owner admits layer textures only in render-data construction
@@ -8542,443 +6272,2837 @@ press F12 after the felt **play** loading transition; multiple or late presses
 are safe.
 
 
-## 73. Run 62: the marked play burst is a resource/first-use submission followed by GPU queue backpressure; the colour-terrain owner is exact
+## 75. Run 64 aborted in the load-game frame: the first GPU-thread diagnosis is withdrawn by §76
 
-Run 62 is archived as `tqflicker-frames.run62.csv`, SHA-256
-`33a1bc8eda5e59984c1803c2e34d5dd3fa191c751071a4726c16edcd62379912`;
-its live-written debug log is `tqflicker-debug.run62.log`, SHA-256
-`97d64a35c58e5bfea9eda5f7a2fa113df35eefeed36ec9ff8602dd564653b1ea`.
-The CSV contains 7,202 contiguous presented frames, 0--7201. The five session
-parts are **menu** 0--1734 (16.507 s), **load-game frame** 1735 (1.540 s),
-**loading screen** 1736--2900 (10.053 s), **first world frame** 2901
-(758.028 ms), and **play** 2902--7201 (66.877 s).
+Run 64 is not a performance run and does not revise Run 63's game diagnosis.
+It wrote 2,162 contiguous presented frames, 0--2161, totaling 21.607161 s,
+before the user selected a save. Those completed rows are all **menu**. The
+game then froze while the next **load-game frame** was in progress; that frame
+never reached `Present` and therefore never entered the CSV. There is no Run
+64 **loading screen**, **first world frame**, or **play** data. In particular,
+no maximum from the partial file is a candidate for the reported freeze.
 
-F12 at **play** frame 6455 is a reaction anchor. The large full-scene,
-collision-active **play** transition is the contiguous pair 6441/6442 at
-219.289/125.131 ms. It begins 641 ms before the marker and ends 296 ms before
-it. A separate frame 6454 is 56.144 ms and ends only 20 ms before F12, but its
-37.696 ms is in the `Engine::Update` class, it has no Resource load, and its
-17.140 ms render is ordinary. Preserve that as a separate small update-class
-candidate; proximity to the reaction key does not license merging it with the
-large loading pair.
+The partial CSV is archived as `tqflicker-frames.run64.csv`, SHA-256
+`c5016c2057b254636624b04e78fde08101e8b7e9a4b0b6d84d954005bd817419`;
+the during-session debug log is `tqflicker-debug.run64.log`, SHA-256
+`75b82e5b9be13d3eb3f7935d7207e5ad903a1baba703d32414b6545380297cec`.
+All ten runtime-terrain sites reported installed. In the completed **menu**
+rows, exact runtime `TerrainRT::Load` ran 18 times / 163,193 us,
+`TerrainRT::LoadRenderData` ran 17 times / 23,921 us, its exact calls to
+`TerrainType::LoadTextures` ran 134 times / 545 us, and
+`TerrainRT::PreLoad` ran 6,454 times / 24,195 us while enumerating 51,848
+layer associations. These values establish only that the new ABIs and hooks
+were live before the freeze; they do not classify the unfinished load-game
+frame or support a game-performance conclusion.
 
-Frame 6441 spends 212.181 ms in `Engine::Render`, 3.943 ms in
-`Engine::Update`, 0.686 ms in the message-pump class, and 2.300 ms in
-`present_call`. Its 33 main-thread Resource loads / 66.163 ms partition
-exactly into 20 / 17.973 ms inside the
-`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 48.190 ms outside
-it. All 13 outside calls are state-0 render-phase terrain texture Resources.
-The frame creates 15 textures, 172 buffers, and 10 shaders, while submitting
-302.910 ms of whole-frame GPU work. Named GPU spans are 90.649 ms in the
-`GraphicsShadowMapDx11` directional class, 0.901 ms in the point-shadow class,
-20.324 ms in the enhanced-grass class, 0.423 ms in SMAA, and 0.269 ms in
-bloom. Those CPU calls and nested GPU intervals are not additive, and the
-current named spans do not classify most of the whole-GPU interval.
+Fresh review found one unsafe operation in the instrument. The Run 64
+`TerrainRT::LoadRenderData` hook unconditionally constructed a GPU timestamp
+scope using the active frame's D3D11 immediate context. The active timestamp
+slot and immediate context belong to the thread that opened the render frame,
+but `LoadRenderData` can be reached by save loading. If that call is on a
+loader thread, the hook issues `ID3D11DeviceContext::End` concurrently with
+the render thread and can deadlock the device. The successful **menu** calls
+do not clear the bug: they can have been main-thread calls, while the first
+save-load call takes the different thread path. The aborted trace did not yet
+record a main/other split, so this is the leading instrumentation diagnosis,
+not a claim that Run 64 directly proved the thread identity.
 
-Frame 6442 proves the coupled second half. It has nearly the same scene load
-(121 non-indexed and 1,498 indexed draws, versus 121/1,485 on frame 6441), no
-main-thread Resource load at all, only 3.034 ms in the directional-shadow CPU
-class, and only 22.267 ms of its own GPU work. Nevertheless it spends 104.021
-ms inside the game's D3D11 `Draw`/`DrawIndexed` calls and 117.343 ms in
-`Engine::Render`. Across the pair, draw submission consumes 123.531 + 104.021
-ms. The first CPU frame finishes after 219.289 ms despite having placed
-302.910 ms on the GPU queue; the following frame then blocks in D3D draw calls
-while that prior work retires. Frame 6443 returns to 18.824 ms with 8.488 ms
-of draw submission and 19.966 ms of GPU work. This is the same mechanism
-measured in §37, now tied to the user's marked **play** transition rather than
-selected by `max()`.
+This failure is specific to the mod's new instrumentation. It is not an
+explanation of the game's native Windows stutter, does not make the host the
+cause, and is not evidence that `TerrainRT::LoadRenderData` itself hangs. A
+trace-off abort configuration was installed immediately, retaining only the
+already accepted exact `GraphicsMeshInstance` cold-root shadow deferral.
 
-This does not require a Wine-only explanation. D3D11 resource creation,
-first-use work, command submission, and queue backpressure exist on native
-Windows as well. CrossOver/DXMT may change their exact cost, but the measured
-class is not “a host round trip,” and the game's native-Windows stutter is
-compatible with it. Conversely, the frame does not prove that every one of
-the 302.910 GPU milliseconds is texture upload; the exact ground renderer is
-still unnamed.
+Run 65 makes the smallest falsifiable correction. The shared
+`probe::currentGpuContext` accessor now returns null off the thread that opened
+the frame, so no current or future diagnostic class can borrow the immediate
+context from a loader. The exact `TerrainRT::LoadRenderData` hook also gates
+its GPU scope on the verified game main thread. Its CPU interval is preserved
+and partitioned exactly into
+`engine_terrain_rt_load_render_main` / `_main_us` and
+`engine_terrain_rt_load_render_other` / `_other_us`; the common
+`engine_terrain_rt_load_render` / `_us` population remains their sum. Only the
+main-thread class can contribute `gpu_terrain_rt_load_render_ms`. This adds no
+behavior switch and changes no game loading, terrain, culling, or shadow code.
+If Run 65 passes save loading, it validates removal of the unsafe operation;
+if it freezes again, the whole new runtime-terrain trace group must be bisected
+rather than treating the hypothesis as fact.
 
-Run 62's upstream capture resolves the 13 colour-terrain texture requests.
-For the ordinary base/bump layers, the leading verified return is
-`E+0x23fc4e` or `E+0x23fcca`: each is immediately after a call to
-`Resource::EnsureAvailable` inside exported
-`TerrainType::SetShaderParams` (RVA 0x23fb90). The grass mask begins at
-`E+0x23faf7`, immediately after the same call inside exported
-`TerrainType::SetGrassShaderParams` (RVA 0x23fa40); the verified caller
-`E+0x23b1f7` is inside the DX11
-`TerrainRenderInterfaceRT::RenderGrass` class. These are exact class names,
-not an inference from filenames. The rest of each raw stack remains a
-call-shaped superset and is not promoted to a call stack.
+The added fields moved the 317-field CSV schema just beyond its former 8 KiB
+line buffer. The first off-game test correctly rejected that build for a
+truncated header. Header and data rows now share one audited 16 KiB bound.
+`verify-sites.py` passes 422 checks, and all 53 one-at-a-time terrain-chain
+mutations are rejected, including removal of either thread gate, either side
+of the count/duration partition, each new CSV identity, and the line bound.
+Doctor, release build, and the complete off-game self-test pass. The self-test
+opens a real timestamp frame, proves the render thread receives its immediate
+context, and proves a worker thread receives null; timestamp retirement also
+passes.
 
-Skipping either `EnsureAvailable` is not yet a safe fix. Immediately after the
-call, `SetShaderParams` reads the Resource's resident render-texture fields and
-binds the selected layer. The empty-vector path can bind null, but that does
-not prove that a cold non-empty entry has an acceptable fallback. More
-importantly, the entire observed colour-terrain CPU part is 48.190 ms of the
-344.420 ms pair; it cannot remove the larger first-use/GPU component by
-itself.
-
-The engine already exports the more promising semantic boundary:
-`TerrainType::PreLoad(bool)` at RVA 0x23fe80. Re-reading its body shows that
-`false` skips all work, while `true` walks that same object's base-texture
-vector at +0x24/+0x28, bump vector at +0x30/+0x34, and optional grass texture
-at +0x88. Bump and grass entries call the exported
-`ResourceLoader::EnqueueResource`; the base path performs the engine's
-equivalent queue/touch logic. This is not a return to §23's generic bounded
-prefetch proposal: it is the engine's own type-specific preloader for the
-exact Resources forced by run 62. Static code alone cannot say whether it was
-called for the exact `TerrainType` objects, or whether it ran too late.
-
-Run 63 therefore changes no behavior. One atomic trace group detours the exact
-four exports `TerrainType::PreLoad`, `TerrainType::SetShaderParams`,
-`TerrainType::SetGrassShaderParams`, and
-`TerrainRenderInterfaceRT::RenderGround`. The two shared-prologue targets
-verify 24 bytes and steal six; the two parameter methods verify 21 bytes and
-steal their first two complete instructions, eight bytes. A fixed 2,048-slot
-identity table records true/false preload history. When an existing retained
-outside-directional load occurs inside either parameter method, its record
-copies the exact `TerrainType*`, material/grass path, material index, counts,
-and last preload frames before calling the original loader. F12 formats it
-later. An exhausted identity table has an explicit CSV counter rather than
-silently reading as “never preloaded.” No allocator or log write runs on the
-candidate frame.
-
-The fourth hook adds `engine_terrain_ground` / `_us` and a non-blocking
-`gpu_terrain_ground_ms` timestamp around the DX11
-`TerrainRenderInterfaceRT::RenderGround` class. It always forwards the same
-arguments and neither calls `PreLoad` nor changes texture fallback. All new
-engine duration columns end in `_us`; the GPU result remains game time and is
-not charged to the mod. The group installs only with the performance trace.
-The accepted `shadow_defer_cold_alpha=1` behavior remains unchanged and
-`shadow_split` is untouched.
-
-`verify-sites.py` passes 377 checks. Fourteen independent changes to the four
-target RVAs, relocation operands, trace group, table size, and signature bytes,
-plus eight changes to the stolen widths, group installation, main-thread
-association gate, preload snapshot, and GPU phase, plus the explicit full-table
-signal are all rejected (23/23).
-`npm run doctor`, the release build, and the complete off-game self-test pass,
-including GPU timestamp retirement. The 697,344-byte run-63 DLL has SHA-256
-`8d44db8931aa8eee9b68bf2ca75496b26e0e55d3202d94ac10ed30b3df80860a`.
-
-Run 63 is installed from `cache/runs/run63-terrain-preload-ground.ini`.
-Installed and source DLLs are byte-identical at the hash above; installed and
-source INIs are byte-identical at SHA-256
-`8fdbe65f72d77da088150b43189462f65b617dae0bdcc2d0ab6b164bfb5fb303`.
-The stale live run-62 CSV and debug log were byte-compared with their archives
-before removal. The game was not launched. Run the normal route and press F12
-after the felt **play** loading transition; multiple or late presses are safe.
+Run 65 is installed from
+`cache/runs/run65-terrain-runtime-chain-threadsafe.ini`. Source and installed
+DLLs are byte-identical: 704,000 bytes, SHA-256
+`d0cc1c760309372f5ef5b50b0aab2e9e384fe231120716c4e305ea18730c5f98`.
+Source and installed INIs are byte-identical at SHA-256
+`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`.
+The stale live Run 64 CSV and debug log were rechecked byte-identical to their
+archives before only those two live names were removed. The game was not
+launched. First establish whether the save reaches the **loading screen**;
+then complete the normal route and press F12 after the felt **play** loading
+burst. A freeze before the loading screen rejects the thread-gate diagnosis
+and requires trace-group bisection.
 
 
-## 72. Run 61: the marked burst is two frames, terrain loads are only one part,
-and the recorded caller is a generic wrapper
+## 76. Run 65 rejects the GPU-thread diagnosis; both colour-terrain wrappers had the wrong x86 argument count
 
-Run 61 is archived as `tqflicker-frames.run61.csv`, SHA-256
-`18465ad1ce602ee43195b45ef7247812f933d72cb09664990ea2b2cdc40efaff`;
-its live-written debug log is `tqflicker-debug.run61.log`, SHA-256
-`c92d7b205b5680dfd9d883074515034769556906ae854207f88fd83cbed43412`.
-Both archives were byte-compared with their live names. The CSV contains 7,135
-contiguous presented frames, 0--7134. The five session parts are **menu**
-0--1768 (17.088 s), **load-game frame** 1769 (1.565 s), **loading screen**
-1770--2909 (10.129 s), **first world frame** 2910 (686.861 ms), and **play**
-2911--7134 (64.397 s).
+Run 65 repeated the failure after the GPU-context guard. It is archived as
+`tqflicker-frames.run65.csv`, SHA-256
+`8132aab1179af8b96df72ca510ac4e8e983a0a6464b878f8239ae3cafce55b27`;
+the during-session log is `tqflicker-debug.run65.log`, SHA-256
+`43074682b369e49851a7b2f1039132fdad7ecf55629239b7f57e6a50dadb12f4`.
+The CSV has 3,200 contiguous completed frames, 0--3199, totaling 30.260581 s.
+Every completed row is **menu**. The **load-game frame** again never closed,
+so Run 65 has no **loading screen**, **first world frame**, or **play** data.
 
-F12 at **play** frame 6560 is a late reaction anchor. It follows a contiguous
-two-frame, full-scene, collision-active **play** burst: frame 6522 is 175.182
-ms and frame 6523 is 127.451 ms. The burst begins 1.034 s before the marker
-and ends 731 ms before it. Treating only the largest of those rows as the felt
-event would discard almost half of the pause; the marked event is the pair.
+The new partition is decisive about §75's first diagnosis. All 17 completed
+calls to the exact runtime `TerrainRT::LoadRenderData` class were in the
+non-main class: 17 / 37,318 us in
+`engine_terrain_rt_load_render_other` / `_other_us`, zero in the main class.
+The corrected shared accessor returned null there, so none of those calls
+issued a GPU timestamp. Save loading nevertheless froze. Cross-thread GPU
+timestamping was a real unsafe defect in Run 64, but it was not the cause of
+this reproducible load-game freeze. Do not carry §75's causal hypothesis
+forward.
 
-The first frame spends 166.108 ms in `Engine::Render`, 5.462 ms in
-`Engine::Update`, and 1.157 ms in the message-pump class. Its 33 main-thread
-`ResourceLoader::LoadResource` calls / 49.683 ms partition exactly into 20 /
-22.772 ms inside `GraphicsShadowMapDx11::RenderDirectional` and 13 / 26.911 ms
-outside it. Every outside-directional call is in `Engine::Render`, entered in
-state 0, and is a texture Resource. Their engine filenames are terrain layers:
-river bed, mud, grass, swamp, forest, rock, normal, and grass-mask textures.
-The longest one is 6.814 ms and the other twelve are 1.003--2.052 ms.
+The fresh ABI audit then found a second, concrete defect in the two unexported
+colour-terrain hooks. Ghidra decompiled both functions with five parameters,
+and the Run 64/65 `TerrainColourRenderFn` mistakenly treated all five as
+explicit stack arguments in addition to `this`. The decompiler's count already
+included the implicit `this` pointer. Machine code resolves the ambiguity:
+both *TerrainPlug colour render* at Engine RVA `0x236240` and *TerrainBlock
+colour render* at `0x23e1e0` end in `c2 10 00` (`ret 0x10`). Each therefore
+has exactly four explicit stack arguments.
 
-That is a real synchronous colour-render dependency, but it is not the whole
-burst and it does not reproduce run 60's 79.135 ms complement. On frame 6522,
-the complete GPU interval is 254.833 ms, including 90.117 ms in the
-`GraphicsShadowMapDx11` directional class and 23.490 ms in the enhanced-grass
-class. The CPU resource calls, enclosing CPU render interval, and GPU intervals
-overlap and are not added.
+The bad fastcall wrappers accepted and forwarded five explicit arguments and
+would return by popping 20 bytes where the engine caller provides 16. The
+first call corrupts the caller's stack. Both classes have zero completed calls
+in the Run 65 **menu** rows, which is consistent with the first colour-terrain
+call occurring in the unfinished **load-game frame**; because that frame never
+reached `Present`, its counters cannot appear in the CSV. This makes the ABI
+defect a substantially stronger freeze explanation than the rejected GPU
+hypothesis, but the causal link remains a prediction until the corrected DLL
+successfully reaches the **loading screen**.
 
-The second frame is the sharper exclusion. Frame 6523 spends 119.320 ms in
-`Engine::Render`, but has no outside-directional main-thread Resource load and
-only one 7.194 ms texture load inside the `GraphicsShadowMapDx11` directional
-class. Its own GPU interval is 28.272 ms, including 15.434 ms directional and
-0.684 ms enhanced grass. This has the same shape as the queue-drain row proved
-in §37: a large GPU submission on frame N and CPU time surfacing inside
-`DrawIndexed` on N+1. Run 61 did not enable `draw_timing`, so that is a
-well-founded hypothesis for this particular pair, not yet a measurement.
+Run 66 changes only those two wrapper declarations and forwards: `this` plus
+four explicit arguments, matching both `ret 0x10` bodies. It changes no game
+rendering, loading, resource, terrain, culling, or shadow behavior. The durable
+disassembly map now states the implicit/explicit distinction so a later reader
+cannot repeat the prototype-count error.
 
-The immediate-caller field also failed to answer one part of its question.
-All 13 terrain loads report `E+0x213137`. Re-reading the pinned `Engine.dll`
-(SHA-256 `0aedbb1805b4a5616f74e34d4f609f392e2c2dd4561c64c118f4772ab4f694f6`)
-shows that RVA is the instruction after the `E8` at 0x213132 inside exported
-`Resource::EnsureAvailable` at RVA 0x2130f0; that call resolves to exported
-`ResourceLoader::LoadResource` at RVA 0x213ed0. So the label is verified but
-generic. It proves the normal EnsureAvailable path, not which terrain-renderer
-class requested it. Calling it a terrain-renderer call site would repeat the
-same immediate-versus-upstream mistake that earlier sections made with nested
-durations.
-
-The diagnostic itself is internally consistent: on all 7,135 frames, main
-load count/duration equals directional plus outside-directional, and both the
-phase and filename-type partitions independently sum to the outside pair.
-The F12 report retained all 13 records and says `truncated=0`. The accepted
-`GraphicsMeshInstance` root behavior also remained active on frame 6522,
-omitting five state-0 roots, while the alpha-tested-caster behavior omitted 19;
-neither enqueue-failure counter fired. This run makes no new visual-safety
-claim because the reporter did not report one either way.
-
-The supported next move is not to defer terrain textures yet. Even a perfect
-elimination of the measured synchronous part is bounded by 26.911 ms on a
-302.633 ms marked burst, and colour terrain has a visible fallback/popping
-question that directional-shadow textures did not. Run 62 keeps all behavior
-fixed, retains up to 24 verified-module call-shaped upstream stack candidates
-for each marked outside-directional load, and enables the already validated
-`draw_timing=1` instrument. The raw stack is explicitly a superset because the
-engine omits frame pointers; repetition plus static disassembly must identify
-the real increasing-order caller subsequence. This will name the class that
-forces the terrain Resources and directly test whether frame 6523 is
-`DrawIndexed` queue backpressure.
-
-The new capture adds no patch site. It extends the existing fixed 128-record
-ring and performs one bounded committed-stack scan while retaining a matching
-load; formatting and live logging still occur only at F12. `verify-sites.py`
-passes 353 checks. All 16 one-at-a-time changes to the new depth, stack handoff,
-committed-range gates, two bounds, module/call filters, ordered stores,
-duplicate collapse, rendering, and log identity are rejected; together with
-run 61 this is 150/150 relevant mutations rejected. Doctor, the release build,
-and the full off-game self-test pass, including GPU timestamp retirement.
-
-Run 62 is installed from
-`cache/runs/run62-outside-directional-upstream-draw.ini`. The 692,736-byte DLL
-and installed copy are byte-identical at SHA-256
-`790fb0e57280a7486d8ee75123084603222fece16c407cfeacbd3994f95382b0`.
-The source and installed INIs are byte-identical at SHA-256
-`1838456d57220419d652bcb78201358e3223c0847963e92d418768825e048786`.
-The old live CSV and debug log were rechecked byte-identical to their run-61
-archives before removal. The game was not launched. Run the normal route and
-press F12 after the felt **play** burst; a late press like run 61's is within
-the retained window, and multiple presses remain safe.
-
-
-## 71. Run 61: name the main-thread Resource loads outside directional shadow
-
-Run 60's F12 anchor identifies full-scene, collision-active **play** frame
-6461 at 260.847 ms. Its 30 main-thread `ResourceLoader::LoadResource` calls
-carry 102.518 ms of summed complete-call duration, but only 17 / 23.383 ms are
-inside `GraphicsShadowMapDx11::RenderDirectional`. The arithmetic complement
-is 13 calls / 79.135 ms outside that directional bracket. Those calls could
-still be in `Engine::Render`, `Engine::Update`, or neither, and the existing
-CSV supplies neither their Resource class nor their immediate caller. Calling
-all 79.135 ms "render loading" would therefore be another inference from a
-frame total. Run 61 measures the missing dimensions before choosing a lever.
-
-The instrument reuses existing verified hooks rather than adding a new patch
-site. `ResourceLoader::LoadResource` already verifies 22 bytes and steals
-seven; `Engine::Update` and `Engine::Render` each verify 24 bytes and steal
-six; the directional call uses the existing 23-byte `patchCall` window. The
-loaded-state and filename accessors each verify 16 bytes and are called only
-after their export/RVA identities match. The outside-directional attribution
-becomes active only when all of those load, phase, directional, and accessor
-dependencies are live. A missing dependency produces zeroes, not a falsely
-large outside class.
-
-For every main-thread LoadResource call outside the live directional bracket,
-the CSV records one common count / `_us` duration pair. Render, update, and
-other phase pairs partition it once; mesh, shader, texture, and other filename
-classes partition it independently. These are complete game-call durations,
-which can nest, and they are not added to their enclosing Engine phase. All
-duration columns end in `_us`, so `tools/frames.py` does not charge them to the
-mod. On every frame with the full instrument active, the expected count and
-duration invariants are:
-
-`engine_res_load_main = engine_shadow_res_load + engine_res_outside_dir`
-
-`outside_dir = render + update + other = mesh + shader + texture + type_other`
-
-F12 supplies the identities without making the candidate frame write a log.
-Each outside-directional call copies its frame index, pre-call loaded state,
-phase, filename class, at most 128 filename bytes, and immediate return address
-into a 128-record rolling ring. On the existing F12 key-down retrieved by the
-game's own `PeekMessageA`, the preceding 120 frames are formatted and handed
-to the already asynchronous debug logger. A caller is labeled `E`, `G`, or
-`T` plus RVA only when it lies in the verified Engine.dll, Game.dll, or TQ.exe
-text and immediately follows one of the accepted call encodings; otherwise it
-is explicitly `unverified`. Already emitted records are not repeated on a
-later press. If 128 records cannot cover the retained pre-reaction window, the
-F12 row sets `engine_res_outside_dir_marker_truncated` and the live log says so.
-
-This is passive relative to run 60. The exact original LoadResource trampoline
-runs once with unchanged arguments. During the candidate frame the added work
-is bounded metadata copying and counters; filename formatting and log locking
-happen only after F12. The accepted cold-root and texture omissions remain
-enabled through `shadow_defer_cold_alpha=1`; colour rendering, all shadow-map
-settings, culling, resource behavior, and `shadow_split` are unchanged.
-
-`verify-sites.py` now passes 351 checks. All 25 one-at-a-time changes to the
-three ring/window/name constants, outside-directional and classification
-gates, filename/caller/phase/frame capture, ring bound and publish order,
-window capacity/membership, one-shot reporting, caller label, truncation
-counter, update/render brackets, F12 emission, dependency activation, and
-shutdown are rejected: 25/25 new and 134/134 cumulative relevant mutations.
-The off-game self-test additionally proves both independent partitions sum to
-the common population, includes the exact 120-frame boundary, excludes future
-events, and reports a one-record overflow. Doctor, release build, and the full
+`verify-sites.py` now passes 424 checks. It reads both concrete return sites
+from the pinned Engine binary, requires `c2 10 00` at each, and requires both
+wrapper types and forwards to carry exactly four explicit arguments. All 56
+one-at-a-time terrain-chain mutations are rejected, including the typedef and
+each individual forward call. Doctor, release build, and the complete off-game
 self-test pass, including GPU timestamp retirement.
 
-Run 61 is installed from
-`cache/runs/run61-outside-directional-resources.ini`. The 692,224-byte DLL and
-installed copy are byte-identical at SHA-256
-`47fbd6acff07fd4b97598edb8e448f181fca9f10cbf2512def30e1a162a2f20b`.
-The source and installed INIs are byte-identical at SHA-256
-`ed7a07f068851749af8f0b558188502cf6a83583fe63f7cd87625365c17513f7`.
-The old live CSV and debug log were rechecked byte-identical to their run-60
-archives before removal. The game was not launched. Run the normal route and
-press F12 after the felt **play** loading burst; multiple presses are safe and
-emit only new retained events.
+The Run 66 DLL is installed: source and installed copies are byte-identical,
+704,000 bytes, SHA-256
+`97149c6b2d1caeb1f131511c9d1279e63fee2364dc15b8500858bc6982f9ce28`.
+Per the user's instruction, the INI was not recopied; the already installed
+Run 65 INI remains byte-identical to its source at SHA-256
+`28bb8420cd82d25a8367fe915713a1cbfea1f533d92760aa21ea217c86725b1c`
+and requests the same trace settings recorded in
+`cache/runs/run66-terrain-colour-abi.ini`. The Run 65 live CSV/log were
+verified against their archives before the stale live names were removed. The
+game was not launched.
 
 
-## 70. Run 60 result: the narrow root-mesh omission is visually safe, but the
-marked burst is mostly outside it
+## 77. Run 66 loads successfully and exposes missing runtime-layer preload; its high-frequency GPU scopes were intrusive
 
-Run 60 is archived as `tqflicker-frames.run60.csv`, SHA-256
-`87bcb615b8d81fc037f407b89e41246144361369b76be458d735c0431e536a03`;
-its live-written debug log has SHA-256
-`ab56a4629a000ad382e9013ac77e1db4e0e265768d409b31c4271ba446636697`.
-Both archives are byte-identical to the current live names. The CSV contains
-7,131 contiguous presented frames, 0--7130. The five session parts are
-**menu** 0--1782 (16.542 s), **load-game frame** 1783 (1.507 s), **loading
-screen** 1784--2865 (9.501 s), **first world frame** 2866 (767.918 ms), and
-**play** 2867--7130 (64.725 s).
+Run 66 validates §76's ABI correction. The CSV has 7,047 contiguous frames,
+0--7046, totaling 94.061 s. Its five session parts are **menu** 0--1936
+(17.383 s), **load-game frame** 1937 (1,302.6 ms), **loading screen**
+1938--3208 (10.932 s), **first world frame** 3209 (581.6 ms), and **play**
+3210--7046 (63.862 s). The save loaded, the character appeared, and the normal
+route completed. Therefore the two five-explicit-argument colour wrappers,
+not the game or a loader-thread GPU query, caused the Run 64/65 freeze.
 
-F12 at **play** frame 6481 is a reaction anchor. The only full-scene,
-collision-active candidate over 40 ms in the preceding two seconds is
-**play** frame 6461 at 260.847 ms; it ends 417 ms before the marker and starts
-678 ms before it. The frame changes directional-shadow region. It spends
-217.391 ms in `Engine::Render`, 9.206 ms in `Engine::Update`, and 31.661 ms in
-the message-pump class. The pump's 31.635 ms across three `PeekMessageA` calls
-returned two messages and dispatched both; this is not run 39's empty-peek
-shape. Render is independently dominant, so this observation does not reopen
-the message pump as a lever.
+F12 marks **play** frame 6618. Frame 6601 is the old loading-transition class:
+109.223 ms, beginning 642 ms before the key was retrieved and ending 533 ms
+before it. Frame 6617 is a separate 61.014 ms `Engine::Update` class only 29 ms
+before the marker and has no Resource load. Do not substitute the closer frame
+for the reported transition.
 
-The new exact base-class `GraphicsMeshInstance::GetNumShadowRenderPasses`
-behavior is active on the marked frame. It omits six state-0 root meshes and
-successfully gives all six to their own `ResourceLoader`; no enqueue fails.
-The next two directional builds omit eight and six roots respectively; the
-third following build, frame 6464, omits none. The count-only data cannot prove
-caster identity, but it does show that the cold-root population is transient
-and clears within three subsequent builds. The reporter specifically saw no
-missing shadow, shadow pop, or other visual fault during the session. That is
-the required visual acceptance of this narrow temporary omission.
+The transition frame spends 102.921 ms in the `Engine::Render` class. It has
+36 main-thread Resource loads / 62.355 ms: 23 / 14.996 ms in one 16.679 ms
+`GraphicsShadowMapDx11::RenderDirectional` class and 13 / 47.359 ms outside
+directional shadow. All 13 outside-directional loads are textures in the
+render phase. Exact colour-terrain CPU classes are 137 TerrainPlug calls /
+45.531 ms and 59 TerrainBlock calls / 17.627 ms. These CPU spans and Resource
+loads are nested and must not be added.
 
-It is not a controlled magnitude result. Run 59 has a different route and a
-two-frame marked burst, so comparing its maximum with run 60's maximum would
-repeat the project's original mistake. Run 60 proves that the mechanism fires,
-queues cold roots, stops omitting them once resident, and is visually
-acceptable. It does not isolate how many milliseconds it saved.
+The whole-frame GPU interval is 87.644 ms. Nested first-entry-to-last-exit GPU
+classes include 12.579 ms directional shadow, 15.689 ms enhanced grass,
+21.809 ms DX11 `TerrainRenderInterfaceRT::RenderGround`, 76.484 ms TerrainPlug,
+and 76.624 ms TerrainBlock. TerrainPlug and TerrainBlock overlap and cannot be
+added. Frame 6602 has no Resource load and falls to 32.304 ms. Frame 6603 is
+54.590 ms with ten outside-directional loads / 30.042 ms, including nine
+textures / 29.075 ms.
 
-The remaining marked frame is much broader than directional shadows. Its 30
-main-thread Resource loads cost 102.518 ms. Only 17 / 23.383 ms occur inside
-`GraphicsShadowMapDx11::RenderDirectional`: 16 meshes / 21.923 ms and one
-shader / 1.460 ms, all entered in state 0. Therefore 13 main-thread loads /
-79.135 ms occur outside directional shadow. The enclosing directional CPU
-call is 25.145 ms. Its GPU interval is 30.071 ms while the whole-frame GPU
-interval is 237.965 ms. CPU loads, enclosing CPU calls, and GPU intervals are
-nested or overlapping and must not be added; the comparison only establishes
-that directional shadow is no longer the dominant class in this felt burst.
+The exact per-type lifecycle resolves the missing link. The affected
+`TerrainType` records were attached by runtime `TerrainRT::Load` during the
+**loading screen**, and their `TerrainType::LoadTextures` calls completed
+during the **loading screen**. Runtime-owner `TerrainRT::PreLoad` subsequently
+visited those owners and enumerated their layers through **play** frame 6600,
+immediately before the transition. Nevertheless, exact semantic
+`TerrainType::PreLoad` counts are zero for both `true` and `false`. The
+Resources therefore existed long before frame 6601, but the runtime preload
+path never queued the layer base, bump, and grass textures; ordinary colour
+rendering synchronously first-used them. This is a missing runtime-layer
+preload call, not a need to rewrite terrain, frustum culling, shadows, or the
+resource system.
 
-Frames 6462 and 6463 are 28.030 and 17.356 ms. Frame 6462 synchronously loads
-one remaining directional mesh / 4.831 ms inside a 6.970 ms shadow call;
-frame 6463 has no Resource load and a 1.834 ms shadow call. Unlike run 59,
-there is no second large render/backpressure frame after this onset. That
-difference is descriptive only because the submitted scenes differ.
+The user also reported general slowness and confirmed this was the same normal
+route used for prior runs. A controlled comparison against Run 63 uses only
+collision-active, full-scene **play** frames under 60 ms, excludes Resource
+loads and shadow-region changes, and bands by indexed-draw count. Run 66 minus
+Run 63 mean frame time is +0.574 ms for 500--999 draws (1,089 versus 1,177
+frames), +8.266 ms for 1,500--1,999 (512 versus 751), and +13.184 ms for
+2,000-plus (152 versus 240). The corresponding GPU deltas are +0.570,
++8.279, and +13.141 ms; `present_call` changes by only +0.013, +0.005, and
+-0.009 ms. No across-run p50 is used.
 
-Across **play**, the new root hook omits 27 instances: 26 state 0 and one state
-1. Ten state-0 roots are newly enqueued and no enqueue fails. Directional
-shadow still performs 75 synchronous loads / 75.728 ms: 70 meshes / 72.173 ms
-and five shaders / 3.555 ms, all entered in state 0. Texture loads remain zero.
-All 3,046 directional builds report the context patch active; every context,
-table, and enqueue failure is zero. The existing material, bump, base-override,
-and alpha gates remain active without a failed enqueue.
+This scaling identifies observer cost. `gpuBegin` records the first entry for
+a phase, but `gpuEnd` deliberately records every exit so its timestamp becomes
+the last exit. In Run 66 that meant about 221 immediate-context `End(query)`
+calls per frame in the 1,500--1,999 band and 377 above 2,000 draws from the
+new TerrainPlug and TerrainBlock scopes alone. Their diagnostic result is now
+captured, so the scopes and their CSV columns are removed. The CPU call counts
+and `_us` spans remain. The verifier rejects either high-frequency GPU scope
+being restored.
 
-The supported conclusion is to keep the narrow root-mesh behavior, not widen
-it blindly. The next passive trace should classify the 13 main-thread Resource
-loads / 79.135 ms outside directional shadow on the marked **play** frame by
-exact Resource class and verified immediate caller. The remaining whole-GPU
-interval is real, and §37 already establishes where GPU queue pressure blocks
-the CPU (`DrawIndexed`); another per-draw timing boot would describe the sink
-again without identifying which resource or scene transition created the
-work.
+The next supported behavior is narrow: immediately after the already verified
+`TerrainRT::LoadRenderData -> TerrainType::LoadTextures` call completes, invoke
+the stock `TerrainType::PreLoad(true)` on that exact layer type. Its disassembly
+walks base, bump, and grass Resources and enqueues them without waiting. This
+uses the game's existing queue at the point Resources first exist, during the
+**loading screen**, rather than inventing a parallel loader or deferring colour
+correctness. It must be a default-off behavior switch that installs with the
+performance probe off; the trace only verifies that frame-6601-class colour
+loads disappear.
+
+The archived CSV is `tqflicker-frames.run66.csv`, SHA-256
+`515cdb29ffd35d1a7fa35f014da6a4b3c2586ad6c6f93386712515e11eec8951`.
+The during-session log is `tqflicker-debug.run66.log`, SHA-256
+`91a46af9bd67d423a46f10ca126d3605db41d0de5c9bf1c3b137f9eacd585686`;
+both live files were byte-identical to their archives.
 
 
-## 69. Run 60: defer an exact caster before its cold root mesh is forced
+## 78. Run 67: queue runtime layer textures at the exact post-LoadTextures boundary
 
-Run 59 removes every directional-shadow texture load in **play**, leaving two
-coupled costs on its marked full-scene, collision-active **play** onset. Frame
-6692 synchronously loads 29 meshes / 38.219 ms and one shader / 2.843 ms inside
-a 41.139 ms directional CPU call, while its directional GPU interval is
-137.047 ms and whole-GPU interval 329.861 ms. Five root-mesh ensures at the
-exact `GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost 11.111
-ms. Frame 6693 then drains the prior GPU queue. A further texture or draw-time
-instrument does not choose a new lever; the already proved root-mesh boundary
-does.
+Run 66 does not point to a terrain, shadow, culling, or resource-loader
+rewrite. Its exact lifecycle says the layer `TerrainType` and its base, bump,
+and grass texture Resources already exist during the **loading screen**; the
+missing operation is the stock semantic preload that queues those Resources.
+Run 67 adds only that operation.
 
-Run 60 extends the existing `shadow_defer_cold_alpha=1` behavior at that one
-earliest boundary. The exact exported base-class method at RVA `0x173440`
-loads the root mesh pointer from instance+`0x4`, null-checks it, calls
-`Resource::EnsureAvailable`, then reads the pass count at mesh+`0x7c`. Its
-complete 24 bytes were already independently matched to the pinned image. The
-entry detour now steals six complete, non-relative bytes—`push esi; mov
-esi,[ecx+4]; test esi,esi`—with no relative operand. Its trampoline replays
-those bytes before returning to the original null check.
+`[performance] terrain_preload_layers=1` retargets the already verified E8 in
+runtime `TerrainRT::LoadRenderData` with `detour::patchCall`. The wrapper first
+calls the exact original `TerrainType::LoadTextures`, then calls the verified
+exported `TerrainType::PreLoad(true)` on the same `this`. The latter's machine
+body walks the base and bump vectors plus grass Resource and reaches the
+game's existing `ResourceLoader::EnqueueResource` path. It does not wait,
+construct a custom loader, omit a colour or shadow draw, alter frustum
+culling, or change `shadow_split`.
 
-The behavior predicate is deliberately narrower than “any cold mesh.” It is
-the exact base `GraphicsMeshInstance` export, on the main thread, while inside
-`GraphicsShadowMapDx11::RenderDirectional`, with a non-null root mesh in raw
-loaded state 0 or 1. State 0 is handed to its own verified
-`ResourceLoader` using the stock `(priority=1, notify=true, immediate=false)`
-tuple; state 1 is already loading. The method returns zero passes until state
-2, so no caster/pass record, later dependency, or GPU draw is created for that
-one caster. State 2 and every non-directional call forward through the exact
-original method. Derived renderables that override the virtual method never
-enter this base export.
+The behavior defaults off. It reaches `engineprobe::install()` with the
+performance probe off and, by itself, installs only the exact call patch; it
+cannot open trace group 32768 or any other instrument. With the terrain trace
+active, the behavior deliberately enters the exported `PreLoad` entry rather
+than its trampoline, so the existing true/false counters prove the call ran.
+The behavior becomes active only after the call site, original target, export
+RVA, complete 24-byte signature, and relocation have all verified. Shutdown
+restores the call and clears both behavior and diagnostic state.
 
-This is a temporary local missing-shadow trade, not whole-map reuse. It can
-test more than the direct 11.111 ms because a cold root caster can own later
-dependent mesh loads and directional GPU draws. It cannot remove non-mesh
-casters, already-resident newly visible geometry, or the non-shadow resource
-loads on the onset. Colour rendering, point/spot shadows, resident casters,
-culling, map size, and `shadow_split` are unchanged. A visible local shadow
-pop rejects or bounds it even if the burst becomes shorter.
+The two high-frequency TerrainPlug/TerrainBlock GPU phases and CSV fields are
+removed before this run. Their CPU call counts and engine `_us` spans remain.
+This corrects Run 66's demonstrated observer overhead; it is not a game or fix
+effect and steady-state Run 66 timing must not be used as the baseline.
 
-The behavior detour is an atomic dependency of the existing shadow-fix chain.
-It is installed only after the 24-byte signature and export/RVA identity pass;
-a failure restores the material, context, record, and bump call patches. With
-the trace enabled, the old internal Ensure call instrument is not patched
-inside the detoured entry; the behavior wrapper itself emits count-only
-`engine_shadow_mesh_omitted`, state-0/state-1, enqueued, and enqueue-failed
-columns. The fix stays default-off, reaches `install()` with the performance
-probe off, and brings no trace group.
+`verify-sites.py` passes 429 checks. All 64 one-at-a-time terrain mutations are
+rejected, including every runtime/preload RVA, signature byte and relocation,
+the option name and default, the `true` argument, the post-LoadTextures order,
+the activation endpoint, independent install route, and reintroduction of a
+GPU scope into either colour wrapper. Doctor, release build, and the full
+off-game self-test pass, including GPU timestamp retirement.
 
-`verify-sites.py` passes 336 checks. Twenty independent mutations of the new
-mesh-field constant, reused RVA and byte identity, exact state predicate,
-main/directional gates, field use, enqueue tuple, zero-pass return, six-byte
-steal, atomic dependency, rollback/activation, diagnostic coexistence,
-pre-verification, and both rollback and shutdown pointer clearing are all
-rejected: 20/20 for run 60 and 109/109 cumulative relevant mutations. Doctor,
-the release build, and the full off-game self-test pass, including GPU
-timestamp retirement. Run 60 is installed from
-`cache/runs/run60-shadow-cold-root-mesh.ini`; installed and source DLLs match
-at SHA-256
-`3f8856f82878d7d143b388295f36f4b210ffcb7a4e2534b87f62378eaaa01694`,
-and installed and source INIs match at SHA-256
-`918a2ef1eec7dd71f46f79dd9caf2011416e8c44a3428bfdef7089d16809edcd`.
-The run-59 live CSV and debug log were byte-identical to their archives before
-the stale live names were removed. The game was not launched.
+Run 67 is installed from `cache/runs/run67-terrain-layer-preload.ini`. The
+705,024-byte installed DLL is byte-identical to the build at SHA-256
+`3171d5301076962d41c67659444d50e1e873eb2bae5d730f6c45510d51c5dd07`.
+The installed INI is byte-identical to the run record at SHA-256
+`e57b0537009088cf6b061322da2b118d4f94a75871e45a619672d194be99fd52`.
+Before removal, both Run 66 live files were byte-identical to their archives;
+the stale live CSV/log are absent. The game was not launched.
+
+For the result, use the same normal route and press F12 after the old **play**
+loading transition. The primary outcome is not an across-run maximum: require
+the fix's `TerrainType::PreLoad(true)` calls during loading, then inspect the
+F12-anchored transition for the 13 outside-directional colour-terrain texture
+loads that cost 47.359 ms in Run 66. A load freeze rejects thread-context
+safety; missing or visibly incorrect terrain rejects behavior even if those
+loads disappear.
+
+
+## 79. Run 67 removes eleven of thirteen marked colour-terrain loads; the remaining burst is directional cold meshes plus GPU submission
+
+Run 67 completed with 7,605 contiguous frames, 0--7604, totaling 98.045 s.
+Its five session parts are **menu** 0--2074 (19.422 s), **load-game frame**
+2075 (1,386.5 ms), **loading screen** 2076--3441 (11.686 s), **first world
+frame** 3442 (1,352.9 ms), and **play** 3443--7604 (64.199 s). The user ran
+the same normal route used more than fifty times and reported that the old
+stutter felt much smaller.
+
+The behavior executed at the intended point. During the **loading screen**,
+144 exact `TerrainRT::LoadRenderData -> TerrainType::LoadTextures` calls are
+paired one-for-one with 144 semantic `TerrainType::PreLoad(true)` calls and
+zero false calls. Another 150/150 pair occurs as new terrain is admitted in
+**play**. The save loads and no visual fault was reported.
+
+F12 at **play** frame 7013 anchors a two-frame transition. Frame 6974 is
+73.472 ms and ends 887 ms before the marker; frame 6975 is 83.720 ms and ends
+803 ms before it. The first frame has 29 main-thread Resource loads /
+29.284 ms. Only two / 5.094 ms are outside directional shadow, both render-
+phase terrain textures. Run 66's corresponding marked colour-terrain class
+had 13 / 47.359 ms on its onset and another nine textures / 29.075 ms two
+frames later. No such second colour-load frame follows Run 67's onset. This
+does not make the submitted scenes identical, but the exact mechanism and the
+reporter's observation agree: the new stock preload removed eleven of the
+thirteen onset loads and roughly 42 ms from that nested colour class.
+
+The two survivors are
+`XPack3\\terraintextures\\gadir\\gadir_rockypebbles01.tex` and its
+`normal.tex`, together costing 5.094 ms. Both belong to the same exact
+`TerrainType*`. Its runtime layer was attached in **loading screen** frame
+2598; `LoadTextures` and the new `PreLoad(true)` both completed at frame 2631;
+runtime-owner `TerrainRT::PreLoad` then enumerated it 4,397 times through
+**play** frame 6973. Nevertheless both Resources enter ordinary colour use in
+state 0. This proves one early semantic call is not a lifetime residency
+guarantee, but the current trace cannot distinguish never serviced from loaded
+then evicted. Periodically walking every layer would be a broad, high-volume
+response to a remaining 5.094 ms and is not supported.
+
+The dominant remainder is already separate. Frame 6974 performs 27 state-0
+directional-shadow loads / 24.190 ms: 26 meshes / 23.583 ms and one shader /
+0.607 ms, inside a 26.166 ms `GraphicsShadowMapDx11::RenderDirectional` CPU
+class. Twelve exact base `GraphicsMeshInstance` root casters are omitted and
+eight state-0 roots are newly queued, so these 26 loads are reached through
+some other shadow dependency/class. The directional GPU interval is 59.807 ms
+and the whole-frame GPU interval is 104.808 ms. Frame 6975 has no Resource
+load, but spends 50.607 ms in the game's `DrawIndexed` submission after that
+work; its whole frame is 83.720 ms. These nested/adjacent numbers must not be
+added as independent costs.
+
+Removing the high-frequency colour GPU scopes also fixes the reported general
+slowness. Against Run 63, using only collision-active full-scene **play**
+frames under 60 ms with no Resource load or shadow-region change, Run 67 minus
+Run 63 mean frame time is -0.109 ms at 500--999 indexed draws (1,168 versus
+1,177 frames), +0.078 ms at 1,500--1,999 (751 versus 751), and -0.002 ms at
+2,000-plus (227 versus 240). Corresponding GPU differences are -0.108,
++0.095, and -0.037 ms. No across-run p50 is used. Run 66's +8.266 and
++13.184 ms regressions in the latter two bands were observer cost.
+
+One caution remains in a different session part. Run 67's **first world
+frame** is 1,352.9 ms versus Run 66's 581.6 ms. Main-thread Resource counts
+are similar (148 versus 143), but their durations are 810.286 versus
+215.114 ms, texture creation is 352.090 versus 73.707 ms, and whole-GPU time
+is 1,339.844 versus 560.602 ms. One frame in each run cannot attribute that
+variance to the new preload, and it is not the reported **play** transition,
+but a later acceptance run must not silently ignore the loading regression if
+it repeats.
+
+The next passive trace should retain only state-0 mesh Resource loads inside
+`GraphicsShadowMapDx11::RenderDirectional` for the preceding F12 window, with
+their engine filename, immediate verified caller, and bounded call-shaped
+upstream candidates. That directly identifies the 26-load class before any
+wider caster omission or mesh-prefetch behavior. Re-running terrain preload
+or adding more high-frequency GPU scopes is not justified.
+
+The archived CSV is `tqflicker-frames.run67.csv`, SHA-256
+`b146a9a0238514d15fddb2bbec61c3d843f79aac103d8c9d4e93a21ee4604f47`.
+The during-session log is `tqflicker-debug.run67.log`, SHA-256
+`1f5cc7b4b6c8ffc1e1bb13f5a54289909125b8f7dcd0598e91341d915043be5a`;
+the live files were byte-identical to those archives at capture.
+
+
+## 80. Run 68 setup: retain exact caller chains for the remaining directional cold meshes
+
+Run 67 leaves a specific class, not a reason to broaden the current shadow
+omission blindly: its marked **play** frame 6974 synchronously loads 26
+state-0 meshes / 23.583 ms inside
+`GraphicsShadowMapDx11::RenderDirectional`, after the exact base
+`GraphicsMeshInstance` root behavior has already omitted twelve other casters.
+The next question is which verified caller/dependency owns those 26 meshes.
+
+Run 68 adds a bounded delayed report to the already installed Resource-load
+and directional-shadow trace. Only a main-thread Resource whose pre-call state
+is 0, whose engine filename class is mesh, and whose call occurs inside the
+verified directional bracket is retained. Each record carries the filename,
+pre-call queue flag, frame, duration, immediate return address only when it is
+call-shaped inside a verified module, and at most 24 likewise verified
+call-shaped upstream stack candidates. A fixed 128-record ring covers the 120
+frames before F12 and explicitly reports truncation. The existing F12
+retrieval writes the records before placing its CSV marker.
+
+This is passive and low-frequency. The candidate frame performs a bounded
+copy and stack scan only on a cold mesh load; filename/caller formatting and
+log locking occur later at F12. There is no new GPU query, per-draw hook,
+Resource operation, behavior setting, culling change, shadow change, or
+`shadow_split` change. Both accepted behaviors, including
+`terrain_preload_layers=1`, remain unchanged.
+
+`verify-sites.py` passes 439 checks. All 71 relevant one-at-a-time mutations
+are rejected, including the ring size, marker horizon, exact state/type/shadow
+predicates, F12 emission, dependency activation, every terrain-layer behavior
+constant, and both forbidden high-frequency colour GPU scopes. Doctor, release
+build, and the full off-game self-test pass, including the directional-mesh
+window boundary/overwrite tests and GPU timestamp retirement.
+
+Run 68 is installed from `cache/runs/run68-directional-mesh-callers.ini`.
+The 709,120-byte installed DLL is byte-identical to the build at SHA-256
+`bec80cafbdc9fae6845ba24b1653b9b7cced2a6d86bc6d55a07d28f863f1ebc7`.
+The installed INI is byte-identical to the run record at SHA-256
+`d92bfd247b6edd7eeeff4595f2dc3d13b1c145dc644e060f56d878593376e12a`.
+Run 67's live CSV/log matched their archives before removal; both stale live
+names are absent. The game was not launched.
+
+Run the same normal route and press F12 after the reduced **play** transition.
+Also report whether the **first world frame** loading burst again feels
+unusually long. The primary Run 68 result is the exact directional mesh
+resource/caller population at the marker; do not choose a frame by maximum.
+
+
+## 81. Run 68 resolves the remaining cold meshes to Actor pose work before caster eligibility
+
+Run 68 completed with 7,293 contiguous presented frames, 0--7292, totaling
+96.435 s. Its five session parts are **menu** 0--1897 (17.840 s), **load-game
+frame** 1898 (1,511.398 ms), **loading screen** 1899--2967 (9.492 s), **first
+world frame** 2968 (828.877 ms), and **play** 2969--7292 (66.763 s).
+
+F12 at **play** frame 6654 is still a reaction anchor, not proof that the
+nearest candidate is the felt event. The nearest candidate is frame 6644 at
+51.206 ms, ending 219 ms before the press; it has no Resource load and spends
+31.117 ms in the `Engine::Update` class. The normal-route loading transition
+is the earlier contiguous pair 6631/6632 at 108.875/133.833 ms, beginning
+740 ms and ending 498 ms before the press. That pair totals 242.708 ms. It is
+the same resource-plus-submission shape as the old marked transition, but the
+marker cannot by itself prove whether the reporter reacted to the pair or the
+nearer update frame. Neither is selected by whole-file `max()`.
+
+On frame 6631, 23 main-thread Resource calls / 26.846 ms partition exactly
+into 21 / 17.382 ms inside the `GraphicsShadowMapDx11::RenderDirectional`
+class and two / 9.464 ms outside it. The directional population is 20 `.msh`
+Resources / 16.419 ms plus one `.ssh` Resource / 0.963 ms. The complete mesh
+call durations include the mesh loader's own parsing, decompression, and
+buffer work, but not the two separately observed terrain `.tex` loads and not
+an unobserved bundle of mesh textures. There are zero directional `.tex`
+loads. The two outside calls are again the Gadir rocky-pebbles base/normal
+terrain pair; the exact `TerrainType` received `PreLoad(true)` in the
+**loading screen** at frame 2045 and its runtime owner was preloaded through
+frame 6630, yet both enter color material use in state 0. Run 67's reduction
+from thirteen onset textures to two therefore repeats, while the remaining
+pair again shows that one early queue request is not a residency guarantee.
+
+The retained caller evidence is complete: F12 emits 21 records from its
+120-frame **play** window, with no ring truncation. Twenty occur on frame 6631
+and one on frame 6641; every one entered state 0 with no pre-existing queue
+flag and has the same verified deepest subsequence:
+
+```
+Resource::EnsureAvailable return                 E+0x213137
+GraphicsMeshInstance::UpdatePose return          E+0x1765a2
+Actor::UpdateMeshInstance return                 E+0x112133
+Actor::AddToScene return                         E+0x111fda
+GraphicsShadowMapDx11::RenderDirectional virtual E+0x18ee1b
+```
+
+Static bytes select that sequence from the deliberately over-complete raw
+stack candidates. `0x1765a2` follows the `E8` from `UpdatePose` to
+`Resource::EnsureAvailable`; `0x112133` follows the `E8` from
+`Actor::UpdateMeshInstance` to `UpdatePose`; `0x111fda` follows the `E8` from
+`Actor::AddToScene` to `UpdateMeshInstance`; and `0x18ee1b` follows the
+directional renderer's virtual scene-add call. Other repeated candidates,
+including the earlier `RenderDirectional+0x113a`, are a raw-stack superset and
+are not promoted to callers merely because they look call-shaped. This proves
+the remaining meshes are admitted during the DX11 directional scene gather,
+before `GetNumShadowRenderPasses`; it does not support a stale-DX9-only label.
+
+The resource time is not the dominant bound. Frame 6631 spends 102.641 ms in
+the `Engine::Render` class and 52.733 ms in the game's `DrawIndexed` calls
+while submitting a 200.097 ms whole-GPU interval, including 101.390 ms in the
+directional-shadow class and 18.741 ms in the enhanced-grass class. Frame
+6632 has no Resource load but spends 84.977 ms in `DrawIndexed` and 9.459 ms
+in `Map`, producing a 117.300 ms `Engine::Render` interval. The CPU resource,
+CPU render, GPU, and following submission intervals overlap or queue behind
+one another and must not be added as independent costs.
+
+Run 67's unusually long **first world frame** did not repeat: this run is
+828.877 ms rather than 1,352.9 ms. It is a different session part and is not
+evidence for the **play** behavior. The passive caller retention also has no
+measurable steady-state regression. For collision-active, full-scene **play**
+frames under 60 ms with no Resource load or shadow-region change, Run 68 minus
+Run 67 mean frame differences are +0.104 ms at 500--999 indexed draws (1,155
+versus 1,168 frames), -0.265 ms at 1,500--1,999 (842 versus 751), and +0.051
+ms at 2,000-plus (223 versus 227). The corresponding GPU differences are
++0.100, -0.231, and +0.021 ms. No across-run p50 is used.
+
+The supported next test is not a mesh-system rewrite or broad preload. Move
+the existing cold-root decision to the exact `Actor::AddToScene` call before
+`UpdateMeshInstance`, queue state 0, and let the later exact-class gate omit
+the still-cold caster. That isolates both the measured 16.419 ms CPU load and
+any shadow draws those newly admitted meshes would have added. It leaves the
+color scene and all resident actors unchanged.
+
+The archived CSV is `tqflicker-frames.run68.csv`, SHA-256
+`f68a640d69949ffd4adc9e1ec346ca14939d6eb342754a5bd3a30df33542fec9`.
+The during-session log is `tqflicker-debug.run68.log`, SHA-256
+`0af78f91699c3da0791f3294a321d114e262f27e25cf338967fb3f3e81ceaba9`;
+the live files were byte-identical to those archives at capture.
+
+
+## 82. Run 69 setup: defer cold Actor roots before directional pose work
+
+Run 68 identifies an earlier exact boundary rather than a reason to rewrite
+the shadow system. All 20 cold mesh Resources on the marked **play** transition
+frame are synchronously ensured by `GraphicsMeshInstance::UpdatePose`, called
+from `Actor::UpdateMeshInstance`, called from `Actor::AddToScene`, while the
+verified `GraphicsShadowMapDx11::RenderDirectional` bracket is live. The
+accepted `GraphicsMeshInstance::GetNumShadowRenderPasses` root gate comes
+later; these roots have already reached state 2 by then and escape it.
+
+Run 69 adds `[performance] shadow_defer_cold_actor_pose=1`. It retargets only
+the direct `Actor::AddToScene -> Actor::UpdateMeshInstance` `E8` at RVA
+`0x111fd5`, inside a 23-byte verified caller window. An independent 24-byte
+callee window verifies the shared six-byte prologue, exported
+`Actor::UpdateMeshInstance` identity at `0x112060`, and the mesh instance at
+`Actor+0x184`. The wrapper follows that exact instance to its root Resource at
+`GraphicsMeshInstance+0x4`. On the main thread and inside the DX11 directional
+class only, state 0 is handed to the stock loader with the established
+`(priority=1, notify=true, immediate=false)` tuple and state 0/1 skips this one
+pose update. `Actor::AddToScene` still adds the renderable; the already
+accepted exact-class pass-count gate then returns zero until the root reaches
+state 2. Resident actors, the color class, point shadows, workers, and every
+other `Actor::UpdateMeshInstance` caller retain stock behavior.
+
+This test is not justified by 16.419 ms alone. Keeping those 20 roots cold at
+the later gate also omits their shadow draws from the transition frame, so it
+can affect part of Run 68's 101.390 ms directional GPU interval and the next
+frame's 84.977 ms `DrawIndexed` drain. The visual trade remains temporary
+missing local casters while the ordinary background request completes; check
+explicitly for shadow popping or missing actors. `shadow_split` is untouched.
+
+The switch defaults off, reaches `install()` with the performance probe off,
+and brings no trace group. Enabling it implies the complete later
+`shadow_defer_cold_alpha` patch set because skipping pose work without the
+later root rejection would be unsafe. With tracing already enabled, five new
+count-only `engine_shadow_actor_pose_*` columns record state and enqueue
+outcome; no engine duration is named `_ms` or charged to the mod.
+
+The exact caller/callee windows, field, call destination, export, option,
+directional/state predicates, enqueue tuple, activation dependency, rollback,
+and CSV identity are independently checked. `verify-sites.py` passes 454
+checks. Doctor, the release build, and the complete off-game self-test pass,
+including GPU timestamp retirement and the new default-off/no-trace and
+counter-partition tests. The mutation audit rejects all 87 one-at-a-time
+changes, including all 16 added for this boundary.
+
+Run 69 is built from `cache/runs/run69-defer-cold-actor-pose.ini`. Relative to
+Run 68, the only behavior variable changed is
+`shadow_defer_cold_actor_pose: 0 -> 1`; both accepted behaviors and the same
+four instruments remain enabled. The 710,656-byte installed DLL is
+byte-identical to the build at SHA-256
+`29f0f725734c3412e609e1b3b4afb69919c66a0e64d876fedfbd616cda6a6dd5`.
+The installed/source INIs are byte-identical at SHA-256
+`2f75bdc85228220473aa389d7cb9b2dd7769397110a91657676dce9e1776d6a7`.
+Run 68's live CSV/log matched their archives before removal and both stale live
+names are absent. The game was not launched. Run the same normal route, press
+F12 after the **play** transition, and report any visible missing actor or
+shadow pop separately from the transition's felt duration.
+
+
+## 83. Run 69 removes the synchronous directional mesh class; the remaining burst is submission/queue work
+
+Run 69 is archived as `tqflicker-frames.run69.csv`, SHA-256
+`38f95a3cd21c499e9057432f9447da1f15124e148210889382b4ed48c05a79ae`,
+and `tqflicker-debug.run69.log`, SHA-256
+`2b7d1ff73c04fc87926218f0b23a1681d89e7a115fc222086a64bd0ef23fa3ae`.
+Both archives were byte-compared with the live files. The CSV contains 7,406
+contiguous presented frames, 0--7405, totaling 95.087 s. Its five parts are
+**menu** 0--2013 (18.275 s), **load-game frame** 2014 (1,513.717 ms),
+**loading screen** 2015--3168 (10.125 s), **first world frame** 3169
+(915.749 ms), and **play** 3170--7405 (64.257 s).
+
+F12 at **play** frame 6826 again leaves two candidates that must not be
+collapsed. The nearest is frame 6825 at 65.694 ms, ending 17 ms before the
+marker; it has no Resource load and spends 46.309 ms in the `Engine::Update`
+class. The normal-route loading transition is the earlier contiguous pair
+6797/6798 at 95.290/120.984 ms, beginning 850 ms and ending 633 ms before the
+marker. It totals 216.274 ms. The marker does not by itself prove which the
+reporter felt.
+
+The new behavior does exactly the narrow operation it was built to test on
+frame 6797. In the `GraphicsShadowMapDx11::RenderDirectional` class it finds
+30 state-0 `GraphicsMeshInstance` Actor roots before pose work, confirms 23
+new queue insertions, and skips all 30 `Actor::UpdateMeshInstance` calls. The
+later exact-class gate omits all 30 roots. There is no enqueue failure on this
+frame. Directional synchronous Resource loads are **zero**, versus 21 calls /
+17.382 ms on Run 68's corresponding onset; that previous population was 20
+meshes / 16.419 ms and one shader / 0.963 ms. The directional CPU call falls
+from 19.318 to 5.146 ms. This is direct evidence that the earlier gate removes
+the targeted class, independently of total-frame variation.
+
+The only main-thread Resource work left on frame 6797 is two colour-terrain
+textures / 4.174 ms outside directional shadow, again the Gadir rocky-pebbles
+base/normal pair. One additional 0.977 ms Resource call is non-main. Frame
+6798 has no main-thread Resource load. Thus the deferred meshes did not merely
+reappear as synchronous directional work on the next frame.
+
+The pair is not fixed. Run 69 totals 159.309 ms in the game's `Draw` /
+`DrawIndexed` calls and 2.885 ms in `Map`, or 162.194 ms of the 216.274 ms
+pair. The two directional CPU calls total only 8.827 ms. Frame 6797 submits a
+168.095 ms whole-GPU interval, including 54.441 ms directional shadow,
+10.236 ms terrain ground, and 4.798 ms enhanced grass; the currently named GPU
+classes leave 97.007 ms unclassified. Frame 6798 then spends 97.651 ms in
+draw submission while its own GPU interval is only 28.044 ms. It also records
+23 off-main texture creations / 55.814 ms and 38.827 ms of archive inflate;
+those worker intervals overlap the frame and are not amounts to add. This is
+the established first-use GPU submission/backpressure shape, now with the
+cold directional mesh wait removed. It exists in D3D11 on native Windows as
+well as under CrossOver; the present run does not support a host-only cause.
+
+For scale only, the corresponding Run 68 pair was 242.708 ms. The observed
+Run-69 difference is -26.434 ms, but prior nominally identical transitions
+vary too widely to assign that whole delta to the behavior. The class-local
+zero and the 14.172 ms directional-CPU reduction are the stronger evidence.
+In collision-active, full-scene **play** frames under 60 ms with no Resource
+load or region change, Run 69 minus Run 68 mean frame/GPU differences are
+-0.008/-0.008 ms at 500--999 indexed draws (1,159 versus 1,141 frames),
++0.296/+0.281 ms at 1,500--1,999 (715 versus 831), and +0.259/+0.330 ms at
+2,000-plus (234 versus 222). The 1,000--1,499 population is only 42 versus 43
+frames and is not used. This excludes a gross steady-scene regression; it is
+not a fine improvement claim and no across-run p50 is used.
+
+One safety result needs correction before this becomes an accepted default.
+Across **play**, the Actor gate sees 255 state-0 roots and no state-1 roots.
+It confirms 76 new queue insertions; 14 were already linked to a queue. On
+frames 6920--7084, exactly one state-0 attempt per frame fails to establish
+either a nonzero state or a queue link, producing 165 consecutive
+`engine_shadow_actor_pose_enqueue_failed` events. The trace does not retain
+the Resource identity, so calling all 165 one object remains an inference,
+but the run proves the current code can keep omitting an unconfirmed root for
+several seconds. The safe policy is narrower: skip pose work only for state 1,
+an existing queue link, or a state-0 enqueue whose postcondition is confirmed;
+on failure, forward the stock `Actor::UpdateMeshInstance` call. That fallback
+does not affect frame 6797, where every attempted enqueue succeeds.
+
+Visual acceptance is still separate evidence. The completion message did not
+say whether a missing actor or shadow pop was seen, so this run does not claim
+that result. After the failure fallback and visual answer, the next useful
+instrument is a GPU-pass breakdown of the 97.007 ms unclassified interval,
+not another mesh/resource A/B and not another message-pump experiment.
+
+
+## 84. Post-Run-69 safety correction: an unconfirmed queue must take the stock pose path
+
+Run 69 proves the successful transition deferral, but its 165 consecutive
+enqueue-failure counters prove that the original failure policy was too broad.
+The behavior no longer equates "we called `EnqueueResource`" with "this root
+may safely be omitted." After the call it re-reads both verified fields. It
+skips `Actor::UpdateMeshInstance` only if the root is in loader state 1 or is
+state 0 with a non-null queue link. If the root has already reached state 2,
+it runs the stock pose update immediately; if it remains state 0 without a
+queue link, it records the failure and also runs the stock update. A resident
+caster therefore cannot be admitted with stale pose data, and an unqueueable
+caster cannot remain missing for many directional builds.
+
+This correction changes no byte site, offset, exported identity, enqueue
+tuple, or INI setting. The independently verified 23-byte
+`Actor::AddToScene` caller window and 24-byte `Actor::UpdateMeshInstance`
+callee window remain the complete binary surface. The source verifier now
+also requires both stock-forward branches before a deferred event can be
+counted and passes 456 checks. The mutation audit rejects all 91/91 relevant
+one-at-a-time changes, including the queue predicate and both stock fallbacks.
+The off-game self-test covers the exact queue
+postcondition for states 0, 1, and 2. `npm run doctor`, the release build, and
+the complete self-test pass, including GPU timestamp retirement. The resulting
+710,656-byte checkpoint DLL is SHA-256
+`8cd457072f927455b1f8a4bc4a2af3f399f6501235d268a2cd6c21935ad8ffba`.
+It is built but not installed; the game directory still contains the tested
+Run 69 DLL/configuration and its live files.
+
+
+## 85. Run 70 setup: partition first-use submission before changing texture admission
+
+Run 69's remaining **play** transition is not evidence that all 121 buffer
+creations and 23 off-main texture creations themselves cost 55.814 ms. The
+23 texture creations and their 55.814 ms belong to frame 6798; that frame also
+blocks 97.651 ms inside the game's `Draw` / `DrawIndexed` calls but has only a
+28.044 ms whole-frame GPU interval. The preceding frame 6797 has a 168.095 ms
+GPU interval, of which directional shadows, terrain ground, and enhanced grass
+name 54.441, 10.236, and 4.798 ms. The remaining 97.007 ms is merely unnamed,
+not yet proved to be texture upload, buffer admission, a particular deferred
+pass, or work submitted earlier. Those nested and adjacent intervals must not
+be added into a fabricated component total.
+
+Run 70 therefore adds a passive six-class partition of the exact
+`GraphicsDeferredRendererX::Render` class: geometry, shadow-map construction,
+light accumulation, resolve/AO, later scene lists, and post/fog/composite.
+Fourteen verified direct `E8` calls are changed with `patchCall`. Each group
+gets a whole-child-call count and engine duration ending in `_us`, the share of
+the existing game-owned `Draw` / `DrawIndexed` timing that occurs inside it,
+and one non-blocking GPU timestamp pair. A group with multiple calls measures
+GPU time from its first entry to last exit, so that GPU interval admits the
+small owner-code gaps it spans; its CPU and draw totals include only the
+direct calls. This is six GPU pairs per frame, not per-draw timestamping. The
+existing narrower `GraphicsShadowMapDx11::RenderDirectional`, terrain-ground,
+resource, archive, and off-main creation fields remain available for the same
+frame.
+
+The owner is the decorated export at Engine RVA `0x166130`, independently
+verified across 24 bytes. Every call verifies an original 16-byte window and
+its resolved destination before the first write. Every unique destination
+also verifies a separate 16-byte epilogue whose `ret` immediate agrees with
+the wrapper's explicit x86 argument count. Installation is atomic and rolls
+back all earlier calls if any later call fails. The exact sites, targets, and
+ABI tails are indexed in `disassembly-targets.md`. Trace group `65536` owns the
+instrument. It is selected by the usual `engine_trace=1`, and cannot install
+when the performance probe is off. No fix option, resource decision, shadow
+decision, or `shadow_split` behavior changes.
+
+The proposed lower-mip-first direction is technically coherent but is not the
+same experiment as rejected Stage 4.2. Stage 4.2 reduced archive read syscall
+count while leaving the same compressed blocks to read, inflate, and consume;
+it could not remove the first-use D3D resource realization seen here. A
+lower-mip-first texture path could reduce initial allocation/upload work and
+defer higher mip uploads. The existing progressive path cannot simply be
+switched on for archive textures, however: it retains a loose file's mapped
+bytes while later mip uploads consume them. Archive reads return decompressed
+data with a different owner and lifetime. Supporting them requires a bounded
+staging owner for copied or retained decompressed mip payloads, a resource
+ready-state rule, cancellation/eviction handling, and a later upload schedule.
+That is a contained archive-texture staging feature, not a complete shadow,
+frustum-culling, or renderer rewrite. It is worth prototyping only if Run 70
+assigns the transition to texture realization or its downstream geometry
+submission; otherwise it would again optimize a correlated count rather than
+the blocking producer.
+
+The verifier passes 583 checks, and all 716 one-at-a-time mutations of the new
+signature bytes, RVAs, relocations, routing tables, ABI counts, pass mappings,
+CSV names, and timing routes are rejected. Doctor and the release build pass.
+The complete off-game self-test passes, including GPU timestamp retirement;
+that one documented host-flaky assertion failed on the first two final runs
+and passed on the required rerun, while every new partition test passed on all
+three. Run 70 is built from
+`cache/runs/run70-deferred-pass-partition.ini`. Relative to the normal live
+configuration it keeps the three accepted behavior settings and enables the
+same trace, F12 marker, and draw timing as Run 69; the experimental delta from
+Run 69 is only the passive binary partition above. The installed/source DLLs
+match at 719,872 bytes, SHA-256
+`c069f5a0ca48e01c6ff1fc64b24c5de741c46d5751b3cbed6723cb40fff6d017`.
+The installed/source INIs match, SHA-256
+`f0af10a5f7c5e680ecf04f593008155edb95bbb4470fceef674e9f5956dea550`.
+Run 69's live CSV and debug log matched their archives before removal; both
+live names are absent, and the game was not launched.
+
+## 86. Run 70 ties the probably felt transition to geometry submission, not the nearest marker candidate
+
+Run 70 is archived as `tqflicker-frames.run70.csv`, SHA-256
+`4f8dac182590173fd9de4dd5c017dbe2d00c7a8619f23e85716174b178c18509`,
+and `tqflicker-debug.run70.log`, SHA-256
+`55bf83319b31272decec52255b0249539f5263a495927f5244313ba37b329c52`.
+Both archives were byte-compared with the during-session files. The CSV has
+7,883 contiguous presented frames, 0--7882. Its five parts are **menu**
+0--2572, **load-game frame** 2573, **loading screen** 2574--3677, **first
+world frame** 3678, and **play** 3679--7882.
+
+F12 is on **play** frame 7283. The automatic nearest candidate, frame 7282,
+ends only 17 ms before the marker, which the reporter correctly rejects as an
+impossible human reaction interval. The reporter identifies the earlier
+region-transition frame 7264 as **probably** the stutter and says it felt
+smaller in this run. Frame 7264 begins 583 ms before the marker and ends
+461 ms before it. This is the first user-selected, instrumented instance of
+the normal-route transition class; retain the reporter's uncertainty rather
+than converting “probably” into proof.
+
+Frame 7264 is a 122.155 ms **play** frame. `Engine::Render` takes 114.700 ms,
+`Engine::Update` 4.390 ms, and the `Game::PumpMessages` class 0.934 ms. The
+exact `GraphicsDeferredRendererX` direct-child partition assigns 52.406 ms to
+the geometry class, including 50.893 ms inside the game's own `Draw` /
+`DrawIndexed` calls. Shadow-map construction takes 7.656 ms; light
+accumulation 0.066 ms; resolve/AO 0.442 ms; later scene lists 1.032 ms; and
+post/fog/composite 0.297 ms. The six child classes total 61.899 ms, leaving
+52.801 ms elsewhere in `Engine::Render`; that remainder is not an owner-only
+routine and must not be presented as a new component. The frame's complete
+game-owned D3D timing is 52.243 ms in `Draw` / `DrawIndexed` and 2.450 ms in
+`Map`. The geometry children contain 97.4% of the draw block.
+
+The same frame changes from 219 to 1,555 indexed draws and admits 221 buffers;
+the 221 `CreateBuffer` calls themselves take only 1.765 ms. Sixteen
+main-thread, colour-render Resource calls take 30.218 ms: four meshes /
+2.913 ms and twelve textures / 27.305 ms. Fourteen main-thread
+`CreateTexture2D` calls take 22.610 ms. These clocks may nest inside the
+renderer partition and are not additive. The exact
+`GraphicsShadowMapDx11::RenderDirectional` class takes 7.442 ms, performs no
+synchronous directional Resource load, and defers 26 cold Actor-root
+`GraphicsMeshInstance` poses, confirming 19 new queue insertions. Thus the
+accepted shadow deferral is still operating while the probably felt event is
+dominated by the colour/deferred geometry submission class.
+
+For a matched reference, Run 70 has 774 collision-active, full-scene **play**
+frames under 60 ms with 1,500--1,999 indexed draws, no Resource call, and no
+region change. Their means are 23.926 ms frame, 18.812 ms `Engine::Render`,
+13.144 ms geometry-child CPU, and 10.356 ms geometry-child draw time. Frame
+7264 is therefore +39.262 ms in the exact geometry-child class and +40.537 ms
+in its game-owned draw calls. This is class-local evidence, not a comparison
+of route-dependent medians.
+
+The new GPU columns need one correction forward from §85. The engine invokes
+`GraphicsDeferredRendererX::Render` twice on these frames. Run 70 owns only
+one timestamp pair per group per frame, so each pair opens at the first
+group occurrence in the first owner invocation and closes at the last group
+occurrence in the second invocation. The reported 97.880, 116.898, 116.968,
+117.027, 118.037, and 118.478 ms spans consequently overlap and are **not six
+separable pass costs**. Do not sum them or use them to assign GPU work. The CPU
+and draw partitions remain exact sums of their scoped direct child calls.
+
+Frame 7282 remains real but is a separate, apparently unperceived **play**
+event: 73.550 ms total, with 54.816 ms in `Engine::Update`, while
+`Engine::Render` is 17.055 ms and draw submission 10.448 ms. It has no
+Resource load, region change, or main object wait. Its 68.261 ms whole-GPU
+interval can include an idle/submission gap while the CPU is stopped and does
+not prove 68 ms of active GPU work. Do not use this nearest frame to replace
+the reporter-selected transition.
+
+There is no gross steady-scene trace regression. Comparing only
+collision-active, full-scene **play** frames under 60 ms with no Resource call
+or region change, Run 70 minus Run 69 mean frame/GPU differences are
++0.189/+0.186 ms at 500--999 indexed draws (1,110 versus 1,159 frames),
+-0.158/-0.156 ms at 1,500--1,999 (774 versus 715), and +0.056/+0.013 ms at
+2,000-plus (232 versus 234). The 1,000--1,499 samples are only 39 and 42 and
+are not used. This excludes a large instrumentation cost; the mixed signs do
+not establish a fine change.
+
+The next passive trace should split the two geometry direct-call sites and
+the first/second `GraphicsDeferredRendererX::Render` invocations. It should
+also retain only slow `Draw` / `DrawIndexed` records, using the QPC sample the
+existing draw hook already takes, with draw kind, ordinal/index count, exact
+geometry call site, and owner invocation. Cheap tracking of the bound
+vertex/index buffers, shaders, and shader resources should be attached to
+those slow records; it should not issue per-draw GPU queries or state getters.
+GPU timestamps must be per invocation, preferably narrowed to the two geometry
+sites. Resource loads and D3D creation should likewise be tagged with the
+active owner invocation/site or owner gap. This will distinguish a small set
+of first-use draws that can be warmed or deferred from general queue
+backpressure.
+
+A bounded lower-mip-first archive path remains a plausible contained fix for
+the twelve colour textures and later worker uploads, but it cannot by itself
+explain the 221 buffer admissions or the 50.893 ms geometry draw block.
+`CreateBuffer` allocation is only 1.765 ms, so this result does not reopen the
+closed buffer-pooling route. The evidence supports a narrow colour-scene
+admission/warmup fix if the next trace identifies stable slow draws; it does
+not support rewriting the shadow system, frustum culling, or deferred
+renderer.
+
+
+## 87. Run 71 setup: split the two deferred owners and retain the slow geometry draw identities
+
+Run 70 did not justify another behavior A/B. The reporter identifies **play**
+frame 7264 as probably felt; its exact `GraphicsDeferredRendererX` geometry
+children spend 50.893 ms blocked in the game's `Draw` / `DrawIndexed` calls,
+but the first trace merges the two `GraphicsDeferredRendererX::Render`
+invocations in its GPU spans and retains no identity for the slow draws. Run
+71 is therefore passive instrumentation only. It changes no Resource state,
+scene admission, shadow eligibility, frustum, draw, or upload behavior.
+
+The owner is not detoured at its shared six-byte prologue. The complete static
+callgraph has one direct caller, unexported `FUN_1017ead0`; its call at RVA
+`0x17fc9b` is changed with `patchCall`. A 24-byte window beginning at
+`0x17fc8b` proves the call and its surrounding argument setup, while a separate
+20-byte tail at `GraphicsDeferredRendererX::Render+0x49f` (RVA `0x1665cf`)
+ends in `ret 0x1c` and proves seven explicit stack arguments. The exported
+owner entry remains independently verified across 24 bytes. The owner call,
+all fourteen direct-child calls, and all thirteen unique callee ABI tails are
+verified before the first write; any failed child patch restores the owner and
+all prior children.
+
+Each frame numbers owner invocations one and two and exposes overflow rather
+than silently folding a third call into either. The exact geometry setup site
+at `0x1663a8` and scene-list site at `0x166412` now have separate CPU,
+game-owned draw, and non-blocking GPU fields for each invocation. These four
+GPU query pairs begin and end within one direct child call, correcting Run
+70's overlapping six-span design. The older six CPU/draw totals remain for
+continuity; the old six GPU names are removed because their values were not
+separable pass costs.
+
+Synchronous `ResourceLoader::LoadResource`, `CreateTexture2D`, and
+`CreateBuffer` work on the main render thread is partitioned into six
+locations: setup, scene, or other owner work in invocation one or two. All
+game durations end in `_us`. D3D creation reuses the timing sample already
+taken by its hook. Off-main texture creation cannot be assigned to a main
+owner stack and remains in its existing off-main class rather than receiving a
+false invocation.
+
+For the reaction window, Run 71 retains only the twelve slowest geometry draws
+per frame in a fixed 128-frame ring. F12 selects at most eight frames from the
+preceding 120 whose geometry-draw sum is at least 15 ms. Each retained draw
+records invocation, exact setup/scene site, draw kind and arguments, the first
+four vertex-buffer bindings, index buffer, vertex and pixel shader, and first
+eight pixel shader resources. Those identities are maintained by the game's
+existing D3D setter calls; `Draw` and `DrawIndexed` issue no state getter, new
+clock read, or GPU query. A fixed 4,096-entry successful-creation ring can
+associate the bound vertex/index buffer with its creation frame and descriptor;
+the F12 report also lists at most 32 texture creations on each selected frame.
+No formatting or file write occurs on the candidate frame itself.
+
+The exact-site verifier now passes 602 checks. It re-reads both new on-disk
+windows and checks the owner ABI, patch order and rollback, invocation/site
+mappings, all CSV names and units, setter vtable slots, reuse of existing
+timing samples, and every retention bound. A fresh mutation audit rejects all
+190/190 one-at-a-time Run-71 byte, bound, name, mapping, and route changes;
+the prior Run-70 audit remains 716/716. Doctor, the 732,160-byte release build,
+and two complete off-game self-test runs pass, including GPU timestamp
+retirement on both runs.
+
+The installed/source Run-71 DLLs are byte-identical at 732,160 bytes and
+SHA-256
+`bf1e4691c0a897b40acf17aa259a3ad4daa24dec3c9a8051c01e1ab5c60ace40`.
+The installed/source `run71-deferred-geometry-identity.ini` files are
+byte-identical at SHA-256
+`dd063f9164acbdfee266356e20c25187e353517cb8d469d9e78029c22a5c4868`.
+Run 70's live CSV matched its archived SHA-256 before removal; the stale live
+CSV is absent and the game was not launched.
+
+Run the same five-part route and press F12 after the felt **play** transition.
+The result should say whether invocation one or two and setup or scene owns the
+block, whether a few repeated draw/resource identities dominate, and whether
+their buffers or textures were created on that frame. Only then choose among
+targeted warming, bounded colour-scene admission, or brief deferral of exact
+cold colour renderables. This does not reopen the message pump, buffer pooling,
+or the rejected broad prefetch routes.
+
+
+## 88. Run 71 isolates the felt transition's wait point in second-owner geometry/grass submission
+
+Run 71 is archived as `tqflicker-frames.run71.csv`, SHA-256
+`16a4c1c7c117aa8a24e47ba4a77f96703425b2665036bf700be5b93674bdceee`,
+and `tqflicker-debug.run71.log`, SHA-256
+`8a26253fb3cc524066f201b76fb5920ac115f419ca6763a735f2ab93e7c4abcf`.
+Both archives were byte-compared with their completed live files. The CSV has
+7,269 contiguous presented frames, 0--7268. Its five parts are **menu**
+0--1975, **load-game frame** 1976, **loading screen** 1977--3121, **first
+world frame** 3122, and **play** 3123--7268.
+
+The reporter felt a little stutter and pressed F12 on **play** frame 6703.
+Frame 6702 ended only 21 ms before the marker, so it cannot be selected as a
+human reaction; it is a separate 80.524 ms frame with 61.601 ms in the exact
+`Engine::Update` class. The normal-route region transition is **play** frames
+6679/6680 at 82.592/51.919 ms. They ended 600/548 ms before F12 and are
+therefore the probable felt pair, preserving the reporter-derived
+qualification rather than claiming the marker proves it.
+
+The first transition frame isolates the render-thread wait point. On **play**
+frame 6679, `Engine::Render` takes 74.693 ms. The two exact
+`GraphicsDeferredRendererX::Render` owners are observed with no overflow. Its
+geometry children take 43.901 ms, including 42.098 ms in the game's
+`Draw`/`DrawIndexed` calls. Specifically, second-owner geometry scene at call
+site `0x166412` takes 42.545 ms and contains 42.073 ms of that draw blocking;
+first-owner setup is 0.465/0.006 ms CPU/draw and second-owner setup is
+0.891/0.019 ms. Thus 99.9% of the geometry draw wait and 96.9% of geometry CPU
+are in one exact invocation/site.
+
+This is not 42 ms of GPU execution by that scene child. Its exact non-blocking
+GPU interval is 6.554 ms. The whole-frame GPU interval is 95.113 ms, while the
+narrower `GraphicsShadowMapDx11::RenderDirectional`, terrain-ground, and
+enhanced-grass intervals are 35.622, 13.456, and 6.554 ms respectively. These
+intervals are not additive where nested. The second-owner geometry-scene and
+`TerrainRenderInterfaceRT::RenderGrass` GPU intervals are identical on this
+frame, locating the scene child around that live grass class.
+
+The carry-over frame makes the queue interpretation stronger. **Play** frame
+6680 has no main-thread Resource load and no buffer creation, yet second-owner
+geometry scene still takes 24.116 ms and blocks 23.687 ms in the game's draw
+calls. Its GPU interval is only 1.411 ms, identical to the nested enhanced-grass
+interval, and its whole-frame GPU interval is 24.096 ms. Four off-main texture
+creations take 4.334 ms; they cannot explain the main thread entering a single
+game draw for 9.574 ms. The driver calls are acting as drain/backpressure
+points for work admitted earlier, not pricing only the draw whose call happens
+to wait.
+
+Against 43 collision-active, full-scene **play** rows under 60 ms in the same
+1,000--1,499 indexed-draw band, with no Resource call or region change, the
+mean is 22.683 ms frame, 17.765 ms `Engine::Render`, 12.076 ms geometry CPU,
+and 10.429 ms geometry draw. Frame 6679 is +31.825/+31.669 ms in the latter
+two exact classes; frame 6680 is +13.592/+13.292 ms. The second-owner scene
+alone accounts for those increases. This is a within-run matched full-scene
+comparison, not an across-run median.
+
+The retained draws show concentration, not an intrinsically slow mesh. On
+frame 6679, one second-owner scene `DrawIndexed` call waits 26.765 ms and the
+next waits 7.526 ms: together 34.291 ms, 81.5% of the exact scene draw wait.
+They use the same index buffer, vertex shader, pixel shader, and pixel resource,
+with different two-stream vertex buffers. The worst draw's vertex buffer
+appears again on frame 6680 and waits only 0.944 ms. That large variance for
+the same binding identity is further evidence that the recorded call is where
+the queue drains, not that its 198 indices inherently cost 26.765 ms.
+
+First-use admission still supplies the upstream burst. Frame 6679 performs
+two exact colour-terrain Resource loads, the Gadir rocky-pebbles base and
+normal textures, totaling 8.523 ms; four main-thread texture creations take
+6.496 ms, and 91 buffer creations take only 0.801 ms. All occur outside an
+active `GraphicsDeferredRendererX::Render` owner. In the same frame the
+enhanced-grass class adopts 35 new grass streams, creates 35 twins, and issues
+38 cross draws alongside 39 original grass draws; its measured mod CPU costs
+are only 3.327 ms fill and 0.090 ms cross submission, but the extra draws and
+overdraw can deepen the GPU/driver queue before a later original game draw
+blocks. This can amplify a native-game transition without being a Wine-only
+cause; the base game still admits the terrain and original grass scene.
+
+One limitation is corrected forward. The Run-71 creation ring intentionally
+accepted only creations inside an owner. Because this transition's 91 buffers
+and four main-thread textures were all created before/outside the owner, every
+slow draw reports `new -1`; that means “not found in the owner-only ring,” not
+“old resource.” The trace successfully names the consumer/wait point but does
+not yet map the outside-owner producer buffers to it.
+
+The cheapest discriminating next run is an A/B with only the optional
+`Graphics` enhanced-grass behavior changed to original, while retaining the
+same trace and all accepted shadow/terrain behavior. This is not a proposal to
+remove enhanced grass permanently. If the probable **play** transition falls
+substantially, the proper fix is to budget activation of newly adopted grass
+twins/cross draws across later frames, leaving original grass visible
+immediately. If it does not, restore enhanced grass and extend identity capture
+to all main-thread same-frame buffer creation plus SRV-to-texture mapping
+outside the deferred owner. Neither result calls for rewriting shadows,
+frustum culling, or resource loading wholesale.
+
+Run 72 is installed for that A/B. Its settings are byte-for-byte Run 71 except
+for `grass=enhanced -> grass=original`; the accepted shadow/terrain behavior
+and full owner-exact trace remain enabled. The unchanged installed/source DLL
+is 732,160 bytes, SHA-256
+`bf1e4691c0a897b40acf17aa259a3ad4daa24dec3c9a8051c01e1ab5c60ace40`.
+The installed/source `run72-grass-original-ab.ini` SHA-256 is
+`d655f091ca5d0be4ffd287598a3446f915843a3c21960c0e9c9b07b96c2f294e`.
+Run 71 was archived and byte-compared before its live CSV was removed; the
+Run-72 live CSV is absent and the game was not launched.
+
+
+## 89. Run 72 plus the complete flow map place terrain first-use work in reflection rendering
+
+Run 72 is archived as `tqflicker-frames.run72.csv`, SHA-256
+`8039a9243cd88555c222581e9cc599092e74e0c17f8459d84b2eb98096eb102d`,
+and `tqflicker-debug.run72.log`, SHA-256
+`ccae2b8d088bbc4f6989edebeaf873fe025c24fb2c8d4b2a0157edff1320d9a7`.
+Both archives were byte-compared with their completed live files. The CSV has
+8,102 contiguous presented frames, 0--8101. Its five parts are **menu**
+0--1979, **load-game frame** 1980, **loading screen** 1981--3098, **first
+world frame** 3099, and **play** 3100--8101.
+
+F12 is on **play** frame 7318. Frame 7317 ended only 14 ms before the marker,
+so it cannot be selected as a human reaction; it is a separate 62.312 ms
+frame with 48.462 ms in the exact `Engine::Update` class. The normal-route
+transition is the **play** triplet 7295/7296/7297 at
+46.065/117.857/64.646 ms, ending 575/457/392 ms before F12. The reporter only
+said that the run was done, so this is a probable marker-associated triplet,
+not a claim about which frame was felt or its subjective size.
+
+Changing only `Graphics` enhanced grass to original grass did not remove the
+transition. It changed where the driver queue drained. On **play** frame 7296,
+the second `GraphicsDeferredRendererX::Render` invocation's so-called geometry
+setup call at `0x1663a8` takes 26.799 ms, including 25.748 ms blocked in the
+game's `Draw`/`DrawIndexed` calls, while its exact GPU interval is 4.825 ms.
+One retained `DrawIndexed` accounts for 25.275 ms. The adjacent second-owner
+geometry scene takes only 0.487 ms / 0.204 ms game draw, with a 0.073 ms GPU
+interval. Thus Run 71's enhanced-grass scene was an amplifier and drain
+location, not the necessary producer of the native transition.
+
+The producer begins one **play** frame earlier. Frame 7295 performs 66 buffer
+creations / 0.648 ms, ten main-thread texture creations / 4.980 ms, and nine
+`ResourceLoader::LoadResource` calls / 21.465 ms. Eight exact terrain texture
+loads / 20.226 ms occur in `Engine::Render` outside every active
+`GraphicsDeferredRendererX::Render` owner. It changes the directional-shadow
+region, but the exact `GraphicsShadowMapDx11::RenderDirectional` class takes
+only 4.038 ms and performs zero Resource loads. Its whole-frame GPU interval
+is 196.066 ms, including 54.590 ms in that directional-shadow class and
+10.990 ms in the `TerrainRenderInterfaceRT::RenderGround` class; nested GPU
+intervals must not be added.
+
+Frame 7296 then has a 117.857 ms total and 98.157 ms in `Engine::Render`. The
+game's draw calls block for 26.475 ms, 33 off-main `CreateTexture2D` calls take
+37.104 ms, progressive upload work takes 13.487 ms, and the enhanced-bloom
+class takes 53.466 ms CPU while the whole-frame GPU interval is only
+22.501 ms. These clocks overlap through submission and backpressure. Frame
+7297 is the tail: 64.646 ms total, with 32.706 ms in the game's `Present`
+call and only 16.764 ms in its whole-frame GPU interval. This is the same
+producer-then-drain shape as earlier runs, with different API calls absorbing
+the waits.
+
+Within Run 72, the matched reference is 58 collision-active, full-scene
+**play** frames below 60 ms in the 1,000--1,499 indexed-draw band, with no
+Resource call or region change. Their means are 16.736 ms total,
+12.413 ms `Engine::Render`, 2.393 ms game draw submission, 2.844/1.355 ms in
+the exact deferred geometry classes' CPU/draw clocks, and 2.161/1.073 ms in
+the second-owner geometry-setup CPU/draw clocks. Relative to those same-run
+means, frame 7296 adds 101.121 ms total, 85.744 ms `Engine::Render`,
+24.082 ms game draw submission, and 24.638/24.675 ms in that exact
+second-owner geometry-setup CPU/draw class.
+
+Original grass does reduce steady full-scene **play** cost, although the two
+routes are not composition-identical. For collision-active full-scene
+**play** frames below 60 ms, Run 72 minus Run 71 means in the 1,000--1,499
+indexed-draw band (43 / 58 rows) are -5.947 ms total, -5.352 ms
+`Engine::Render`, -8.529 ms game draw submission, and -5.120 ms whole-frame
+GPU. In the 1,500--1,999 band (768 / 1,235 rows), they are -8.396, -8.035,
+-8.387, and -8.405 ms in those same exact classes. In the 2,000-plus band
+(239 / 347 rows), they are -9.644, -9.301, -11.204, and -9.526 ms.
+
+These are matched-class means, never cross-run p50s. Different route and
+indoor/outdoor shares prevent treating the deltas as a precise grass price;
+they are enough to show a steady cost and not enough to explain away a
+117.857 ms **play** transition that persists without enhanced grass.
+
+The fresh static reconstruction supplies the missing owner. The generated
+resource audit was broad but had not been interpreted end to end. It is now
+regenerated from 205 explicit roots as a 1,592-function closure, and
+`research/streaming/disassembly-targets.md` records the verified chain:
+`GraphicsPortalRenderer::Render` recursively visits visible portal/region
+branches; every DX11 branch calls
+`GraphicsReflectionManager::RenderReflections` before region admission and
+before its `GraphicsDeferredRendererX::Render`; each visible water reflection
+uses a `GraphicsForwardRenderer`, builds a reflected scene, and executes the
+shared sorted render-list helper.
+
+The eight frame-7295 terrain stacks prove this is not merely a plausible
+caller. From `TerrainType::SetShaderParams`, they return through the
+renderable virtual at `0x1885b4`, the shared list at `0x17ab1b`,
+`GraphicsForwardRenderer::RenderLightStyle` at `0x179ba6`, the reflection
+forward helper at `0x186952`, the per-plane loop at `0x1872c0`, and the branch
+reflection call at `0x17f2d8`. Therefore those exact **play** terrain loads
+belong to reflection forward rendering, not to either deferred owner. The
+second correction is that deferred “geometry setup” callee `0x1653a0` also
+builds and executes a sorted scene list; its historical label must not be read
+as state setup only.
+
+No wholesale renderer rewrite is justified. The next run should be passive
+attribution, not another behavior A/B: patch the unique reflection-manager
+call at `0x17f2d3` and its per-plane call at `0x1872bb`, tag existing Resource,
+D3D-creation, and game-draw samples as reflection versus deferred branch, and
+capture bounded CPU/draw/GPU totals per branch and reflection plane. Restore
+the desired enhanced-grass mode for that trace; its cost is real, but Run 72
+rejects it as the necessary cause. If the 196.066 ms **play** GPU producer is
+inside reflection rendering, the workable fix boundary is reflected-scene
+admission or reflection update budgeting. If it is outside, the new bracket
+will exclude that class before any further decompilation or behavior change.
+
+The expanded verifier checks all 18 new flow windows across 16--24 bytes,
+their eight direct-call destinations, the renderable virtual slot, and every
+documented RVA. It passes 647 checks, and 72/72 one-at-a-time perturbations of
+the new window RVAs, byte strings, call sites, call targets, dispatch, and
+documented RVAs are rejected. No runtime table or installed binary was changed
+for this static reconstruction. `npm run doctor`, the release build, and the
+complete off-game self-test pass; the game was not launched.
+
+
+## 90. Run 73 prepared: isolate recursive branch reflections without changing rendering
+
+Run 72 and the verified static return chain identify reflection forward
+rendering as the immediate owner of its eight terrain texture loads, but they
+do not yet say which recursive DX11 portal/region branch or water plane owns
+the CPU, draw-submission, and GPU producer. Run 73 is the narrow passive trace
+for that question. It restores the desired `Graphics` enhanced-grass mode;
+Run 72 rejected original grass as a solution because the **play** transition
+remained, although it showed that enhanced grass amplifies steady rendering
+cost. No shadow, terrain, culling, resource-loading, or reflection decision is
+changed.
+
+The trace patches two unique E8 sites, not either shared function prologue.
+The branch call at `0x17f2d3` reaches exported
+`GraphicsReflectionManager::RenderReflections` at `0x187270`; its 24-byte
+caller window, 21-byte entry, and independent `ret 0x08` tail verify before a
+write. The manager call at `0x1872bb` reaches the per-plane forward-render
+helper at `0x1861d0`; its 20-byte caller window, relocation-aware 20-byte
+entry, and independent `ret 0x0c` tail verify. The two patches install
+atomically and restore in reverse. These independently prove the manager's
+`thiscall` receiver plus two explicit arguments and the plane helper's three
+stack arguments.
+
+The first two manager invocations in a frame and the first two planes in each
+manager receive exact CPU and game-draw `_us` counters plus non-blocking GPU
+intervals. Existing `ResourceLoader::LoadResource`, `CreateTexture2D`, and
+`CreateBuffer` samples are tagged in the same four plane cells; whole-manager
+totals retain work outside a plane. A third manager or plane is visible in an
+explicit overflow counter rather than folded into the bounded identities.
+F12's retained Resource records also carry the exact manager/plane numbers.
+Manager and plane intervals nest and must not be added. All reflection context
+is main-thread context: off-main texture creation stays
+unassigned rather than borrowing a stale scope, and must be correlated by
+frame timing.
+
+This run can distinguish the exact `GraphicsReflectionManager` / reflection
+forward-render class from the following
+`GraphicsDeferredRendererX::Render` class during the reporter-selected
+**play** transition. It does not assume that the largest frame or the frame
+immediately before F12 was felt. The five session parts must again be reported
+as **menu**, **load-game frame**, **loading screen**, **first world frame**,
+and **play**, and any comparison remains limited to matched full-scene
+**play** frames below 60 ms.
+
+The final verifier passes 681 checks. A dedicated mutation audit changes every
+byte in the six new caller/entry/tail tables one at a time, both call offsets,
+all RVA and relocation constants, the decorated export, every CSV/GPU name and
+enum mapping, installation/rollback routes, the main-thread gate, and the
+self-test oracle; all 280/280 mutations are rejected. `npm run doctor`, the
+738,816-byte release build, and the complete corrected off-game self-test pass,
+including GPU timestamp retirement on the first valid run. The self-test first
+caught a missing neutral reflection argument in an existing test helper, then
+caught the new oracle reading the preceding frame; both test-only defects were
+fixed before this pass.
+
+Run 73 is installed. The source and game-directory DLLs are byte-identical at
+SHA-256
+`e4a0195a7c5bb04a5062e1b231fc3b2897ac2223176ea1e6faf9c5ab9d8cc4b7`;
+the source and installed INIs are byte-identical at SHA-256
+`6c3b1e7a9eb7779914da43ec8daa52af3422b5e4e664c2011a89f583c059f08d`.
+Run 72's live CSV and debug log matched their archived files before deletion.
+The Run-73 live CSV and debug log are absent, and the game was not launched.
+
+
+## 91. Run 73: reflection and directional shadows jointly produce the play burst
+
+Run 73 is archived as `tqflicker-frames.run73.csv`, SHA-256
+`7f78a2f4dd18e5d4d75b1b771bde17e93de08445be61a7867103a5a347a6d948`,
+and `tqflicker-debug.run73.log`, SHA-256
+`7008890e94d2726c6b33c62891e197f851a0700435ebe38c644997d8b36efba1`.
+Both archives were byte-compared with their completed live files. The CSV has
+7,356 contiguous presented frames, 0--7355. Its five parts are **menu**
+0--2083, **load-game frame** 2084, **loading screen** 2085--3156, **first
+world frame** 3157, and **play** 3158--7355.
+
+F12 is on **play** frame 6775. Frame 6774 ends only 18 ms before the marker;
+it cannot be selected as a human reaction target and is a separate 44.949 ms
+frame with 25.166 ms in the exact `Engine::Update` class. The normal-route
+transition is **play** frames 6752/6753 at 101.205/136.010 ms, ending 635/499
+ms before F12. The reporter did not describe the subjective size, so this is
+the probable marker-associated pair rather than an assertion that either
+frame was felt.
+
+Frame 6752 proves that reflection is a real producer, but not the only one.
+The first manager invocation has no reflection plane and costs 0.002 ms. The
+second recursive DX11 branch's first water-plane forward renderer costs
+20.826 ms CPU and 53.770 ms GPU; its enclosing exact
+`GraphicsReflectionManager::RenderReflections` class costs 20.918 ms CPU and
+the same 53.770 ms GPU. Inside that plane are two main-thread terrain texture
+loads / 9.545 ms, four texture creations / 7.878 ms, and 69 buffer creations /
+0.584 ms. The load and creation clocks nest inside the plane and must not be
+added. The Resource identities are
+`gadir_rockypebbles01.tex` / 5.229 ms and
+`gadir_rockypebbles01normal.tex` / 4.316 ms, both in the exact
+`TerrainBlock -> GraphicsForwardRenderer::RenderLightStyle` reflection chain.
+
+The exact `GraphicsShadowMapDx11::RenderDirectional` class on the same
+**play** frame costs only 6.162 ms CPU but 84.698 ms GPU. It performs zero
+nested Resource load. The accepted exact `GraphicsMeshInstance` mitigation
+successfully defers 38 cold Actor-root poses and omits 38 cold root meshes
+(37 state 0, one state 1), so this is not the synchronous cold-root class that
+Runs 68--69 removed. Whole-frame GPU reaches 202.410 ms. The second
+`GraphicsDeferredRendererX::Render` geometry-scene class then takes 60.647 ms
+CPU, including 60.178 ms blocked in game `Draw`/`DrawIndexed`; one draw waits
+44.066 ms. These classes execute in order and overlap through GPU submission;
+their durations are not additive.
+
+Frame 6753 is the drain. Its exact second reflection-plane class is back to
+0.924 ms CPU / 0.161 ms GPU, directional GPU is 7.870 ms, and whole-frame GPU
+is 23.160 ms. Nevertheless `Engine::Render` costs 129.589 ms and game draw
+submission costs 120.461 ms. The exact second-owner deferred geometry-scene
+class contains 119.964 ms of it. Its two worst `DrawIndexed` calls wait 67.111
+and 36.786 ms. Seventeen off-main texture creations / 15.338 ms happen beside
+the drain; their clocks are not assigned to the earlier main-thread reflection
+scope.
+
+This is not a raw draw-count spike: frames 6752 and 6753 issue 1,421 and 1,418
+indexed draws. The matched same-run reference is 45 collision-active,
+full-scene **play** frames below 60 ms in the same 1,000--1,499 indexed-draw
+band, with no Resource load or shadow region change. Their means are 22.030 ms
+total, 17.585 ms `Engine::Render`, 10.994 ms game draw submission, 0.715 ms
+reflection-manager CPU, 0.127 ms second-plane reflection GPU, 6.953 ms
+directional-shadow GPU, and 10.524 ms in second-owner geometry-scene game
+draws.
+
+Relative to those matched means, frame 6752 adds 79.175 ms total, 77.568 ms
+`Engine::Render`, 50.139 ms game draw submission, 20.203 ms reflection CPU,
+53.643 ms reflection GPU, 77.745 ms directional-shadow GPU, and 49.654 ms in
+the exact second-owner geometry-scene game-draw class. Frame 6753 adds only
+0.034 ms second-plane reflection GPU and 0.917 ms directional-shadow GPU, but
+adds 109.467 ms game draw submission and 109.440 ms in that exact deferred
+geometry-scene draw class. These are within-run matched-class means, never
+cross-run p50s.
+
+The exceptional GPU attribution is not a normal fluctuation. Reflection GPU
+on frame 6752 is the largest **play** value at 53.770 ms; the next is 2.753 ms.
+Directional-shadow GPU is likewise the largest at 84.698 ms; the next is
+13.266 ms. Both candidate frames contain exactly two manager invocations, only
+the second has one plane, and both overflow counters are zero. Across all
+**play**, 83 other frames expose a third manager and plane through the explicit
+overflow counters, but that bounded limitation does not affect this pair.
+
+The corrected diagnosis is a first-use multi-pass admission burst: reflection
+forward rendering and directional shadows both produce exceptional GPU work
+on frame 6752, then second-owner deferred color draws absorb the queue drain
+on frames 6752--6753. The static order and 69 reflection-contained buffer
+creations make it plausible that newly admitted geometry is consumed by all
+three passes, but Run 73 does not preserve those buffer identities across the
+later shadow and color draws. That overlap remains an inference, not a
+measurement.
+
+A wholesale shadow, frustum, resource-loader, or renderer rewrite is not
+supported. The next passive run should retain a bounded cross-frame table of
+main-thread buffer creations, reuse the already tracked IA bindings at each
+game draw, and classify use as exact reflection plane, exact
+`GraphicsShadowMapDx11::RenderDirectional`, or exact deferred owner/site. It
+should also bracket the already verified reflection `BuildScene` and
+`RenderLightStyle` calls and count directional draws. It needs no per-draw GPU
+queries, state getters, or additional clock reads. If the same fresh buffers
+cross all three classes, stage newly admitted renderables so the normal color
+pass consumes them first and reflection/shadow participation follows over
+later frames. If they do not, the child brackets separate reflection budgeting
+from a resident-caster directional-shadow budget. This does not reopen any
+closed pump, archive-cache, generic-prefetch, pooling, lock, sleep, Stage 5, or
+libdeflate route, and `shadow_split` remains untouched.
+
+
+## 92. Run 74 prepared: prove or reject the shared first-use population
+
+Run 73 established the order of the **play** transition but left one factual
+gap: 69 buffers are created inside the exact second-manager/first-plane
+reflection class, directional-shadow GPU work then becomes exceptional, and
+the exact second deferred owner's geometry-scene draws block, but pointer
+identity was not retained between those classes. Run 74 is a passive identity
+trace for that gap. It changes no culling, scene admission, resource loading,
+reflection, shadow, or color-render decision.
+
+Every successful main-thread D3D11 buffer creation is retained in a fixed
+4,096-record ring for 120 frames with byte width, bind flags, and its exact
+creation context. An 8,192-slot index bounds each draw-time lookup to 16
+pointer probes; index saturation has its own counter. The existing IA setter
+snapshot already holds four vertex buffers and the index buffer. After each
+already-timed game draw, Run 74
+deduplicates those five identities and classifies their use as one exact
+reflection manager/plane, the exact
+`GraphicsShadowMapDx11::RenderDirectional` class, or one exact
+`GraphicsDeferredRendererX::Render` owner/pass/site. Directional use takes
+precedence over its enclosing deferred owner. Per-frame counters record the
+first use of each fresh buffer in each family and the exact moment it first
+joins reflection+shadow, reflection+deferred, shadow+deferred, or all three.
+The 4,096-entry ring reports any overwrite still inside the 120-frame horizon.
+F12 writes up to 128 joined identities during the session, including creation
+and first-use frames and exact reflection/deferred contexts, and explicitly
+reports omitted output and recent ring eviction.
+
+This adds no per-draw clock read, GPU query, or D3D state getter. It reuses the
+single Draw/DrawIndexed duration sample and state-setter snapshot already
+required by Runs 71--73. The sole additional GPU query pairs are coarse child
+scopes around the already verified per-plane `BuildScene` and
+`RenderLightStyle` calls. Their unique `E8` sites are Engine RVAs `0x186501`
+and `0x18694d`. Both use `detour::patchCall`; before either write, the runtime
+verifies each 16--24-byte caller window, relocation-aware exported entry, and
+independent callee-cleanup tail. `BuildScene` at `0x17d9d0` ends in `ret 0x04`
+and `RenderLightStyle` at `0x179a40` ends in `ret 0x10`. The four reflection
+manager/plane cells each receive separate child count/CPU-`_us`/GPU fields.
+Directional draws receive a count under the already verified directional
+scope.
+
+The trace activates only if the reflection, child, directional, deferred-owner
+and D3D binding dependencies are all live. Group 131072 owns it and pulls in
+the two exact scope dependencies when selected alone; `engine_trace=1` already
+selects everything. Failure leaves the cross-pass columns at zero and logs the
+trace unavailable rather than emitting a partial class. All retained state is
+bounded and pointer-only; no COM object is dereferenced or retained.
+
+The decision after the run is binary. If the candidate **play** frame gains a
+large `engine_crosspass_join_all_three`, the supported fix boundary is staged
+scene participation: make newly admitted renderables visible to the normal
+color class first, then admit those same identities to reflection and
+directional shadows over later frames. If the join stays zero without a recent
+eviction, the shared-population explanation is rejected and the child brackets
+separate reflection `BuildScene` budgeting from resident-caster directional
+shadow budgeting. Either result is more specific than a renderer, frustum,
+shadow-system, or resource-loader rewrite.
+
+The verifier passes 712 checks. A clean-baseline one-at-a-time audit rejects
+all 150/150 new byte, RVA, relocation, ABI, and retention-bound mutations.
+`npm run doctor`, the 748,032-byte release build, and the complete off-game
+self-test pass; the documented GPU timestamp-retirement check failed once
+with `stamps=0` and passed on the required immediate rerun with `stamps=1`.
+The installed/source DLL SHA-256 is
+`a419046fb76d351d6f5d2f7fc10021b3b36edaaa7473054e848873265d7577d9` and the
+installed/source Run-74 INI SHA-256 is
+`f2534e7ee34207f93ec43761706276627f46bab4a26e6ddd383776ac0309113d`.
+Both pairs are byte-identical; the stale live CSV is absent and the game was
+not launched.
+
+## 93. Run 74 rejects a large shared-buffer population and splits the two GPU producers
+
+Run 74 is archived as `tqflicker-frames.run74.csv`, SHA-256
+`7d6da968ffd189a09efe382be9ae72dcb4cd6d63028f5b1114b72e788735f0f3`,
+and `tqflicker-debug.run74.log`, SHA-256
+`2f8860bab93dbe367486afc5554b5c7e606b20b4950cbbd745f57c94818b88cf`.
+Both archives were byte-compared with their completed live files. The CSV has
+7,304 contiguous presented frames, 0--7303, totaling 95.231 s. Its five parts
+are **menu** 0--2027 (19.271 s), **load-game frame** 2028 (1,335.705 ms),
+**loading screen** 2029--3162 (9.717 s), **first world frame** 3163
+(1,163.347 ms), and **play** 3164--7303 (63.744 s).
+
+F12 is on **play** frame 6724. The normal-route pair is **play** frames
+6705/6706 at 92.269/165.636 ms, ending 551/386 ms before the marker. Their
+onset-to-marker distances are 643/551 ms. The reporter supplied no subjective
+classification beyond completing the run, so this is a probable
+marker-associated pair, not a claim that either frame was felt.
+
+The exact identity result rejects the large shared-buffer population proposed
+after Run 73. Frame 6705 creates 82 buffers / 2,867,200 bytes, including 64 /
+0.549 ms inside the exact second-manager/first-plane reflection class. It has
+36 first uses of fresh buffers in deferred color and one in directional
+shadow, but zero first uses in reflection. Only one 11,200-byte vertex buffer
+joins shadow and deferred on that frame. Although it was created while the
+reflection context was active, its first observed reflection draw is on frame
+6706, after the exceptional frame-6705 reflection GPU interval has already
+ended. It therefore cannot be the source of that 47.164 ms reflection work.
+
+The F12 window retains 203 creations and reports exactly that one joined
+identity, with no omitted record, index overflow, or recent ring eviction.
+Across all **play**, 2,597 buffers are created and 1,114 fresh buffers first
+appear in deferred color, but only three buffers ever join all three classes.
+Those joins occur on frames 6706, 6938, and 7031. All-session index-overflow
+and recent-eviction counters are zero. The measured answer is thus not “the
+same newly created geometry is rendered by all three passes in one burst.”
+The proposed generic color-first staging of a large shared buffer population
+has no measured population to act on.
+
+The new child brackets instead make the reflection producer exact. On **play**
+frame 6705, the second manager's first plane costs 19.805 ms CPU and
+47.164 ms GPU. `GraphicsForwardRenderer::BuildScene` accounts for 7.287 ms
+CPU and no measurable GPU interval. The following exact
+`GraphicsForwardRenderer::RenderLightStyle` call accounts for 10.851 ms CPU
+and 47.117 ms GPU. The two known Gadir terrain textures load synchronously in
+this `RenderLightStyle` chain for 7.820 ms; four texture creations take
+5.635 ms. These clocks nest and must not be added. In **play**, the next
+largest second-plane reflection GPU interval is only 0.371 ms and the next
+largest `RenderLightStyle` GPU interval is 0.325 ms.
+
+Directional shadow is a separate producer on the same frame. The exact
+`GraphicsShadowMapDx11::RenderDirectional` class costs 5.920 ms CPU and
+81.471 ms GPU while issuing 748 draws, with zero nested Resource load. Its one
+fresh shadow buffer is the lone identity described above; the other bound
+buffers are not fresh within the verified 120-frame horizon. The directional
+draw count is lower, not higher, than the 799.783-draw mean of the matched
+reference population. The next largest directional-shadow GPU interval in
+**play** is 11.800 ms. Thus neither raw draw count, synchronous cold resource
+loading, nor a large population of newly created buffers explains this
+directional spike.
+
+The within-run reference is 46 collision-active, full-scene **play** frames
+below 60 ms in the same 1,000--1,499 indexed-draw band, with no Resource load
+or shadow-region change. Their means are 22.137 ms whole frame, 17.740 ms
+`Engine::Render`, 10.620 ms game draw submission, 0.856 ms second-plane CPU,
+0.206 ms `BuildScene` CPU, 0.585 ms `RenderLightStyle` CPU, 0.110 ms
+second-plane GPU, 0.074 ms `RenderLightStyle` GPU, 2.478 ms directional CPU,
+7.181 ms directional GPU, and 10.096 ms in second-owner geometry-scene game
+draws. Relative to those same-run means, frame 6705 adds 18.949 ms
+second-plane CPU, 47.054 ms second-plane GPU, 47.043 ms `RenderLightStyle`
+GPU, 74.290 ms directional GPU, and 35.147 ms second-owner geometry-scene
+game-draw time. These scopes overlap through submission and are not additive.
+
+Frame 6706 is the queue drain. Whole-frame GPU is back to 22.467 ms,
+second-plane reflection GPU is 0.059 ms, and directional GPU is 7.087 ms, but
+the exact second-owner deferred geometry-scene class blocks 145.067 ms in the
+game's draws. Its two worst `DrawIndexed` calls wait 63.183 and 55.072 ms.
+Against the same matched means, the frame adds 134.971 ms in that exact
+game-draw class. Seventeen off-main texture creations take 74.345 ms beside
+the drain; that off-main clock and the preceding GPU work must not be added to
+the color draw wait.
+
+The corrected diagnosis is now two independent first-use producers followed
+by one submission drain: terrain texture/resource admission inside the exact
+reflection `RenderLightStyle` class, an exceptional resident-population
+directional-shadow GPU build, then deferred-color draw backpressure. A
+renderer, frustum, shadow-system, or resource-loader rewrite is still not
+supported, but one generic cross-pass staging switch is not supported either.
+
+Before another behavior A/B, the unexplained larger producer needs one more
+narrow measurement. Statically recover the render-record execution inside
+`GraphicsShadowMapDx11::RenderDirectional`, then bracket bounded draw-ordinal
+chunks only on region-changing directional calls. Reuse the existing draw
+hook and IA/shader/SRV snapshots; preserve per-chunk draw/index totals and a
+bounded record identity, and retire non-blocking GPU timestamps later. The
+candidate is a region change, so ordinary frames need no additional GPU
+queries. This will distinguish one pathological terrain/alpha/caster record
+range from a cost spread across the whole 8,192-square directional map. Only
+then choose between per-record admission and a genuinely incremental map
+update. Whole-map reuse remains rejected by §50 because it visibly flickered
+and merely moved the work.
+
+
+## 94. Run 75 prepared: subdivide both exceptional GPU producers at their actual triggers
+
+Run 74 rejects the hypothesized large shared-buffer population, but leaves two
+independent GPU producers on the probable **play** onset: the exact reflection
+`GraphicsForwardRenderer::RenderLightStyle` child is 47.117 ms GPU after two
+cold Gadir terrain texture Resources, and the exact
+`GraphicsShadowMapDx11::RenderDirectional` class is 81.471 ms GPU after a
+region change with zero nested Resource loads. Run 75 passively subdivides
+both. It does not change reflection, shadow, culling, resource loading, scene
+admission, color rendering, or `shadow_split`.
+
+The directional record flow is now recovered rather than inferred from the
+outer class. `GraphicsShadowMapDx11::RenderDirectional` gathers/adopts its
+casters, then reaches `GraphicsShadowMapRenderer::Render` at Engine RVA
+`0x18ce70`. Its verified DX11 branch calls the 0x88-byte record builder at
+`0x18d04f -> 0x18c870`, then the sorted record executor at
+`0x18d05d -> 0x18c520`. The executor's indirect call at `0x18c613` is virtual
+slot `+0x28` on the accepted renderable. The other renderer branch calls a
+different helper at `0x187360`; therefore this builder/executor chain is
+specifically the DX11 shadow path, not stale DX9-only support. The reproducible
+streaming audit remains 1,592 functions and now carries explicit address roots
+for both unexported record helpers. Independent 20--24-byte windows cover the
+owner, helpers, direct calls, and final dispatch in
+`disassembly-targets.md` and `verify-sites.py`.
+
+The instrument adds no Engine code patch. It reuses the verified
+`RenderDirectional`, reflection-child, and `ResourceLoader::LoadResource`
+wrappers plus the existing D3D11 Draw hooks and setter-maintained binding
+snapshot. A directional event arms only after the wrapper proves its region
+pointer changed, before the exact call begins. A reflection event arms only
+before the first state-0 Resource load observed on the main thread inside the
+exact per-plane `RenderLightStyle` child. That distinction matters: the first
+reflection chunk includes the texture load/upload commands that can make later
+draws expensive; the first directional chunk includes pre-draw map setup even
+though the class has no cold Resource load.
+
+Each class has sixteen unique non-blocking timestamp-query pairs, with 64 game
+draws per chunk. The 166-draw reflection child observed in Run 74 therefore
+uses about three chunks; the 748-draw directional class about twelve. A fixed
+32-event ring retains events for the 120-frame F12 reaction window. Each chunk
+records its draw ordinal range, draw/indexed counts, element total, null pixel
+shader/SRV0 counts, binding-transition count, and first/last VS, PS, SRV0,
+VB0, and IB identities. No COM identity is retained or dereferenced and no D3D
+state getter or extra per-draw CPU clock is added. A second trigger for the
+same class/frame is folded into the live event and counted as a collision;
+more than 1,024 draws is an explicit overflow.
+
+The interpretation is narrow. A single exceptional directional chunk points
+to a bounded record/terrain/alpha population worth inspecting at the recovered
+executor boundary; cost spread across all twelve chunks instead supports a
+genuinely incremental map build. For reflection, an exceptional first chunk
+ties the delay to cold texture admission/upload; an exceptional later chunk
+instead identifies a draw/binding population after residency. The following
+deferred-color wait remains a queue-drain class and is not added to either
+producer.
+
+`verify-sites.py` passes 743 checks. All four new numeric bounds reject an
+independent one-at-a-time perturbation. `npm run doctor`, the 754,688-byte
+release build, and the complete off-game self-test pass, including GPU
+timestamp retirement and an exact synthetic 64+1 reflection-chunk partition.
+Run 75 is installed from `cache/runs/run75-gpu-draw-chunks.ini`. Installed and
+source DLLs are byte-identical at SHA-256
+`45768956bd265ca16c49d8e8d83dcb4c57aa041d28cedacae72a9c5534b3fb76`;
+installed and source INIs are byte-identical at SHA-256
+`630b798d1c66d968193d6583be3ff56eb2350222803c88507411d5755a3e600a`.
+Run 74's live CSV and debug log matched their archived SHA-256 identities
+before their stale live names were removed. The game has not been launched.
+
+
+## 95. Run 75 result: directional work is clustered; the cold-triggered reflection trace starts too late
+
+Run 75 is archived as `tqflicker-frames.run75.csv`, SHA-256
+`be2e4bb57de660b15c70e94371a84f1c33adaaa8571adf246fac84d37c0abf3c`,
+and `tqflicker-debug.run75.log`, SHA-256
+`ab315f205f7f84d22c4ccfd458840c8468af507261dd35048961ab6d4be5b000`.
+Both archives were byte-compared with the completed live files. The CSV has
+7,343 contiguous presented frames, 0--7342. Its five parts are **menu**
+0--1943, **load-game frame** 1944, **loading screen** 1945--3146,
+**first world frame** 3147, and **play** 3148--7342.
+
+F12 is on **play** frame 6760. Frame 6759 ends only 21 ms before it and cannot
+be the human reaction target. The probable felt sequence is **play** frames
+6744/6745 at 107.764/136.323 ms, ending 522/385 ms before F12. A 35.960 ms
+frame follows, then frame 6747 is 45.498 ms and ends 304 ms before F12. The
+reporter says this session felt as though it had “a little more delay,” and
+specifically asks whether the trace caused it. That subjective comparison is
+retained; it is not converted into a cross-run frame claim.
+
+The steady-state evidence does not show a measurable trace regression. Using
+the allowed comparison class—collision-active, full-scene **play** frames
+below 60 ms, 1,000--1,499 indexed draws, no main-thread Resource load, and no
+shadow-region change—Run 74 has 46 frames and Run 75 has 40. Their means are
+22.137 versus 22.103 ms total, 0.048 versus 0.047 ms in the mod Present class,
+17.740 versus 16.590 ms in exact `Engine::Render`, 10.620 versus 9.803 ms in
+the game's Draw/DrawIndexed calls, and 22.206 versus 22.236 ms whole-frame
+GPU. These are matched full-scene means, never cross-run p50s. They do not
+prove zero cost, but they exclude an observable broad slowdown of this class.
+
+The trace is not literally free. While armed, its first implementation makes
+two short instrument calls around every game draw even when neither sparse
+event is active; the per-frame GPU retirement loop also scans 32 additional
+phase slots, and the full CSV rows are wider. Across **play**, actual chunk
+queries opened on only seven frames: two reflection arms, six directional
+arms, and 3,547 classified event draws. The 38 KiB debug log is written when
+F12 is retrieved, after all candidate frames, so its synchronous report cannot
+cause the pre-reaction sequence. The CSV uses the existing asynchronous
+batched writer. Event-frame timestamp commands could perturb a particular GPU
+queue slightly; this run has no counterfactual capable of proving their cost
+is exactly zero.
+
+The directional result is useful and internally complete. On **play** frame
+6744, exact `GraphicsShadowMapDx11::RenderDirectional` costs 5.299 ms CPU and
+84.599 ms GPU across 743 draws. Its twelve 64-draw chunks account for 84.278
+ms. Five bounded ranges contain 79.282 ms (94.1%): chunk 0, which includes
+pre-executor setup plus draws 1--64, is 42.968 ms; draws 129--192 are 6.251 ms;
+193--256 are 12.407 ms; 449--512 are 14.699 ms; and 641--704 are 2.957 ms.
+The other seven ranges total only 4.996 ms. Directional work is therefore not
+uniform across the 8,192-square map and not explained by raw draw count. Chunk
+zero still mixes map setup with records, so the already verified
+`0x18d05d -> 0x18c520` executor call is the next exact boundary needed to
+separate setup from draws 1--64 and retain record identity for those five
+ranges.
+
+The reflection result corrects Run 75's own design assumption. The exact
+second-manager/first-plane `GraphicsForwardRenderer::RenderLightStyle` on
+**play** frame 6744 costs 12.382 ms CPU / 63.180 ms GPU. Its two Gadir texture
+Resources cost 9.378 ms CPU, but the first state-0 load is not encountered
+until reflection draw 200. Only 39 draws remain, and the post-trigger GPU chunk
+is 0.382 ms. Thus almost all of the exceptional immediate-context GPU interval
+precedes the cold-Resource trigger; “arm on the cold load” cannot subdivide the
+producer. Device-level texture creation may have ordering outside the
+immediate-context timestamps, so this does not prove texture upload harmless,
+but it does prove the trigger is too late for the requested whole
+`RenderLightStyle` breakdown.
+
+A second reflection event occurs on **play** frame 6747. Six cold Resources
+cost 15.547 ms inside an 18.179 ms CPU / 17.503 ms GPU `RenderLightStyle`.
+The first load occurs at draw 31; its four retained chunks cover draws 31--269
+and total 9.700 ms. This event has material work on both sides of the trigger,
+again requiring a whole-child subdivision rather than a post-load one.
+
+The longer subjective tail has corresponding game work. On **play** frame
+6744 the game's D3D calls block 65.324 ms, including 64.234 ms in the exact
+second deferred owner's geometry-scene class. Frame 6745 has no Resource load
+or region change and only 29.334 ms whole-frame GPU, but blocks 82.364 ms in
+game draws: 33.476 ms inside the exact second reflection plane and 45.703 ms
+inside the exact second deferred owner's geometry-scene class. This is a
+multi-consumer queue drain. Frame 6747 then adds the separate six-Resource
+reflection event. The data supports real additional transition work in this
+session more strongly than logger overhead, while not claiming the trace has
+mathematically zero event-frame cost.
+
+Before another measurement, make the hot path honest: expose an inline active
+event bit so ordinary Draw/DrawIndexed calls do not enter either chunk helper.
+For directional shadow, begin record chunks at the verified executor call and
+give pre-executor setup its own interval. For reflection, the next trace must
+cover the whole exact second-manager/first-plane `RenderLightStyle`, not start
+at a Resource encountered after draw 199. Because doing that every frame adds
+queries, first recover a pre-child sparse signal—preferably exact new scene
+admission recorded by the preceding `BuildScene`—or explicitly accept and
+measure a very small whole-child query budget. Do not interpret another
+post-cold reflection run as a whole-child result.
+
+
+## 96. Run 76 prepared: remove ordinary-draw overhead and put both GPU traces on the corrected boundaries
+
+Run 75's passive subdivision did answer the directional clustering question,
+but its implementation made two calls across the DLL boundary around every
+game `Draw`/`DrawIndexed`, even when no event was active. Run 76 puts a single
+inline volatile flag in that ordinary path. The flag is false outside an
+armed exact class, so neither chunk helper is called. The existing setter
+snapshots remain the source of VS/PS/SRV0/VB0/IB identity; there is still no
+per-draw D3D getter. The off-game self-test checks the false/true/false gate
+transition around both selected classes.
+
+The directional selection remains a region change in exact
+`GraphicsShadowMapDx11::RenderDirectional`, but its chunks no longer begin at
+that outer class. The verified DX11-only chain is
+`GraphicsShadowMapRenderer::Render` at `0x18ce70`, record construction
+`0x18d04f -> 0x18c870`, and record execution
+`0x18d05d -> 0x18c520`. Run 76 opens one separate
+`gpu_chunk_shadow_setup_ms` interval at the outer region-changing call, ends
+it in the wrapper around the exact executor `E8`, and enables the sixteen
+64-draw chunks only for the executor. The wrapper closes the chunks before it
+returns. The old-renderer/DX9 branch still uses `0x187360` and never reaches
+this site. The new runtime tables verify the 23-byte call window at
+`0x18d054`, the 24-byte executor entry, and the 21-byte tail at `0x18c631`;
+that tail ends in `ret 0x0c`, proving the wrapper's three explicit arguments.
+Only the exact `E8` is patched.
+
+For reflection, decompilation confirms that exact
+`GraphicsForwardRenderer::BuildScene` gathers visible regions and calls
+`GraphicsSceneRenderer::AddRegionToScene`, but returns no admitted-object or
+admitted-region count. Its duration can select a rare event, but cannot name
+the cause. Run 76 therefore treats a second-manager/first-plane
+`GraphicsForwardRenderer::BuildScene` duration of at least 2,000 us only as a
+sparse arming signal, records that exact trigger duration in the F12 metadata,
+and opens chunk zero before the immediately following whole exact
+`GraphicsForwardRenderer::RenderLightStyle`. In Run 75's **play** part this
+would select four frames: 6744 at 12,766 us, 6747 at 3,024 us, 6748 at 2,590
+us, and 6915 at 3,274 us. Thus it includes both implicated **play** frames
+6744/6747 while remaining sparse; it does not claim that `BuildScene` caused
+their later GPU cost. The old state-0 `Resource` trigger and its draw-ordinal
+bookkeeping are removed.
+
+This remains instrumentation only. Rendering choices, resource state,
+`shadow_split`, and all three accepted performance fixes are unchanged. The
+GPU result remains non-blocking and is retired in later frames. F12 still
+writes the bounded 32-event/120-frame identity ring during the session. The
+CSV's engine durations retain `_us`; the new setup value is game GPU time and
+therefore ends in `_ms` without being charged to the mod.
+
+`research/streaming/tools/verify-sites.py` is extended for the new executor
+entry/call/tail, exact call target and ABI, corrected class boundaries,
+BuildScene trigger, inline draw gate, install dependencies, restoration, and
+self-test assertions. It passes 750 checks against the installed binaries.
+All five new numeric constants and all 68 bytes in the three new executor
+tables were perturbed independently; every one of the 73 mutations is
+rejected.
+Doctor, the 755,200-byte release build, and the complete off-game self-test
+pass, including GPU timestamp retirement. Run 76 is installed from
+`cache/runs/run76-corrected-gpu-boundaries.ini`. The source and installed DLL
+are byte-identical at SHA-256
+`96a7347716e33e07edbd97535739e6a77b9897cbe99cff88758563be5a0ddede`;
+the source and installed INI are byte-identical at SHA-256
+`f9fc60731be367987bfd1b584f5bb23a64b41ed77a112f80354a5a06cf692ade`.
+The stale live Run-75 CSV/debug log matched their archived hashes before both
+live names were removed. The game has not been launched.
+
+
+## 97. Run 76 result: the marked drain follows reflection, not directional shadow
+
+Run 76 is archived as `tqflicker-frames.run76.csv`, SHA-256
+`dd4118f6896bf27c895e4e8c11adc97a394c096339912516bec7af2f93c623a8`,
+and `tqflicker-debug.run76.log`, SHA-256
+`d797b52321f0623637b6b501b98e0ad009b69c15f48f01969c91144f9627a71d`.
+Both archives are byte-identical to the completed live files. The CSV has
+7,310 contiguous presented frames, 0--7309. Its five parts are **menu**
+0--1818, **load-game frame** 1819, **loading screen** 1820--2954, **first
+world frame** 2955, and **play** 2956--7309.
+
+F12 is on **play** frame 6575 at 24.320 ms. The immediately preceding frame
+ended too close to be a human reaction target. The route event is **play**
+frame 6548 at 90.945 ms, ending 601 ms before F12 and beginning 692 ms before
+it. The reporter supplied no additional subjective classification with the
+completion message, so this is the probable marker-associated event, not a
+claim that the marker proves which frame was felt. A separate 423.042 ms
+**play** frame 7171 occurs after F12 and is not substituted merely because it
+is the session maximum.
+
+The corrected reflection trace captures the whole exact second-manager,
+first-plane `GraphicsForwardRenderer::RenderLightStyle` on frame 6548. The
+preceding exact `GraphicsForwardRenderer::BuildScene` takes 5.961 ms CPU and
+selects the event; it is still only a selector. `RenderLightStyle` takes
+8.888 ms CPU and 38.739 ms GPU across 169 indexed draws. Draws 1--64 cost
+0.091 ms GPU, draws 65--128 cost 7.932 ms, and draws 129--169 cost 30.715 ms.
+The latter two ranges account for 38.647 ms, 99.8% of the child interval.
+Ordinary selected **play** events at frames 6557 and 6561 take only 0.211 and
+0.282 ms GPU across 221 and 271 draws, so the frame-6548 cost is not explained
+by draw count.
+
+Two state-0 Gadir rocky-pebbles base/normal textures are synchronously ensured
+from the exact unexported `TerrainBlock` colour-render class inside that
+reflection child. Their Resource calls take 7.400 ms and four nested texture
+creations take 6.041 ms. The exact `TerrainType` had one successful
+`TerrainType::PreLoad(true)` during the **loading screen**, on frame 2858.
+The enclosing runtime `TerrainRT::PreLoad` owner was then visited 3,747 times,
+including **play** frame 6547 immediately before the event, but that stock
+owner class does not call the layer type's semantic preload. Thus Run 67's
+one-time post-`LoadTextures` preload did not keep these two Resources resident
+until their first reflected use. This is evidence for a missing near-use
+refresh, but it does not yet prove whether the 38.739 ms GPU interval is upload
+work, the newly admitted terrain draws, or both.
+
+The CPU wait point is ordered after that reflection producer. Frame 6548
+spends 49.302 ms in the game's `Draw`/`DrawIndexed` submission class. Of that,
+48.151 ms is inside the exact second `GraphicsDeferredRendererX::Render`
+invocation's geometry-scene call at `0x166412`; the whole child is 48.893 ms
+CPU but only 4.732 ms GPU. Individual calls block for 28.080, 9.091, 5.054,
+2.976, and 2.102 ms. The static call order places reflection before the
+deferred owner and places geometry scene `0x166412` before shadow-map
+construction `0x166454`. Therefore the 48.151 ms geometry submission wait is
+the same-frame drain after reflection and cannot have been caused by the
+directional-shadow work that executes later. CPU and GPU scopes overlap and
+must not be added.
+
+The corrected exact `GraphicsShadowMapDx11::RenderDirectional` boundary on
+that same **play** frame is 7.090 ms CPU / 18.195 ms GPU / 750 draws. Its
+pre-executor setup is 9.017 ms GPU. The exact DX11
+`GraphicsShadowMapRenderer` record executor's twelve chunks total 8.897 ms;
+no individual 64-draw range exceeds 1.866 ms, and only 0.281 ms remains after
+the executor. This overturns an interpretation of the old mixed first chunk:
+the marked Run-76 submission drain is not a pathological shadow-record range.
+It does not claim that Run 75's independently larger directional event never
+happened.
+
+The ordinary-path gate also addresses the reported logging concern. In the
+allowed collision-active, full-scene **play** class below 60 ms, with
+1,000--1,499 indexed draws, no main-thread Resource load, and no shadow-region
+change, Run 75 has 40 frames and Run 76 has 46. Their means are 22.103 versus
+22.293 ms total, 0.047 versus 0.079 ms in the mod Present class, 16.590 versus
+17.321 ms in exact `Engine::Render`, 9.802 versus 9.971 ms in game draw calls,
+and 22.235 versus 22.107 ms whole-frame GPU. These matched means exclude a
+large broad regression but do not establish exact zero observer cost. No
+cross-run p50 is used. Run 76 arms only four reflection and six directional
+events in **play**; every overflow and collision counter is zero. Its F12 log
+is written after the candidate.
+
+The next passive trace should stop spending queries on directional shadow and
+subdivide only the exceptional reflection tail. Keep the same sparse exact
+second-manager/first-plane `BuildScene` selector, count the first 64 draws
+without timestamps, then cover draws 65--192 in sixteen eight-draw GPU bins.
+While that event is active, the already installed exact unexported
+`TerrainPlug` and `TerrainBlock` wrappers should retain each call's start/end
+draw ordinal, CPU duration, and nested Resource/create totals in a bounded F12
+ring. This needs no new Engine patch and no ordinary-frame D3D getter. It will
+show whether the 30.715 ms range is the exact cold `TerrainBlock` call or a
+different resident renderable population before choosing between a narrowly
+refreshed semantic preload and temporary reflection-only omission. Do not turn
+the global runtime-owner preload into an all-layer-per-frame behavior on the
+present evidence: the affected owner has 142 layers and was called on almost
+every intervening frame.
+
+
+## 98. Run 77 prepared: eight-draw reflection tail with exact terrain-call identity
+
+Run 76's probable marked **play** event resolves the next boundary without
+another shadow experiment. Exact second-manager/first-plane
+`GraphicsForwardRenderer::RenderLightStyle` draws 65--169 own 38.647 ms, or
+99.8%, of its 38.739 ms GPU interval. The exact second
+`GraphicsDeferredRendererX::Render` geometry-scene class then blocks
+48.151 ms in game draws before the later directional-shadow construction.
+Run 77 is passive instrumentation only for that reflection tail. It changes no
+rendering, scene admission, Resource state, accepted fix, or `shadow_split`.
+
+The first 64 reflection draws are still counted so ordinals remain exact, but
+they open no timestamp. Sixteen unique pairs now cover draws 65--192 in
+eight-draw intervals. When one interval fills, its successor opens immediately
+after the boundary rather than waiting for the next D3D Draw hook. Thus
+Resource and creation commands issued between adjacent renderables belong to
+the following draw range. A 193rd draw sets the existing explicit overflow and
+disables the event's hot-path gate. Ordinary frames still read only the inline
+false flag.
+
+Directional setup and all sixteen directional-chunk GPU phase IDs and CSV
+columns are removed, reducing per-frame query allocation/retirement from the
+Run-76 schema. A region-changing exact
+`GraphicsShadowMapDx11::RenderDirectional` call no longer arms this trace, and
+the exact `GraphicsShadowMapRenderer` executor `E8` is no longer patched. Its
+23-byte call window, 24-byte entry, and 21-byte `ret 0x0c` tail remain in the
+static audit and are still re-read from the pinned binary; they are durable
+disassembly evidence rather than a Run-77 write target.
+
+No new Engine patch is added for renderable identity. While the sparse exact
+second-manager/first-plane reflection event is active, the already verified
+unexported `TerrainPlug` and `TerrainBlock` wrappers append to 128 fixed call
+slots embedded in that event. Each record retains class, object identity,
+start/end draw ordinal, CPU duration, the observed `TerrainType`/material, and
+nested Resource, texture-creation, and buffer-creation counts/durations. F12
+writes every retained record and an explicit overflow bit during the session.
+The creation durations reuse the D3D hook's existing sample; no state getter
+or additional Engine detour is introduced.
+
+The reflection selector remains exact second-manager/first-plane
+`GraphicsForwardRenderer::BuildScene >= 2,000 us`; it is a sparse selector,
+not a causal attribution. Activation now requires the verified reflection
+children, both exact terrain colour wrappers, the terrain/reflection trace
+groups, and draw timing. The off-game self-test proves that draws 1--64 open
+no bin, draws 65--73 partition 8+1, and an exact `TerrainBlock` record spanning
+draws 65--66 retains its nested Resource and texture-creation totals.
+
+`research/streaming/tools/verify-sites.py` passes 752 checks. All seven new or
+changed numeric bounds were perturbed independently in memory; every mutation
+was rejected. Doctor, the 754,688-byte release build, and the full off-game
+self-test pass, including GPU timestamp retirement. Run 77 is installed from
+`cache/runs/run77-reflection-tail-terrain-calls.ini`. The source and installed
+DLLs are byte-identical at SHA-256
+`ebbda98ba661a745d4206d39c1d9f9eeca4913490274e36be85457bfcb7aca91`;
+the source and installed INIs are byte-identical at SHA-256
+`2806e64c0de188d05ff38d628c03df67c0ecc2fa753320106f559313e5b75166`.
+The Run-76 live CSV/debug log matched their archives before both stale live
+names were removed. The game has not been launched.
+
+
+## 99. Run 77 result and Run 78 preparation: the marked reflection work moved beyond draw 192
+
+Run 77 is archived as `tqflicker-frames.run77.csv`, SHA-256
+`8afdff308c0402e6ecc59d45bb5bdb59dd3cb687c01bba90c95fd800917fd491`,
+and `tqflicker-debug.run77.log`, SHA-256
+`caedce37049ad80274176d1585dc55b124e4a623d44829805724e90f9fa5094a`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 7,443 contiguous presented frames, 0--7442. Its five parts are
+**menu** 0--2046, **load-game frame** 2047, **loading screen** 2048--3194,
+**first world frame** 3195, and **play** 3196--7442.
+
+F12 is on **play** frame 6915 at 19.264 ms. **Play** frame 6914 is 62.928 ms
+but ended only 19 ms before F12, too soon to be the event to which a person
+reacted. The probable marker-associated event is **play** frame 6892 at
+60.329 ms, ending 539 ms before F12 and beginning 599 ms before it. The user
+reported only completion, so this remains a reaction-window identification,
+not a claim that the marker proves which frame was felt.
+
+On **play** frame 6892, exact second-manager/first-plane
+`GraphicsForwardRenderer::RenderLightStyle` takes 27.003 ms CPU and 24.708 ms
+GPU after a 13.522 ms `GraphicsForwardRenderer::BuildScene` selector. Its 16
+main-thread state-0 Resource loads take 25.715 ms: four meshes and twelve
+textures, with 17.769 ms in nested texture creation and 1.346 ms in nested
+buffer creation. Those clocks nest and must not be added. Two of the textures
+are the known Gadir `TerrainType` material-zero pair and take 2.744 ms in
+Resource loading. That type's last semantic preload is **loading-screen**
+frame 3155, while its runtime owner preloads through **play** frame 6891.
+
+The new GPU subdivision excludes the range it measured. On **play** frame
+6892, all sixteen eight-draw intervals for exact `RenderLightStyle` draws
+65--192 total only 5.502 ms GPU; the largest is draws 161--168 at 2.161 ms.
+The whole child is 24.708 ms GPU, leaving 19.206 ms outside that measured
+range. The exact event reaches draw 193 and sets the explicit draw overflow.
+Run 76's different marked **play** scene had only 169 draws and measured its
+first 64 at 0.091 ms, which makes the unmeasured post-192 population the next
+best target here, but does not prove it: the current event's first 64 were not
+timestamped.
+
+Run 77 also reveals an instrumentation-boundary error. It retained 37 exact
+terrain calls through draw 193, all without nested Resource or creation work.
+When draw 193 set the query-window overflow, `active.recording` became false;
+the same flag then prevented later `GpuChunkTerrainCallScope` records. Thus
+the trace stopped retaining terrain identity before the cold call it was
+designed to name. `terrainCallOverflow=0` does not mean the selected child had
+no later terrain calls; it means the separate 128-call storage limit was not
+hit before draw-window recording stopped.
+
+There is no gross ordinary-frame logging regression. Restricting Run 76 and
+Run 77 to collision-active, full-scene **play** frames below 60 ms, with
+1,000--1,499 indexed draws, no main-thread Resource load, and no shadow-region
+change, their mean total times are 22.293/21.811 ms and their mean mod Present
+classes are 0.079/0.052 ms over 46/37 frames. This only excludes a large
+regression; the route populations are not identical and it is not a fine
+effect estimate.
+
+Run 78 corrects that boundary without adding load or rendering behavior. The
+same sixteen query pairs move to exact `RenderLightStyle` draws 193--320 in
+eight-draw intervals. Draws 1--192 retain ordinals but open no timestamp.
+Terrain-call retention now begins at the same draw-window boundary, so calls
+before draw 193 cannot consume the 128 fixed records needed by the late tail.
+Directional shadow remains unqueried and its executor remains unpatched. No
+new Engine site, D3D getter, query pair, trace group, accepted-fix change, or
+`shadow_split` change is introduced.
+
+The extended verifier passes 753 checks, including the new requirement that
+the late-tail boundary is tested before a terrain-call slot is consumed. All
+seven trace bounds were perturbed independently in memory and every mutation
+was rejected. Doctor, the 754,688-byte release build, and the full off-game
+self-test pass, including GPU timestamp retirement. Run 78 is installed from
+`cache/runs/run78-reflection-late-tail-terrain-calls.ini`; rendering has not
+been launched. The source/installed DLL SHA-256 is
+`86880e95234db37420087447192537316e52b9a62b7c8ff5ef8667385d2a6a28`;
+the source/installed INI SHA-256 is
+`be46abecf6a32764ac50f477a73ece4b7392d6fc2de984554d6129194753bff1`.
+
+
+## 100. Run 78 result and Run 79 preparation: cover the whole reflection child and name its renderable class
+
+Run 78 is archived as `tqflicker-frames.run78.csv`, SHA-256
+`9da2aa0ef4d278bc21372cb76fb5f40c1b45f55371c4e15af5eaacb23ed85561`,
+and `tqflicker-debug.run78.log`, SHA-256
+`f647970f9a14de5bcd266f0f22c042e96ee65e5eefd669c225cc9efcd48f8be6`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 7,271 contiguous presented frames, 0--7270. Its five parts are
+**menu** 0--1848, **load-game frame** 1849, **loading screen** 1850--2983,
+**first world frame** 2984, and **play** 2985--7270.
+
+F12 is on **play** frame 6728 at 22.443 ms. **Play** frame 6723 is 52.428 ms
+but ended only 107 ms before the press, too soon to be a confident human
+reaction candidate. The probable felt sequence is **play** frames 6702/6703
+at 75.266/41.243 ms, ending 609/568 ms before F12. The user reported only
+completion, so this remains a reaction-window identification rather than a
+claim that the marker proves which frame was felt.
+
+On **play** frame 6702, the exact second-manager/first-plane
+`GraphicsForwardRenderer::RenderLightStyle` class is 9.660 ms CPU / 31.101 ms
+GPU after a 7.987 ms `BuildScene`. Two main-thread state-0 Gadir terrain
+textures load for 6.111 ms inside that exact reflection cell, including 4.332
+ms in four nested texture creations. These clocks nest and must not be added.
+The same frame's whole directional-shadow class is independently 31.046 ms
+GPU and has a region change; this run does not subdivide it.
+
+The following exact second `GraphicsDeferredRendererX::Render` geometry-scene
+class blocks for 36.172 ms CPU, with 35.342 ms inside the game's own draw
+submissions, while its GPU interval is only 2.913 ms. Its four largest draws
+are 19.122, 9.170, 4.067, and 2.142 ms. **Play** frame 6703 repeats that
+shape: 29.778 ms CPU / 28.824 ms in game draws / 1.284 ms GPU, led by a
+15.752 ms draw, while reflection is only 0.695 ms CPU / 0.167 ms GPU. This is
+evidence for a downstream queue drain after prior GPU production, not for the
+deferred-color scene as the producer or fix boundary.
+
+Run 78 also invalidates the moving-window assumption. The selected reflection
+child on **play** frame 6702 issues exactly 192 draws. Its Run-78 query window
+starts at draw 193, so it opens no populated bin and retains no terrain call.
+Later selected **play** frames 6707 and 6711 reach 220 and 276 draws, but their
+post-192 bins total only 0.041 and 0.092 ms GPU; their exact late
+`TerrainBlock`/`TerrainPlug` calls contain no nested work. Together with Run
+77's cheap draws 65--192 and Run 76's different expensive draws 65--169, this
+shows that fixed ordinal slices do not follow a stable population. It does
+not establish that the unmeasured draws 1--64 are expensive on frame 6702.
+
+Run 79 is therefore one consolidated passive trace before a behavior A/B. It
+keeps the same sixteen query pairs and covers exact selected
+`RenderLightStyle` draws 1--320 continuously in 20-draw bins. It retains up to
+256 exact renderable calls across the same window, classifying the existing
+unexported `TerrainPlug` and `TerrainBlock` overrides plus the exported
+`GraphicsMeshInstance::RenderPass` override. Each record carries class,
+object, draw range, CPU duration, and nested Resource/texture/buffer creation
+totals. Existing exact downstream deferred-color slow-draw reporting and the
+whole directional-shadow GPU interval remain active, so the same run observes
+the reflection producer, the downstream drain, and the separate shadow
+producer.
+
+The sorted scene-list executor invokes virtual slot `+0x28`, so there is no
+direct `E8` for the mesh override. The installed `Engine.dll` was re-read
+before writing the table: the decorated export resolves to RVA `0x172dd0`;
+its 24-byte opening is
+`55 8b ec 83 e4 f8 81 ec fc 00 00 00 a1 00 f0 36 10 33 c4 89 84 24 f8 00`,
+with the relocated security-cookie address at byte 13. The independent
+23-byte tail at `0x173127` ends in `c2 10 00`, proving four explicit
+arguments. The trace detour verifies all 24 entry bytes and steals only the
+shared six-byte prologue. It installs atomically after the four existing
+reflection `patchCall` sites and is detached first on rollback or shutdown.
+
+The extended verifier passes 760 checks. All 57/57 one-at-a-time mutations of
+the new or changed numeric bounds, every byte in both new tables, both
+relocation fields, the decorated export, class order, and stolen length are
+rejected. Doctor, the 756,224-byte release build, and the full off-game
+self-test pass, including GPU timestamp retirement.
+
+Run 79 is installed from
+`cache/runs/run79-complete-reflection-renderables.ini`; the game has not been
+launched. Source and installed DLLs are byte-identical at SHA-256
+`3c3c178dd5cad41d1adfb87e8c6370ad0f2326dd97a91840ec2779de7dd6551d`;
+source and installed INIs are byte-identical at SHA-256
+`dc0cc89630226de801d03ceecabf909283045bc3773c737ca6dc2af6abb2242c`.
+The completed Run-78 live CSV and debug log matched their archives before the
+two stale live names were removed.
+
+This trace is intended to choose a narrow behavior boundary, not to justify
+skipping the whole reflection. Decompilation shows the plane helper creates,
+binds, and clears its temporary 1024-by-1024 surface before
+`RenderLightStyle`, then publishes that surface to reflection consumers; a
+whole-child skip would therefore risk a blank reflection. If a hot GPU bin
+overlaps cold `TerrainBlock`, `TerrainPlug`, or `GraphicsMeshInstance` work,
+the next A/B can defer only that first-use renderable class for one frame while
+queueing its Resources. If the hot bin is an unclassified gap, the result says
+which remaining executor interval needs identity without pretending a nearby
+cold texture caused it.
+
+
+## 101. Run 79 rejects a reflection-renderable fix for this burst; Run 80 captures texture realization
+
+Run 79 is archived as `tqflicker-frames.run79.csv`, SHA-256
+`594a45b9b4946ec5fa53f35ea310d302f3333043c312114fab7c8d6014713745`,
+and `tqflicker-debug.run79.log`, SHA-256
+`3fc45ff8c63cf2f51e08ccea2092f38ccb187850e65198756662bf5d81b84b43`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 6,900 contiguous frames, 0--6899. Its five parts are **menu**
+0--1786, **load-game frame** 1787, **loading screen** 1788--2907, **first
+world frame** 2908, and **play** 2909--6899.
+
+F12 is **play** frame 6416 at 19.364 ms. **Play** frame 6415 is 53.202 ms but
+ended only 19 ms before the marker, so it cannot be a human-reaction target.
+The probable felt event is the eight-frame **play** burst 6382--6389 at
+34.525, 29.895, 33.586, 29.922, 22.919, 22.811, 22.405, and 35.452 ms. It
+ends 790 through 593 ms before F12. The reporter supplied only completion, so
+this is a reaction-window identification, not a claim that the marker proves
+which frame was felt.
+
+This occurrence is a scene-admission transition. Immediately before it,
+**play** frame 6381 has 213 indexed draws, 0.111 ms in the game's draw-submit
+class, and an 8.245 ms whole-frame GPU interval. Frame 6382 changes region and
+jumps to 1,436 indexed draws. It creates 98 buffers / 3,382,400 bytes, though
+the `CreateBuffer` calls themselves cost only 0.834 ms. Two exact Gadir
+terrain textures load synchronously on the main render thread for 5.595 ms,
+including 2.951 ms of nested texture creation. Its game-owned draw-submit
+class rises to 8.909 ms and its whole GPU interval to 29.628 ms, including
+13.720 ms in the exact directional-shadow class.
+
+The consolidated trace rejects the proposed reflection-renderable deferral
+for this occurrence. The exact second-manager/first-plane
+`GraphicsForwardRenderer::BuildScene` selector costs 8.010 ms on frame 6382,
+and its following exact `GraphicsForwardRenderer::RenderLightStyle` costs
+7.438 ms CPU because it contains the two cold Gadir loads. But all ten
+populated 20-draw bins total about 0.392 ms GPU, agreeing with the whole exact
+child's 0.391 ms GPU interval. The nearby texture loads therefore do not own
+the GPU burst in this run. Deferring that reflection child would at most move
+its synchronous CPU load; it cannot remove the measured multi-frame producer.
+
+The admission continues asynchronously. **Play** frames 6384--6389 contain
+51 off-main `CreateTexture2D` calls totaling 80.306 ms of worker-side time,
+while progressive loose-texture upload advances one bounded step per frame.
+Across burst frames 6382--6389, game draw submission is 3.566--14.045 ms and
+whole-frame GPU time is 21.251--33.690 ms. Those worker intervals overlap the
+render frames and are not added to the CPU or GPU totals. They are nevertheless
+the only measured transition-specific Resource activity that persists across
+the same six-frame tail, so texture realization/upload pressure is now the
+leading fix route, not yet a proved cause.
+
+The within-run reference is 24 collision-active, full-scene **play** frames
+6390--6414 under 60 ms, with 1,400--1,699 indexed draws, no main-thread
+Resource load, and no region change. Their means are 20.822 ms total,
+16.112 ms exact `Engine::Render`, 8.323 ms in game draw submission,
+20.895 ms whole-frame GPU, and 7.241 ms directional-shadow GPU. This is a
+same-run, same-scene-class reference rather than a cross-run p50. It shows
+that most of the post-transition 20 ms cost is the newly visible full scene;
+the removable target is the extra 22--35 ms burst while resources become
+resident, not the permanent scene price.
+
+Run 79's debug report has one explicit instrumentation failure. It retained
+the two qualifying reflection events at frames 6382 and 6392, but emitted the
+newer event first. Its 224 per-renderable lines filled the 65,491-byte session
+log at call 167, before the older probable reaction event was written. Missing
+frame-6382 renderable identities are therefore missing output, not zero work,
+and frame 6392's cheap population must not be substituted for them.
+
+Run 80 corrects that output path and adds the one missing admission dimension.
+Qualifying reflection events are emitted oldest-first. Every draw bin gains
+exact `TerrainPlug` / `TerrainBlock` / `GraphicsMeshInstance` call-and-draw
+counts; complete class totals remain, while individual lines are emitted only
+for calls with nested work or at least 250 us CPU. A separate lock-free
+512-record ring retains successful off-main texture creations with start/end
+frame, loader thread, duration, dimensions, mip count, DXGI format, bind/misc
+flags, and whether initial data was supplied. F12 emits chronological records
+from the preceding 120 frames, bounded to 192 lines with an explicit omission
+count. The record is published only after all fields are written and never
+inherits a main-thread reflection or deferred owner.
+
+This is passive instrumentation, not a texture throttle and not an archive
+prefetch experiment. If the burst is dominated by large/mipped initial-data
+textures, the next A/B is a bounded texture-realization budget (or the more
+involved archive lower-mip staging path). If it is many small textures, staging
+newly visible shadow/color participation is the narrower route. The trace
+does not reopen the message pump, archive block cache, Stage 4.2 prefetch,
+buffer pooling, locks, sleep, Stage 5, or libdeflate, and leaves
+`shadow_split` and all accepted fixes unchanged.
+
+The extended verifier passes 769 checks. Independently perturbing each of the
+four new ring/horizon/report constants is rejected, 4/4. The off-game
+self-test covers exact descriptor/frame publication and passes, including GPU
+timestamp retirement.
+
+Doctor and the 759,296-byte release build also pass. Run 80 is installed from
+`cache/runs/run80-admission-texture-descriptors.ini`; the game has not been
+launched. Source and installed DLLs are byte-identical at SHA-256
+`31ab51813d674b75407b12ede791c72b6b8b1c2e0a5e5359b1f4ffd874131356`;
+source and installed INIs are byte-identical at SHA-256
+`9704d1ea0859376300314bd45728d475f44fb8cdc0fb9408923e5dc620ebc16f`.
+The completed Run-79 live CSV/debug log matched their archives before both
+stale live names were removed.
+
+
+## 102. Run 80 separates the reflection onset from the texture tail; Run 81 stages mesh reflection
+
+Run 80 is archived as `tqflicker-frames.run80.csv`, SHA-256
+`68ca3bd58f89dde72a64b31fbbe337acb070cc8d552ccf9c75d0e6f6c88c9b19`,
+and `tqflicker-debug.run80.log`, SHA-256
+`6fd82332ad539ad94cdf7d437ea97b9cd311cc0527ec4aadb9eeabfe099bb365`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 7,495 contiguous presented frames, 0--7494. Its five parts are
+**menu** 0--2191 (20.183 s), **load-game frame** 2192 (1,492.219 ms),
+**loading screen** 2193--3337 (9.811 s), **first world frame** 3338
+(680.377 ms), and **play** 3339--7494 (63.023 s).
+
+F12 is **play** frame 6919 at 22.061 ms. The probable felt event is the
+full-scene, collision-active **play** pair 6895/6896 at 80.635/41.034 ms,
+ending 534/493 ms before F12. Their onset-to-marker distances are 614/534 ms.
+The user reported only completion, so this remains a reaction-window
+identification rather than a claim that the marker proves the pair.
+
+The onset is now exact. **Play** frame 6895 changes shadow region, jumps from
+214 to 1,445 indexed draws, and creates 104 buffers / 3,550,400 bytes. The
+second-manager/first-plane reflection `BuildScene` owns 95 of those creations
+and takes 8.896 ms CPU. Its following exact `RenderLightStyle` takes
+10.479 ms CPU / 35.892 ms GPU across 211 draws. The later exact second-owner
+deferred geometry-scene class then blocks for 44.927 ms CPU, including
+43.473 ms in game `Draw` / `DrawIndexed`, while producing only 2.175 ms GPU.
+That is the same-frame submission drain after the reflection producer, not a
+second GPU producer. The whole frame is 80.635 ms CPU / 83.652 ms GPU;
+directional shadow separately contributes 24.561 ms GPU.
+
+The new class partition overturns the remaining texture-proximity inference.
+Two Gadir terrain texture Resources cost 7.865 ms and four nested texture
+creations cost 6.115 ms inside one hot `TerrainBlock` call at reflection draw
+173. But the 20-draw GPU bin containing that call costs only 0.495 ms. The
+large reflection ranges occur earlier: four all-`GraphicsMeshInstance` bins
+covering draws 21--100 cost 3.065, 8.094, 4.339, and 1.347 ms, and the next
+bin, containing eighteen `TerrainPlug` and two `GraphicsMeshInstance` calls,
+costs 14.451 ms. Therefore cold terrain texture creation is a real CPU cost
+but does not own this 35.892 ms reflection GPU interval.
+
+The off-main descriptor trace names a second, later mechanism. No off-main
+texture creation starts on frame 6895. From frames 6896--6901, one loader
+thread makes 45 successful, initial-data, fully-mipped compressed textures in
+64.082 ms of overlapping worker time: 37 `DXGI_FORMAT_BC3_UNORM`, six BC1,
+and two BC2. Their mip-chain payload is about 168.668 MiB, including three
+4096-square textures. Thus texture realization can amplify the multi-frame
+tail, but it cannot cause the first 80.635 ms frame. A texture throttle alone
+would miss the principal onset; lower-mip staging remains a separate, more
+invasive tail experiment rather than the first fix.
+
+The within-run reference is the nine collision-active, full-scene **play**
+frames 6908--6916, all under 60 ms, with 1,400--1,699 indexed draws, no main
+Resource load, no region change, and no off-main texture creation. Their means
+are 20.423 ms total, 15.622 ms exact `Engine::Render`, 8.256 ms game draw
+submission, 20.735 ms whole GPU, 6.900 ms directional GPU, and 0.269 ms exact
+second-plane reflection GPU. Frame 6895 is therefore +60.212 ms total,
++36.213 ms game draw submission, +62.917 ms whole GPU, and +35.662 ms exact
+reflection GPU relative to that same-scene class. These nested and queued
+scopes are not added.
+
+The buffer count supplies a stable, machine-independent behavior boundary.
+For the primary transition frame in Runs 73--80, exact second-plane reflection
+created 69, 64, 132, 63, 172, 80, 87, and 95 buffers. The largest neighboring
+Run-80 population was 30. Seven of those eight transition frames had
+24.751--63.225 ms of exact reflection GPU work; Run 79's 0.440 ms occurrence
+is the measured exception. A threshold of 32 therefore selects the repeated
+admission class without using elapsed time or ordinary draw count.
+
+Run 81 adds default-off
+`[performance] reflection_defer_admission_mesh=1`. The already verified exact
+reflection `BuildScene` call counts successful D3D buffer creations through
+the existing device vtable proxy. At 32, only `GraphicsMeshInstance` calls in
+the immediately following exact reflection `RenderLightStyle` are omitted.
+Terrain reflection remains, the normal colour pass later in the same recursive
+branch is untouched, and mesh reflection returns on the next frame. This is a
+narrow one-frame colour-first staging A/B, not whole-reflection reuse, culling,
+or a loader rewrite. It specifically attacks the four proved hot mesh bins;
+it does not claim to remove the independent TerrainPlug range or the later
+off-main texture tail.
+
+The behavior reuses the exact `patchCall` sites at Engine RVAs `0x186501` and
+`0x18694d` plus the already verified `GraphicsMeshInstance::RenderPass` entry
+at `0x172dd0`. That shared six-byte prologue is verified across 24 bytes with
+its relocation and only six complete bytes are stolen. With tracing off the
+manager/plane trace calls are not patched, no clock or GPU query runs, and the
+fix installs only its behavior dependencies. New CSV fields
+`engine_reflection_admission_deferred` and
+`engine_reflection_admission_mesh_deferred` are counts, not durations.
+
+The extended verifier passes 771 checks. Independently changing the new
+32-buffer constant to 33 fails the exact behavior-boundary check. Doctor, the
+760,320-byte release build, and the complete off-game self-test pass, including
+GPU timestamp retirement. Run 81 is installed from
+`cache/runs/run81-reflection-admission-mesh.ini`. Source and installed DLLs are
+byte-identical at SHA-256
+`d1856797e4e9d0870ccf955c930ead8823a11ce5b0babff997f1d79201eb9545`;
+source and installed INIs are byte-identical at SHA-256
+`2890b546c468625797ab01af0f906a8f6e1d39a22487d15ed660de435cd7dfa3`.
+Relative to Run 80's measurement settings, only
+`reflection_defer_admission_mesh=1` changes behavior. Relative to the normal
+live config, full trace, draw timing, and F12 are the explicit measurement
+settings. The completed Run-80 live files matched their archives before both
+stale live names were removed. The game has not been launched.
+
+
+## 103. Run 81 rejects mesh-only reflection staging; Run 82 skips the complete admitted reflection once
+
+Run 81 is archived as `tqflicker-frames.run81.csv`, SHA-256
+`801c30ef033205f4be9de082b26aa08769f1b27b583f6dc123242c81f762ccce`,
+and `tqflicker-debug.run81.log`, SHA-256
+`5ce41f83503a603a1b90fb43161ab98382104bc64f8518271d00794208604692`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 6,939 contiguous frames, 0--6938. Its five parts are **menu** 0--1933
+(18.441 s), **load-game frame** 1934 (1,517.0 ms), **loading screen**
+1935--3024 (9.525 s), **first world frame** 3025 (761.5 ms), and **play**
+3026--6938 (61.942 s).
+
+F12 is **play** frame 6409 at 24.416 ms. The plausible felt event is the
+**play** pair 6388/6389 at 115.778/138.573 ms, ending 579/440 ms before the
+marker. The user reports **no perceptible change in the stutter**. That report
+is the primary result; neither a maximum nor the nearest frame supersedes it.
+
+The behavior fired exactly once, on play frame 6388. Its reflection
+`BuildScene` created 91 of the frame's 105 buffers and crossed the fixed
+32-buffer gate. The following exact reflection `RenderLightStyle` omitted all
+87 `GraphicsMeshInstance` calls. Its retained class totals prove zero mesh
+calls/draws, 50 `TerrainPlug` calls/draws, and 18 `TerrainBlock` calls/draws.
+This is therefore a valid rejection of the mesh-only treatment, not a missed
+trigger or a different route event.
+
+What survived is larger than the omitted class. Exact second-manager / first-
+plane reflection still costs 41.959 ms GPU; its six populated chunks total
+41.920 ms, all from the terrain-only range. The first three chunks cost
+26.862, 8.739, and 5.816 ms. One `TerrainBlock` call spends 9.699 ms in two
+Resource loads, including 6.711 ms of texture creation, but that nested CPU
+work must not be added to the GPU chunks. Directional shadow is a separate
+81.536 ms GPU producer. The later exact second-owner geometry-scene class
+spends 52.994 ms CPU, including 51.871 ms in game draw submission, for only
+13.910 ms GPU. Frame 6388 is 115.778 ms CPU / 214.312 ms GPU; frame 6389 then
+blocks 113.445 ms in game draw submission. This is again producer followed by
+queue backpressure, now with the mesh-reflection population proved absent.
+
+Twelve nearby collision-active, full-scene **play** frames 6391--6408 under
+60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
+change, and no off-main texture creation, average 21.348 ms total, 16.889 ms
+exact `Engine::Render`, 7.085 ms game draw submission, 21.360 ms whole GPU,
+7.591 ms directional GPU, 0.237 ms exact reflection GPU, and 0.820 ms exact
+second-owner geometry-scene GPU. They are a within-run post-admission class,
+not a cross-run p50. Against it, play frame 6388 adds 94.430 ms total,
+46.079 ms game draw submission, 192.952 ms whole GPU, 73.945 ms directional
+GPU, and 41.722 ms exact reflection GPU.
+
+The texture tail remains secondary to onset. No off-main texture creation is
+charged to frame 6388. From play frames 6389--6407, 49 off-main initial-data
+texture creations take 66.054 ms of overlapping loader-thread time. The
+during-session debug file reaches its bounded output size while reporting
+later retained chunks, but it contains the complete frame-6388 class report;
+the CSV counters and timings are complete.
+
+Run 82 adds default-off
+`[performance] reflection_defer_admission_all=1`. It uses the same exact
+successful-buffer count in reflection `BuildScene`, but at 32 skips the one
+immediately following whole reflection `RenderLightStyle` call. Terrain and
+mesh reflection return on the next frame. Directional shadows, the main
+colour pass, resource loading, culling, and `shadow_split` are untouched. A
+one-frame stale water reflection is the explicit visual trade-off to report.
+With tracing off this behavior needs only the already verified `patchCall`
+sites at Engine RVAs `0x186501` and `0x18694d`; it does not install the mesh
+entry detour or any trace group. The new CSV count
+`engine_reflection_admission_all_deferred` is not a duration.
+
+The extended verifier passes, including the conditional mesh-detour
+dependency and the exact shared 32-buffer boundary. Doctor, the 761,856-byte
+release build, and the complete off-game self-test pass, including GPU
+timestamp retirement. Run 82 is installed from
+`cache/runs/run82-reflection-admission-all.ini`. Source and installed DLLs are
+byte-identical at SHA-256
+`85e1b1e48c2f616446f9e51dd767c1bb441d59ce51ca2187549a87ecdb758a7d`;
+source and installed INIs are byte-identical at SHA-256
+`9d9b9f2e33d0fd44bc3f2a763797dd9600b5d69a36a3b73a17a5a398cba90ac2`.
+The completed Run-81 live outputs matched their archives before both stale
+live names were removed. The game has not been launched.
+
+
+## 104. Run 82 rejects whole-reflection omission; Run 83 traces first-seen renderables across every consumer
+
+Run 82 is archived as `tqflicker-frames.run82.csv`, SHA-256
+`dd4c8083f39b0574851819795c39d9d48321fec5a5e91da65d26cb9dbe66f235`,
+and `tqflicker-debug.run82.log`, SHA-256
+`d786d6e79c95a3cd1413a547cea9befd24540ad44f5b5995c1d3e14da1daef1c`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 7,004 contiguous frames, 0--7003. Its five parts are **menu** 0--1704
+(16.308 s), **load-game frame** 1705 (1,269.2 ms), **loading screen**
+1706--2873 (9.800 s), **first world frame** 2874 (588.7 ms), and **play**
+2875--7003 (63.294 s).
+
+F12 is **play** frame 6436 at 25.336 ms. The plausible felt pair is **play**
+frames 6417/6418 at 79.752/165.151 ms, ending 569/404 ms before the marker.
+The user again reports that the stutter **feels the same**. This subjective
+failure is the primary result.
+
+The whole-child behavior fired exactly once at the reaction candidate. Play
+frame 6417 creates 98 buffers, 87 inside exact second-manager / first-plane
+reflection `BuildScene`, crosses the fixed 32-buffer gate, and records
+`engine_reflection_admission_all_deferred=1`. The complete following
+`RenderLightStyle` is omitted: its wrapper takes 37 us and its exact GPU
+interval is only 0.042 ms. Thus Run 82 is a valid rejection of complete
+one-frame reflection omission, not another missed trigger.
+
+The removed work migrates to later consumers. On play frame 6417, the exact
+second deferred owner's geometry-setup scene-list class costs 39.381 ms GPU,
+terrain ground costs 20.157 ms GPU, and exact
+`GraphicsShadowMapDx11::RenderDirectional` costs 114.014 ms GPU across 755
+draws. The whole frame is 79.752 ms CPU / 203.690 ms GPU and spends 49.020 ms
+in game draw submission. On frame 6418, whole GPU work has fallen to 26.780
+ms, but the exact second-owner geometry-scene class spends 125.166 ms CPU,
+including 123.574 ms in its game draw calls; total game draw submission is
+125.098 ms. This is first-use production followed by queue backpressure even
+with reflection absent.
+
+Thirteen nearby collision-active, full-scene **play** frames 6421--6435 under
+60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
+change, and no off-main texture creation, average 22.327 ms total, 17.877 ms
+exact `Engine::Render`, 7.068 ms game draw submission, 22.447 ms whole GPU,
+7.999 ms directional GPU, 1.072 ms terrain-ground GPU, 0.998 ms exact second-
+owner geometry-setup GPU, 1.042 ms exact second-owner geometry-scene GPU, and
+0.271 ms exact reflection GPU. This is a within-run post-admission class, not
+a cross-run p50.
+
+Texture realization again follows rather than causes onset. The skipped
+reflection child performs no main-thread Resource load on frame 6417. On frame
+6418, when reflection returns, its two Gadir terrain Resources cost 10.145 ms,
+including 7.940 ms texture creation. From frames 6418--6436, 50 off-main
+texture creations take 67.988 ms of overlapping loader-thread time. Neither
+population can explain the already completed frame-6417 GPU producer.
+
+The correction is architectural but does not yet justify a renderer rewrite.
+The >=32-buffer reflection `BuildScene` event is a reliable observation point
+for a wider scene-admission transition; it is not the unique owner of the
+cost. Omitting the first consumer merely transfers cold GPU work to the exact
+second-owner scene list, terrain ground, and directional shadow. A further
+reflection-only A/B, texture throttle, archive prefetch, or lower-mip change
+would therefore test the wrong boundary. The next decision is whether newly
+seen directional casters can be admitted progressively, or whether first use
+is broad enough to require staging the whole scene.
+
+Run 83 is passive and answers that decision in one route. The existing exact
+`TerrainPlug`, `TerrainBlock`, and `GraphicsMeshInstance::RenderPass` wrappers
+now count their calls and object identities independently in four exact
+consumers: second-manager / first-plane reflection, second-owner geometry
+setup, second-owner geometry scene, and
+`GraphicsShadowMapDx11::RenderDirectional`. Each `_first` count means that
+object has never previously reached that exact consumer in the session.
+Per-consumer draw counts expose unnamed remainder. The bounded 8,192-entry,
+16-probe identity table reports overflow and adds no clock, D3D getter, GPU
+query, Engine patch, or behavior change. Header and rows now share one audited
+32-KiB line bound. Independent perturbations of 8,192, 16, the identity hash
+salt, and 32,768 are all rejected by the verifier.
+
+The extended verifier passes. Doctor, the 763,904-byte release build, and the
+complete off-game self-test pass, including GPU timestamp retirement and
+first-once-per-class/per-consumer identity behavior. Run 83 is installed from
+`cache/runs/run83-admission-consumer-identities.ini`. Source and installed
+DLLs are byte-identical at SHA-256
+`5ba7abeaa4b2f66527f9420697e26d09dafbcb3d94f22f7a94fae43e1e7a71e8`;
+source and installed INIs are byte-identical at SHA-256
+`a5a356546fd025482f3ad659a9ec1deb6f04b57669e1fd14f30322314feec8b0`.
+The completed Run-82 live outputs matched their archives before both stale
+live names were removed. The game has not been launched.
+
+
+## 105. Run 83 rejects raw first-seen count and prepares coordinated progressive secondary-pass admission
+
+Run 83 is archived as `tqflicker-frames.run83.csv`, SHA-256
+`91a3336771bc1e18ab03850fcaa9edaf120899deafc46ccfaf25d5a0a2758658`,
+and `tqflicker-debug.run83.log`, SHA-256
+`765278ffba1089e26bd1fcedd79c2c3d11c2d871e2ed3caff5c304df1d3eb2f9`.
+Both archives were compared byte-for-byte with the completed live files. The
+CSV has 6,885 contiguous frames, 0--6884. Its five parts are **menu** 0--1650,
+**load-game frame** 1651, **loading screen** 1652--2790, **first world frame**
+2791, and **play** 2792--6884.
+
+F12 is **play** frame 6316 at 35.349 ms. Frame 6315 is 80.927 ms but ends only
+35 ms before the key is retrieved; its onset is only 116 ms before the marker,
+so it cannot be selected as the user's reaction target. The plausible felt
+event is **play** frame 6293 at 97.060 ms, ending 604 ms before F12. The user
+reports that the session still feels the same. Run 83 is passive, so that
+subjective result is a baseline rather than a behavior rejection.
+
+The new identity trace is complete at that event and has zero table overflow.
+Exact second-manager / first-plane reflection contains 288 draws and sees 70
+`TerrainPlug` calls, 24 `TerrainBlock` calls, and 144
+`GraphicsMeshInstance` calls. Their first-in-this-exact-consumer counts are
+12, 4, and 118: 134 previously unseen reflection renderables arrive on one
+frame. Exact directional shadow contains 762 mesh calls but only 15 first
+visits. Both exact second-owner geometry consumers contain zero first visits;
+the scene child has 42 unclassified draws. Thus the marked population is not
+a large wave entering all four consumers together.
+
+Raw first-seen count is not itself a cost model. Another **play** region
+change, frame 4144, admits 125 first-seen meshes to exact second-owner geometry
+setup and 40 to directional shadow but is only 20.344 ms CPU / 25.846 ms GPU.
+Frame 6360 admits 100 first-seen directional meshes in 22.638 ms CPU /
+23.807 ms GPU. The candidate's distinguishing fact is first GPU/resource use
+of a particular cold population and pass state, not merely the number of new
+object pointers.
+
+At **play** frame 6293, exact reflection `BuildScene` is 19.322 ms CPU and
+creates 176 buffers. Its following exact `RenderLightStyle` is 41.786 ms CPU /
+54.860 ms GPU. Sixteen nested main-thread Resources take 34.934 ms, including
+four meshes and twelve textures; fourteen texture creations take 23.445 ms.
+The retained names include new NPC/debris meshes and textures plus the two
+known Gadir rocky-pebbles terrain textures. Reflection's 20-draw GPU bins are
+not uniform: bins 1, 7, and 8 cost 25.064, 13.128, and 7.334 ms. The first is
+all `GraphicsMeshInstance`; the seventh is eighteen mesh calls; the eighth is
+eight `TerrainPlug` calls. Six fresh buffers are observed in both reflection
+and directional shadow on the same frame, but no large shared-buffer
+population reappears.
+
+Fourteen nearby collision-active, full-scene **play** frames 6300--6314 under
+60 ms, with 1,400--1,699 indexed draws, no main Resource load, no region
+change, and no off-main texture creation, average 21.693 ms total, 16.988 ms
+exact `Engine::Render`, 6.604 ms game draw submission, 21.974 ms whole GPU,
+7.877 ms directional GPU, 1.055 ms terrain-ground GPU, 0.970/0.941 ms exact
+second-owner geometry-setup/scene GPU, and 0.260 ms exact reflection GPU.
+Relative to this same-run local class, frame 6293 adds 75.367 ms total, 76.812
+ms render, 11.817 ms draw submission, 79.260 ms whole GPU, 15.640 ms
+directional GPU, 21.904 ms terrain-ground GPU, and 54.619 ms reflection GPU.
+These nested/queued intervals are not additive.
+
+The fresh correction is that no single named renderer is “the stutter.” The
+native engine makes a region's cold GPU population eligible without a frame
+budget. CPU Resource realization, reflection, terrain ground, and directional
+shadow therefore submit together; later game draws become queue-drain points.
+Which exact pass owns the longest timestamp changes across identical routes
+because the immediate D3D11 queue serializes the burst differently. This
+mechanism applies to native Windows D3D11 as well as Wine/CrossOver and does
+not require a host-round-trip explanation.
+
+Runs 81--82 did not test progressive GPU admission. They omitted one
+reflection consumer and returned all postponed work together on the next
+consumer/frame, where the felt burst remained. Run 84 instead adds default-off
+`[performance] secondary_pass_admission_budget=8`. After the existing exact
+>=32-buffer reflection signal or a directional-region change, reflection and
+directional shadow share one budget of eight newly encountered renderable
+identities per frame. `TerrainPlug`, `TerrainBlock`, and
+`GraphicsMeshInstance::RenderPass` still execute Resource/material setup, but
+their game `Draw`/`DrawIndexed` calls are suppressed while an identity is
+pending. Already admitted objects and the normal colour class stay stock. A
+pending identity competes again on the next frame, so 134 objects are spread
+over roughly seventeen visible frames rather than all returning one frame
+later.
+
+This adds no Engine byte target. It reuses the verified reflection
+`BuildScene`/`RenderLightStyle` `patchCall` sites, the exact directional-shadow
+wrapper, the existing 19-byte `TerrainPlug`/`TerrainBlock` entries with six
+bytes stolen, the 24-byte `GraphicsMeshInstance::RenderPass` entry with six
+bytes stolen, and the mod-owned D3D11 Draw vtable hooks. The behavior reaches
+`install()` with the performance probe off and brings no trace group. Six new
+CSV fields are counts only. The existing 8,192-slot / 16-probe identity table
+also carries pending/admitted state and fails open to stock rendering on
+overflow. A separate Present-driven frame serial keeps the budget functional
+when `performance_trace=0`.
+
+The extended verifier passes 784 checks. Changing the new budget upper bound
+from 64 to 65 fails it. Doctor, the 766,464-byte release build, and the complete
+off-game self-test pass, including GPU timestamp retirement and the synthetic
+two-object shared budget / next-frame pending admission. Run 84 is installed
+from `cache/runs/run84-secondary-pass-admission-budget8.ini`. Source and
+installed DLLs are byte-identical at SHA-256
+`dad27c4f84f667f7577a540f88519869993b187a1b64a26c43c3360a1f0e6dd5`;
+launch-time source and installed INIs were byte-identical at SHA-256
+`dd1e2661c5c9e650c00c9183ae53287568becabbadc774c59f3357f1a8e51b69`.
+Run 83's live CSV/debug log matched their archives immediately before both
+stale live names were removed. The game has not been launched.
+
+
+## 106. Run 84 removes the marked-area burst; transition proxies are no longer the right admission gate
+
+Run 84 is archived as `tqflicker-frames.run84.csv`, SHA-256
+`ef3a9372e7d03b8cedfc234424dcf183a8456621a0317b165aea54f7e201f8e9`,
+and `tqflicker-debug.run84.log`, SHA-256
+`91814fc42cd9ef8118fa0ecac44166d6622cbbe81c91937d3f879a75497fb149`.
+Both archives were compared byte-for-byte with the completed live files. The
+result-annotated Run-84 INI is SHA-256
+`0aa75236405ade7ad422fb727cb859b2a064e5becffb09c245431d963b57c46c`;
+the exact launch-time INI hash is retained in section 105. The
+CSV has 7,310 contiguous frames, 0--7309. Its five parts are **menu** 0--2141,
+**load-game frame** 2142, **loading screen** 2143--3205, **first world frame**
+3206, and **play** 3207--7309.
+
+F12 is **play** frame 6827 at 22.249 ms. This press was deliberately made at
+the old route location even though no hitch was apparent, not as a reaction
+to a felt event, so the marker has no reaction-window candidate. The exact
+old transition class is nevertheless unambiguous: **play** frame 6764, 1.320
+s before F12, changes the directional-shadow region, creates 93 buffers, and
+runs the second-manager / first-plane reflection `BuildScene`. The user's
+primary result is that the old stutter now appears fixed or is no longer
+visible.
+
+Frame 6764 is 38.229 ms CPU / 31.758 ms GPU. Exact reflection is 0.762 ms GPU,
+directional shadow is 15.168 ms GPU, and terrain ground is 2.147 ms GPU. As a
+same-run reference, 58 collision-active, full-scene **play** frames 6769--6826
+under 60 ms in the 1,300--1,699 indexed-draw band have medians of 20.681 ms
+CPU, 20.646 ms GPU, 7.062 ms directional GPU, 1.113 ms terrain-ground GPU,
+and 0.328 ms exact reflection GPU. The transition surcharge is therefore
+17.548 ms CPU and 11.112 ms GPU. Run 83's old marked transition candidate had
+a 75.367 ms same-run CPU surcharge and a 79.260 ms same-run GPU surcharge;
+this comparison uses each run's controlled local reference, not a p50 across
+routes.
+
+The behavior fired and spread rather than merely moving the work once. At
+frame 6764 it admits eight new identities and suppresses 55 pending secondary
+draw calls. Frames 6765--6768 admit 8, 8, 8, and 7 further identities; they
+are 28.645, 21.397, 24.939, and 24.502 ms. Pending draw suppression falls to
+28, 20, 8, and zero. Thus 39 identities are admitted over five frames with no
+later rebound in this transition. The shared eight-object limit is never
+exceeded anywhere in the CSV, and the 8,192-slot identity table reports zero
+overflow.
+
+The current arming condition is less restrictive in practice than its
+reflection wording suggests. A directional-region change arms the behavior
+on **first world frame** 3206, after which it remains armed for the session.
+The marked frame reports two trigger events because it has both another
+directional-region change and a >=32-buffer reflection build, but neither is
+needed to re-arm it. **Play** frame 4545 demonstrates the non-reflection case:
+its directional-region change has no reflection call, and the already-armed
+budget spreads its pending directional population over frames 4545--4549.
+
+The user's general objection is still correct: neither a 32-buffer reflection
+build nor a change between two non-null shadow-region pointers is a universal
+definition of a scene-admission burst. The next implementation should stop
+trying to name the transition. In either exact reflection or directional-
+shadow context, count previously unseen shared renderable identities in the
+current presented frame; allow the first `N` stock, and self-arm when identity
+`N+1` proves that an actual backlog exists. Subsequent identities are pending
+under the existing shared budget. This directly measures the work being
+controlled, covers transitions with no reflection and no region-pointer
+change, and can remove the CreateBuffer dependency from a trace-off behavior
+install. Region changes and reflection buffer counts can remain trace
+telemetry but should no longer control the fix.
+
+Do not combine either rejected reflection-defer experiment with this result.
+Runs 81 and 82 moved one reflection consumer's complete work to a later
+consumer/frame and produced no subjective improvement. Run 84 instead leaves
+Resource/material preparation in place and reduces exact reflection at the
+marked transition to 0.762 ms GPU by budgeting the actual draws. Skipping the
+mesh reflection or whole reflection once would now duplicate that treatment,
+delay useful preparation, and add one-frame stale reflection for no measured
+benefit.
+
+
+## 107. Run 85 self-arms on the controlled population instead of transition proxies
+
+Run 84 is the first positive subjective and measured result for the old
+**play** transition: the user reports that it appears fixed or is no longer
+visible, while the exact old event falls to 38.229 ms CPU / 31.758 ms GPU and
+spreads 39 newly admitted secondary identities over five frames without a
+one-frame rebound. Section 106 contains the five session parts and controlled
+same-run comparison.
+
+Run 85 changes only how default-off
+`[performance] secondary_pass_admission_budget=8` begins controlling new
+objects. The first eight previously unseen identities encountered across the
+exact reflection and directional-shadow classes in a presented frame render
+normally and become globally admitted. The ninth proves that the actual
+controlled population exceeds the budget, records the one session arming
+event, remains pending, and retries against the next presented frame's shared
+budget. An identity already admitted through one secondary consumer spends no
+slot in the other. Once armed, the state remains explicit, but the same budget
+rule itself handles every later population without needing another trigger.
+
+The >=32-buffer reflection build and a change between two non-null directional
+shadow-region pointers no longer arm this behavior. They remain trace
+telemetry and continue to drive only their older default-off experiments where
+applicable. A trace-off progressive-admission boot therefore no longer
+requests the D3D11 `CreateBuffer` vtable hook. This covers a scene transition
+with no reflection, fewer than 32 created buffers, or no region-pointer change
+without inventing a broader scene-transition proxy.
+
+An install audit also closed a pre-existing fail-open gap. Progressive
+admission now independently requests the mod's `Draw` and `DrawIndexed` vtable
+wrappers even if every visual feature and trace group is disabled. Visual
+installation publishes readiness only when both slots patch successfully;
+the Engine-side reflection, directional, terrain, and mesh behavior becomes
+active only with that readiness plus all three existing verified Engine
+dependencies. Failure of either draw slot leaves all game draws stock. No new
+Engine target, byte table, or detour is added.
+
+The self-test now proves that two shared identities fit a synthetic budget of
+two without arming, identity three self-arms and remains pending in both
+secondary consumers, and that identity enters on the next presented frame.
+It also proves that the progressive option no longer asks for the reflection
+buffer signal. The verifier checks the pressure ordering, removal of both
+proxy calls, CreateBuffer independence, draw-hook request/readiness ordering,
+atomic Engine activation, and shutdown reset. All 784 site checks, doctor, the
+766,464-byte release build, and the complete off-game self-test pass; GPU
+timestamp retirement passes with one non-flushing poll and one post-flush
+poll.
+
+Run 85 is installed from
+`cache/runs/run85-secondary-self-arming-budget8.ini`. Source and installed
+DLLs are byte-identical at SHA-256
+`d654f91f5f98e8c931501fb4cf27554a9ed0f251432e6727f34c6a84c6033569`;
+launch-time source and installed INIs were byte-identical at SHA-256
+`b9aec8863f2ed6bf27fc6bd54030c8e909bd6c7aaeb052f2e5a043ff3fca2f41`.
+The archived INI header is annotated with the completed result in section 108.
+No stale live CSV or debug log existed, and the game had not been launched.
+
+
+## 108. Run 85 confirms the fix and proves self-arming without the reflection proxy
+
+Run 85 is archived as `tqflicker-frames.run85.csv`, SHA-256
+`61a90305a13a833f1ae08aabf1dd1e27cb1cd787da58f16534493fc53e8d4a97`,
+and `tqflicker-debug.run85.log`, SHA-256
+`1bddaaafd7f2c9c6ea7b81edba8cc4cf117dde1f3ec99bfef8341b6bc684ca67`.
+Both archives were compared byte-for-byte with the completed live files. The
+result-annotated Run-85 INI is SHA-256
+`e352417f76d4859b2ccb7469564ffc68da472a8bcf689e364c97dc0d421b91e3`;
+the exact launch-time INI hash is retained in section 107. The
+CSV has 7,305 contiguous frames, 0--7304. Its five parts are **menu** 0--1902,
+**load-game frame** 1903, **loading screen** 1904--2995, **first world frame**
+2996, and **play** 2997--7304.
+
+F12 is **play** frame 6583 at 22.240 ms. As in Run 84, this is a deliberate
+old-location marker without a felt hitch, not a human-reaction marker. The
+exact old transition class is **play** frame 6490, 1.917 s before F12: it
+changes the directional-shadow region, creates 60 buffers in the whole frame,
+and runs the second-manager / first-plane reflection `BuildScene`. The user
+again reports that no old stutter was noticeable.
+
+Frame 6490 is 40.117 ms CPU / 40.780 ms GPU. Exact reflection is 0.128 ms GPU,
+directional shadow is 19.090 ms GPU, and terrain ground is 0.765 ms GPU. As a
+same-run reference, 90 collision-active, full-scene **play** frames 6493--6582
+under 60 ms in the 1,200--1,699 indexed-draw band have medians of 20.484 ms
+CPU, 20.471 ms GPU, 6.971 ms directional GPU, 1.021 ms terrain-ground GPU,
+and 0.315 ms exact reflection GPU. The transition surcharge is 19.633 ms CPU
+and 20.309 ms GPU. This repeats Run 84's positive result using each run's
+controlled local class rather than an across-run p50.
+
+The self-arming behavior is exact. It records one trigger in the whole
+session, on **first world frame** 2996: eight new identities are admitted and
+449 pending directional draw calls are suppressed. The exact reflection
+>=32-buffer counter is zero on that frame and zero for the entire session.
+Although the frame also has a shadow-region change, Run 85's verified code no
+longer reads that event as an admission trigger. Later region changes do not
+increment the one-shot trigger counter.
+
+At the marked **play** transition, four new reflection plus four new
+directional-shadow identities consume the shared budget, and ten further
+directional draw calls are suppressed. The next frame admits one reflection
+plus seven shadow identities with zero suppression; frame 6492 admits one
+further identity. Those frames are 32.247 and 20.943 ms CPU / 20.330 and
+20.889 ms GPU, so the transition has no large postponed rebound. A separate
+**play** population beginning at frame 6616 proves the generalized class in
+the data: it has no region change and no reflection threshold, admits eight,
+and suppresses 102 pending shadow calls. That population is spread through
+frame 6631; none of those frames exceeds 59.033 ms. It has no felt marker and
+is not claimed as a subjective event.
+
+Across the session there are 85 newly admitted reflection identities and
+1,336 newly admitted directional-shadow identities. The shared per-frame
+admission count never exceeds eight, the identity table has zero overflow,
+and the rejected mesh-only and whole-reflection omission counters remain
+zero. The exact marked-area class plus the user's second positive report now
+support keeping progressive secondary-pass admission and rejecting more trace
+or another reflection omission. The next confirmation should use the same
+budget eight with `performance_trace=0`: normal play must preserve the result
+without the measurement load, and that boot exercises the newly independent
+trace-off Draw-hook path.
+
+
+
+## 109. Promote the measured fixes and retire the rejected behavior switches
+
+This is a source/configuration cleanup, not a new game run; §108 remains the
+latest measured and subjective result. The numbered findings had been
+physically misordered: §69--§108 appeared newest-first between §68 and the
+original §69. Their complete section blocks are now in ascending order, so a
+reader encounters the correction after the claim it overturns. No run text or
+conclusion was rewritten during that reorder, and the verifier now rejects a
+duplicate or descending numbered section.
+
+The current configuration interface no longer accepts six experiments that
+their own runs rejected: `async_level_load`, `timer_period_ms`,
+`pump_timer_min_ms`, `shadow_transition_reuse`,
+`reflection_defer_admission_mesh`, and `reflection_defer_admission_all`.
+Their historical code constants, byte verification, CSV fields, run INIs, and
+findings remain so the evidence can still be audited, but the request values
+are compile-time false and no INI key can activate the behavior. The archive
+cache is explicitly retained.
+
+`shadow_defer_cold_alpha` is renamed `shadow_defer_cold_resources`. “Alpha”
+was inaccurate: this patch set defers cold root meshes for opaque and
+alpha-tested `GraphicsMeshInstance` directional-shadow casters, defers cold
+base textures where the alpha-tested shadow requires them, and omits material,
+bump-override, and replaced-base texture work that the active directional
+shader cannot consume. `shadow_defer_cold_textures` would still have hidden
+the root-mesh half. The early `shadow_defer_cold_actor_pose` boundary remains a
+separate option because it runs before the mesh-instance caster boundary and
+fails open independently.
+
+The measured accepted defaults are now `loose_texture_max=4096`,
+`archive_cache_mb=8`, `shadow_defer_cold_resources=1`,
+`shadow_defer_cold_actor_pose=1`, `terrain_preload_layers=1`, and
+`secondary_pass_admission_budget=8`. These are real defaults both when a key
+is absent and when no INI exists. Every behavior still has an explicit stock
+override (`0`), still reaches `install()` with `performance_trace=0`, and
+still enables no trace group. The 8 MiB archive default is the measured cache
+ceiling from §20, not a claim that archive caching explains the later
+secondary-pass burst.
+
+The separate `draw_timing` input is also removed. `performance_trace=full`
+now always measures the game's `Draw`, `DrawIndexed`, and `Map` calls and
+retains the `draw_submit_ms`, `map_resource_ms`, and `# draw_timing=` output
+schema. Hitch-only `performance_trace=1` does not enable those thousands of
+clock pairs per frame, preserving its leave-on cost. Thus “full” now means the
+complete measurement without making the cheaper trace mode pay for it.
+
+The cleanup passes `npm run doctor`, a clean release build, and the complete
+off-game self-test with zero failures, including GPU timestamp retirement.
+The site/configuration verifier now performs 792 checks and passes all 792.
+Eleven independent mutations of the new contracts were tried one at a time;
+each made the verifier fail, including every promoted constant, full-trace
+draw timing, the README sample, and the findings-order guard.
+
+`cache/runs/run86-promoted-defaults-trace-off.ini` is prepared from
+`live-config.ini` with no parsed-setting difference and installed beside the
+validated DLL. The build and installed DLL share SHA-256
+`18f2bdda3f81d5c42140561fb3cf25f4659983a2d6d08b63af31b77a031bc53f`;
+the archived and installed Run-86 INI share SHA-256
+`bd6c8bee9b6de574cf72dbb63cc31e1fef7bbe368207f1b7507dac47d8bc79bc`.
+No live CSV or debug log existed before installation, and the game was not
+launched. Run 86 therefore remains a prepared confirmation, not a result.
+
+
+## 110. Every accepted performance path remains live with both traces off
+
+This is a source/install audit, not a game run; §108 remains the latest
+measured result and Run 86 remains unlaunched. The concern was valid because
+two comments still described the old architecture as “install nothing unless
+the probe is on.” The executable logic did not have that gate, but the
+comments were wrong and are now corrected.
+
+With `[debug] trace=0` and `performance_trace=0`, `probe::enabled()` is false
+and `engineprobe::wants(group)` is false for every trace group. The accepted
+performance paths do not use `wants()` as their only entry:
+
+- `streaming=optimized` selects the progressive uploader before the probe is
+  read. It installs its texture/SRV/resource hooks and Present worker whenever
+  the separately verified renderer-level Present hook is available.
+- `loose_texture_max=4096` installs the two audited file-source vtable gates
+  directly from the non-zero cap.
+- `archive_cache_mb=8` is included beside, not inside, the archive trace gate;
+  it attaches the block wrapper and commits the slab after all archive-layout
+  checks pass.
+- `shadow_defer_cold_resources=1` prepares the verified resource dependencies
+  and enters `installShadow` independently of the shadow trace group.
+- `shadow_defer_cold_actor_pose=1` implies that same complete resource gate and
+  then patches the earlier exact `Actor::AddToScene` call only if the later
+  cold-caster gate is active.
+- `terrain_preload_layers=1` enters `installTerrain` independently and sets
+  the behavior active only after the existing `LoadTextures` call and stock
+  `TerrainType::PreLoad` target both verify.
+- `secondary_pass_admission_budget=8` first requests the visual
+  `Draw`/`DrawIndexed` hooks without requesting draw timing, then independently
+  installs its terrain, directional-shadow, and reflection boundaries. It
+  becomes active only if both Draw hooks and all three Engine-side families
+  succeeded; otherwise every draw remains stock.
+
+The off-game self-test now writes the exact trace-off combination and asserts
+that all five Engine-side requests (counting the two shadow switches
+separately) remain selected while every trace group remains false. Static
+verification separately follows the two visual behaviors, every real install
+condition above, and the behavior branches inside the installed hooks. The
+verifier passes 804/804 checks. Twelve independent trace-off regressions were
+applied one at a time, and every one made verification fail: six at option or
+hook installation and six more that incorrectly gated the already-installed
+streaming, loose-file, archive, shadow, terrain, or secondary-admission
+behavior at execution time.
+
+The runtime distinction is explicit. `probe::engineCount`, timing scopes, and
+`g_shadowTracing` may become no-ops when the probe is off, but their results
+are never used to decide whether a resource is queued, a texture is rejected,
+a cache block is served, a terrain type is preloaded, or a secondary draw is
+deferred. The secondary budget uses its own Present serial rather than
+`probe::currentFrameIndex()`, and Draw/DrawIndexed test suppression before
+their optional `drawTimingEnabled()` branch.
+
+Doctor, the release build, and the complete off-game self-test pass with zero
+failures; GPU timestamp retirement also passed. The final build and installed
+DLL are byte-identical at SHA-256
+`5bd20787b9689668627259ea33e72ab60f71f0375d2df962baf011abb700a432`.
+The already installed Run-86 INI is unchanged and remains trace-off. No game
+process was launched.
 
 
 ## Cross-references worth acting on

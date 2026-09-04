@@ -232,8 +232,9 @@ value is ~136 ms off the worst frame of a session at 8 MiB, which stays over
 1.3 s regardless, because `Region::LoadLevel` and the ~950 ms nothing names
 are what dominate it.
 
-`archive_cache_mb` ships at `0`. Whether 8 MiB is worth switching on is a
-judgement call, not a measurement, and run 23
+At this stage `archive_cache_mb` shipped at `0`; findings §109 later promoted
+the measured 8 MiB ceiling to the default. Whether 8 MiB was worth switching
+on was a judgement call, not a measurement, and run 23
 (`cache/runs/run23-archive-cache-serving.ini`, `archive_cache_mb=8`) is the
 first boot that actually serves a block and so the first that measures rather
 than computes the win.
@@ -852,7 +853,7 @@ opened 1,299 archive files and churned 150 MiB. Wine's heap is not slow. This
 is the right outcome for a "needs its own evidence" item, and it is recorded
 rather than deleted so the reasoning stays legible.)*
 
-**Config.** `[performance] archive_cache_mb = 0` (0 disables and allocates
+**Config at this stage.** `[performance] archive_cache_mb = 0` (0 disables and allocates
 nothing; `8verify` for a verification boot), `archive_prefetch_kb = 0`, and
 `archive_decompress = original | libdeflate | libdeflate_verify`.
 

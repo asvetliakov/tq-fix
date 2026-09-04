@@ -2,14 +2,61 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current after **Run 85 repeated
-the positive marked-area result and proved self-arming secondary-population
-pressure** on branch
-`stutter-mitigation`.
+built, what is measured, and what to do next. Current after the **post-Run-85
+trace-off performance-path audit** on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**READ FINDINGS §110 BEFORE §109.** This audit is not another game run; Run
+85 remains the latest measured and subjective result. The proven Run-85 state
+was committed first as `b059254` (`fix: progressively admit secondary-pass
+objects`). Findings §69--§108, which had accidentally been stored in reverse
+order between §68 and the original §69, are now ascending without rewriting
+any section body. The verifier enforces that ordering.
+
+The shipping defaults are now the user's measured normal configuration:
+`loose_texture_max=4096`, `archive_cache_mb=8`,
+`shadow_defer_cold_resources=1`, `shadow_defer_cold_actor_pose=1`,
+`terrain_preload_layers=1`, and `secondary_pass_admission_budget=8`. These
+defaults apply with an omitted key and with no INI; explicit `0` remains the
+stock rollback for each behavior. The renamed cold-resource switch includes
+opaque and alpha-tested root meshes as well as the texture paths, which is why
+`shadow_defer_cold_alpha` and the still-incomplete proposed
+`shadow_defer_cold_textures` were rejected as current names.
+
+The rejected behavior keys no longer parse: `async_level_load`,
+`timer_period_ms`, `pump_timer_min_ms`, `shadow_transition_reuse`,
+`reflection_defer_admission_mesh`, and `reflection_defer_admission_all`.
+Their historical findings, run INIs, CSV columns, byte evidence, and
+compile-time-disabled paths remain auditable. `archive_cache_mb` remains.
+`draw_timing` is no longer an input: `performance_trace=full` always enables
+the game's Draw/DrawIndexed/Map clocks, while hitch-only
+`performance_trace=1` stays lightweight.
+
+The next game confirmation is the normal trace-off route with these defaults.
+It tests the same `GraphicsMeshInstance`/`Actor` directional-shadow resource
+mitigations, `TerrainRT` layer preload, and shared reflection/directional
+secondary-pass admission without measurement overhead. Report the five parts
+separately—menu, load-game frame, loading screen, first world frame, and
+play—and report any local shadow or reflection pop even if the old marked-area
+play hitch remains absent.
+
+That confirmation is installed as
+`cache/runs/run86-promoted-defaults-trace-off.ini`. It has no parsed-setting
+difference from `live-config.ini`; only its explanatory header differs. The
+installed DLL matches the build at SHA-256
+`5bd20787b9689668627259ea33e72ab60f71f0375d2df962baf011abb700a432`,
+and the installed/archived INI hash is
+`bd6c8bee9b6de574cf72dbb63cc31e1fef7bbe368207f1b7507dac47d8bc79bc`.
+There was no stale live CSV or debug log, and the game has not been launched.
+Validation is green: doctor, release build, zero-failure self-test including
+GPU timestamp retirement, and 804/804 verifier checks. In addition to the
+eleven cleanup mutations, twelve one-at-a-time trace-off regressions—six
+install gates and six installed-hook behavior gates—each fail the verifier.
+
+**ARCHIVED RUN-85 RESULT BRIEF — corrected above by findings §109.**
 
 **READ FINDINGS §108 BEFORE §107. Run 85 confirms the fix.** Its five parts
 are **menu** 0--1902, **load-game frame** 1903, **loading screen** 1904--2995,
