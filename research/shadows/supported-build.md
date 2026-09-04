@@ -20,3 +20,49 @@ image base of `0x10000000` and must be treated as a separate address space. Its
 embedded PDB path is
 `C:\Program Files (x86)\Jenkins\workspace\TQ\trunk\Code\Binary\Ship\Direct3D11.pdb`;
 the PDB itself is not distributed with the game.
+
+## Supplied HekTo Game.dll variant
+
+Audited on 2026-09-05 from the reporter's `Game (1).dll`:
+SHA-256 `5f816173647526e3a6792d1a8136768dd68f30c5344da01c5bb86170a20a5bfb`.
+This is a modification of the Game.dll above, with the same PE timestamp and
+all 18,060 exported names at the same RVAs. The original `.rdata`, `.data`,
+`.rsrc`, and `.reloc` raw sections are byte-identical. Only 12 bytes differ in
+the original `.text`: two six-byte entry replacements. SizeOfImage grows from
+`0x59a000` to `0x59c000` with `.rxHekTo` and `.rwHekTo` sections.
+
+| Entry | RVA | Existing modification |
+| --- | --- | --- |
+| `Item::GetDropMeshOverride` | `0x80150` | Jumps to `0x59a008`; optional callback through `0x59b008`, then original prologue at `0x59a05c` and body at `0x80156`. |
+| `GameEngine::Update` | `0x19a230` | Jumps to `0x59a035`; calls original prologue at `0x59a067`, which jumps to `0x19a236`, then runs an optional callback through `0x59b00c`. |
+
+Both callback slots are initially zero in the supplied file. Their runtime
+owners and behavior are not established by this static audit.
+
+The optional Game update timer verifies the modified entry (including its
+relocated SEH operand), all 39 wrapper bytes, all 11 relocated-prologue bytes,
+and the appended section layout. It replaces the existing six-byte jump with
+an absolute hook branch and forwards through the existing wrapper. This
+preserves the callback, stack argument, and original body; its timing includes
+the wrapper and any callback. Teardown restores the exact original jump.
+Copying the existing relative jump into a generic trampoline would be invalid.
+The item hook and both callback slots remain owned by the existing modification.
+
+The original `.text` is admitted to Game caller attribution after these checks.
+The widescreen frustum hook already accepts the unchanged unique viewport and
+frustum import-call window. Engine shadow, terrain, and archive behavior hooks
+are independent of this Game.dll profile.
+
+Validation: byte-site audits pass against both binaries; executable synthetic
+PE tests run both update paths at a relocated base, preserve callback order,
+`this` and delta, restore entry bytes, and reject changed branches, signature
+operands, section permissions, and unknown image sizes. The full off-game
+regression suite passes. Native Windows gameplay with this variant remains
+unverified, and compatibility does not establish the fountain crash's cause.
+
+To repeat the supplied-variant audit without replacing the installed Game.dll:
+
+```sh
+TQ_VERIFY_GAME_DLL='/path/to/Game (1).dll' \
+  python3 research/streaming/tools/verify-sites.py
+```

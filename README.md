@@ -781,6 +781,14 @@ native Windows x86 and CrossOver WinMM reference DLLs when those references are
 available locally. Native Windows runtime testing is still required before
 calling that environment fully validated.
 
+The supplied HekTo-modified `Game.dll` is also supported by the optional
+`GameEngine::Update` timer and Game caller attribution. Its existing update
+wrapper and callback are preserved after exact layout checks; the widescreen
+frustum hook already recognizes its unchanged call site. See the
+[binary audit and validation limits](research/shadows/supported-build.md#supplied-hekto-gamedll-variant).
+This compatibility support does not establish a fix for the reported fountain
+crash.
+
 ## Third-party code
 
 The SMAA shader and area/search lookup textures under `third_party/smaa` are

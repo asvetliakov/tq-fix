@@ -495,17 +495,6 @@ const SweepSite kSweepSites[kSweepCount] = {
     {kSweepWindowBRva, kSweepWindowBBytes, sizeof(kSweepWindowBBytes), 14},
     {kSweepWindowBRva, kSweepWindowBBytes, sizeof(kSweepWindowBBytes), 28},
 };
-const DWORD kGameUpdateRva = 0x19a230;
-const char kGameUpdateName[] = "?Update@GameEngine@GAME@@QAEXH@Z";
-const BYTE kGameUpdateBytes[] = {
-    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
-    0x6a, 0xff,
-    0x68, 0, 0, 0, 0,                          // push <SEH handler>
-    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
-    0x50,
-    0x81, 0xec, 0x70, 0x04                     // sub esp,0x470
-};
-const Relocation kGameUpdateRelocs[] = {{9, 0x2f1112}};
 
 // ---------------------------------------------------------------------------
 // Configuration. Bit 0 means "everything"; the rest select groups, so a run
@@ -4792,7 +4781,12 @@ bool installSweeps(HMODULE engine) {
 void addChainModule(HMODULE module, DWORD expectedSize, char tag,
                     const char* what) {
     if (g_chainModuleCount >= kChainModules || !module) return;
-    if (!auditedImage(module, expectedSize, what)) return;
+    if (tag == 'G') {
+        if (!auditedGameImage(module)) {
+            tq::hdr::log("Engine trace: Game.dll layout unsupported, caller attribution skipped\r\n");
+            return;
+        }
+    } else if (!auditedImage(module, expectedSize, what)) return;
     BYTE* text = nullptr;
     SIZE_T size = 0;
     if (!tq::detour::moduleText(module, &text, &size)) return;
@@ -4805,21 +4799,88 @@ void addChainModule(HMODULE module, DWORD expectedSize, char tag,
                  tag, what, (void*)text, (unsigned long)size);
 }
 
-bool installGame() {
-    HMODULE game = GetModuleHandleW(L"Game.dll");
-    if (!game || !auditedImage(game, kGameImageSize, "Game.dll")) {
-        note("GameEngine::Update", false);
-        return false;
-    }
-    void* target = resolve(game, kGameUpdateName, kGameUpdateRva);
-    if (target)
+// Game (1).dll has the stock export/RVA layout, but an existing E9 at Update
+// reaches a HekTo wrapper and a relocated prologue. Never copy that relative
+// E9 into an ordinary detour trampoline, or bypass the wrapper's callback.
+static DWORD gameImageSize(HMODULE game) {
+    const BYTE* base = (const BYTE*)game;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+    if (!game || !tq::detour::readable(dos, sizeof(*dos))
+        || dos->e_magic != IMAGE_DOS_SIGNATURE
+        || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return 0;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (!tq::detour::readable(nt, sizeof(*nt))
+        || nt->Signature != IMAGE_NT_SIGNATURE
+        || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386
+        || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return 0;
+    return nt->OptionalHeader.SizeOfImage;
+}
+
+bool auditedGameImage(HMODULE game) {
+    const DWORD size = gameImageSize(game);
+    const BYTE* base = (const BYTE*)game;
+    if (size == kGameImageSize)
+        return tq::detour::matches(game, base + kGameUpdateRva,
+            signature(kGameUpdateBytes, sizeof(kGameUpdateBytes),
+                      kGameUpdateRelocs, 1));
+    if (size != kGameHekImageSize) return false;
+
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+    if (nt->FileHeader.NumberOfSections != 7
+        || !tq::detour::readable(sections, 7 * sizeof(*sections))) return false;
+    const IMAGE_SECTION_HEADER& code = sections[5];
+    const IMAGE_SECTION_HEADER& data = sections[6];
+    if (memcmp(code.Name, ".rxHekTo", 8) || memcmp(data.Name, ".rwHekTo", 8)
+        || code.VirtualAddress != 0x59a000 || code.Misc.VirtualSize != 0x1000
+        || data.VirtualAddress != 0x59b000 || data.Misc.VirtualSize != 0x1000
+        || !(code.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        || !(code.Characteristics & IMAGE_SCN_MEM_READ)
+        || !(data.Characteristics & IMAGE_SCN_MEM_WRITE)) return false;
+    return tq::detour::matches(game, base + kGameUpdateRva,
+               signature(kGameHekUpdateBytes, sizeof(kGameHekUpdateBytes),
+                         kGameUpdateRelocs, 1))
+        && tq::detour::matches(game, base + kGameHekWrapperRva,
+               signature(kGameHekWrapperBytes, sizeof(kGameHekWrapperBytes)))
+        && tq::detour::matches(game, base + kGameHekTrampolineRva,
+               signature(kGameHekTrampolineBytes, sizeof(kGameHekTrampolineBytes)))
+        && tq::detour::readable(base + 0x59b00c, sizeof(void*));
+}
+
+bool installGameUpdateAt(HMODULE game, void* target) {
+    if (!target || target != (BYTE*)game + kGameUpdateRva
+        || !auditedGameImage(game)) return false;
+    if (gameImageSize(game) == kGameHekImageSize) {
+        // Publish the existing wrapper before the replacement is reachable.
+        // It calls its own relocated prologue, which returns to Update+6,
+        // so there is no recursion through our newly patched export.
+        g_gameUpdate = (GameUpdateFn)((BYTE*)game + kGameHekWrapperRva);
+        if (!tq::detour::replace(g_gameUpdateDetour, game, target,
+                signature(kGameHekUpdateBytes, sizeof(kGameHekUpdateBytes),
+                          kGameUpdateRelocs, 1),
+                6, (const void*)&hookGameUpdate))
+            g_gameUpdate = nullptr;
+        if (g_gameUpdate)
+            tq::hdr::log("Engine trace: GameEngine::Update preserves verified HekTo wrapper and callback\r\n");
+    } else {
         tq::detour::attach(
             g_gameUpdateDetour, game, target,
             signature(kGameUpdateBytes, sizeof(kGameUpdateBytes),
                       kGameUpdateRelocs, 1),
             6, (const void*)&hookGameUpdate, (void**)&g_gameUpdate);
-    note("GameEngine::Update", g_gameUpdate != nullptr);
+    }
     return g_gameUpdate != nullptr;
+}
+
+bool installGame() {
+    HMODULE game = GetModuleHandleW(L"Game.dll");
+    const bool ok = game && installGameUpdateAt(
+        game, resolve(game, kGameUpdateName, kGameUpdateRva));
+    if (!ok)
+        tq::hdr::log("Engine trace: Game.dll Update layout unsupported or hook unavailable\r\n");
+    note("GameEngine::Update", g_gameUpdate != nullptr);
+    return ok;
 }
 
 // One import slot, with the original captured before the slot is rewritten so

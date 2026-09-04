@@ -1452,6 +1452,41 @@ const unsigned kSweepCount = 7;
 // argument, callee popped, confirmed by the `ret 4` that ends the body at
 // +0x5ee.
 const DWORD kGameImageSize = 0x0059a000;
+const DWORD kGameHekImageSize = 0x0059c000;
+const DWORD kGameHekWrapperRva = 0x59a035;
+const DWORD kGameHekTrampolineRva = 0x59a067;
+// Exact supplied HekTo wrapper. Its post-update callback remains owned by
+// that modification; the writable callback slot must never be overwritten.
+const BYTE kGameHekUpdateBytes[] = {
+    0xe9, 0x00, 0xfe, 0x3f, 0x00, 0x90,
+    0x6a, 0xff, 0x68, 0, 0, 0, 0,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50, 0x81, 0xec, 0x70, 0x04
+};
+const BYTE kGameHekWrapperBytes[] = {
+    0x55, 0x8b, 0xec, 0xff, 0x75, 0x08,
+    0xe8, 0x27, 0x00, 0x00, 0x00,
+    0xe8, 0x00, 0x00, 0x00, 0x00, 0x58,
+    0x8d, 0x80, 0xc7, 0x0f, 0x00, 0x00, 0x8b, 0x00,
+    0x85, 0xc0, 0x74, 0x06, 0x0f, 0x1f, 0x40, 0x00,
+    0xff, 0xd0, 0x5d, 0xc2, 0x04, 0x00
+};
+const BYTE kGameHekTrampolineBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0xe9, 0xc4, 0x01, 0xc0, 0xff
+};
+const DWORD kGameUpdateRva = 0x19a230;
+const char kGameUpdateName[] = "?Update@GameEngine@GAME@@QAEXH@Z";
+const BYTE kGameUpdateBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x6a, 0xff,
+    0x68, 0, 0, 0, 0,                          // push <SEH handler>
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x50,
+    0x81, 0xec, 0x70, 0x04                     // sub esp,0x470
+};
+const Relocation kGameUpdateRelocs[] = {{9, 0x2f1112}};
+
 
 // --- TQ.exe's main loop. Not a patch at all: three entries of the
 // executable's own import address table, so the redirect is scoped to the one
@@ -2792,6 +2827,8 @@ bool auditedImage(HMODULE module, DWORD expectedSize, const char* what);
 void addChainModule(HMODULE module, DWORD expectedSize, char tag,
                     const char* what);
 
+bool auditedGameImage(HMODULE game);
+bool installGameUpdateAt(HMODULE game, void* target);
 bool installGame();
 
 bool installLoop();

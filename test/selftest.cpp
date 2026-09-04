@@ -698,6 +698,8 @@ void testEngineProbe() {
           && !tq::engineprobe::wantsForTest(131072),
           "the trace-off accepted behavior set enables no trace group");
 
+    check(tq::engine::exerciseGameUpdateCompatibilityForTest(),
+          "stock/HekTo Game Update preserves ABI, callback order and teardown; rejects altered layouts");
     check(tq::engine::exerciseTraceOffHooksForTest(),
           "trace-off shared hooks preload, queue cold roots and budget draws"
           " without entering either recorder");

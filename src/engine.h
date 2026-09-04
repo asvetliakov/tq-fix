@@ -84,6 +84,7 @@ void shutdown();
 
 #ifdef TQ_SELFTEST
 bool exerciseTraceOffHooksForTest();
+bool exerciseGameUpdateCompatibilityForTest();
 #endif
 
 } }

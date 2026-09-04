@@ -50,6 +50,116 @@ int __fastcall meshPasses(void*, void*) { ++meshCalls; return 4; }
 void __fastcall actorUpdate(void*, void*) { ++actorCalls; }
 }
 
+namespace {
+unsigned gameSequence, gameBodyOrder, gameCallbackOrder;
+void* gameSelf;
+int gameDelta;
+void __fastcall mockGameBody(void* self, void*, int delta) {
+    gameSelf = self;
+    gameDelta = delta;
+    gameBodyOrder = ++gameSequence;
+}
+void __cdecl mockGameCallback() { gameCallbackOrder = ++gameSequence; }
+}
+
+bool exerciseGameUpdateCompatibilityForTest() {
+    using namespace detail;
+    BYTE* image = (BYTE*)VirtualAlloc(nullptr, kGameHekImageSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!image) return false;
+    HMODULE module = (HMODULE)image;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)image;
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(image + 0x80);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    nt->OptionalHeader.SizeOfImage = kGameHekImageSize;
+    nt->FileHeader.NumberOfSections = 7;
+    IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+    memcpy(sections[0].Name, ".text", 5);
+    sections[0].VirtualAddress = 0x1000;
+    sections[0].Misc.VirtualSize = 0x31d77b;
+    memcpy(sections[5].Name, ".rxHekTo", 8);
+    sections[5].VirtualAddress = 0x59a000;
+    sections[5].Misc.VirtualSize = 0x1000;
+    sections[5].Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
+    memcpy(sections[6].Name, ".rwHekTo", 8);
+    sections[6].VirtualAddress = 0x59b000;
+    sections[6].Misc.VirtualSize = 0x1000;
+    sections[6].Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    BYTE* entry = image + kGameUpdateRva;
+    memcpy(entry, kGameHekUpdateBytes, sizeof(kGameHekUpdateBytes));
+    *(DWORD*)(entry + 9) = (DWORD)(image + kGameUpdateRelocs[0].rva);
+    memcpy(image + kGameHekWrapperRva, kGameHekWrapperBytes,
+           sizeof(kGameHekWrapperBytes));
+    memcpy(image + kGameHekTrampolineRva, kGameHekTrampolineBytes,
+           sizeof(kGameHekTrampolineBytes));
+    *(void**)(image + 0x59b00c) = (void*)&mockGameCallback;
+
+    // Complete the verified sub esp,0x470, then substitute a tiny original
+    // body. Execute the real wrapper/trampoline at a relocated module base:
+    // this catches an E9 copied without relocation, recursion, stack/this/
+    // delta corruption, or a lost/reordered third-party callback.
+    const BYTE tail[] = {0, 0, 0x8b, 0xe5, 0x5d, 0xb8, 0, 0, 0, 0, 0xff, 0xe0};
+    memcpy(entry + sizeof(kGameHekUpdateBytes), tail, sizeof(tail));
+    *(DWORD*)(entry + sizeof(kGameHekUpdateBytes) + 6) = (DWORD)&mockGameBody;
+    BYTE before[sizeof(kGameHekUpdateBytes)];
+    memcpy(before, entry, sizeof(before));
+    bool ok = auditedGameImage(module);
+    entry[1] ^= 1;
+    ok &= !installGameUpdateAt(module, entry) && !g_gameUpdate;
+    entry[1] ^= 1;
+    image[kGameHekWrapperRva + 7] ^= 1;
+    ok &= !installGameUpdateAt(module, entry) && !g_gameUpdate;
+    image[kGameHekWrapperRva + 7] ^= 1;
+    image[kGameHekTrampolineRva + 7] ^= 1;
+    ok &= !installGameUpdateAt(module, entry) && !g_gameUpdate;
+    image[kGameHekTrampolineRva + 7] ^= 1;
+    entry[9] ^= 1;
+    ok &= !auditedGameImage(module);
+    entry[9] ^= 1;
+    sections[5].Characteristics &= ~IMAGE_SCN_MEM_EXECUTE;
+    ok &= !auditedGameImage(module);
+    sections[5].Characteristics |= IMAGE_SCN_MEM_EXECUTE;
+    nt->OptionalHeader.SizeOfImage += 0x1000;
+    ok &= !auditedGameImage(module);
+    nt->OptionalHeader.SizeOfImage -= 0x1000;
+    ok &= !installGameUpdateAt(module, entry + 1);
+    ok &= memcmp(before, entry, sizeof(before)) == 0;
+
+    for (unsigned variant = 0; variant < 2; ++variant) {
+        if (variant) {
+            nt->OptionalHeader.SizeOfImage = kGameImageSize;
+            nt->FileHeader.NumberOfSections = 5;
+            memcpy(entry, kGameUpdateBytes, sizeof(kGameUpdateBytes));
+            *(DWORD*)(entry + 9) = (DWORD)(image + kGameUpdateRelocs[0].rva);
+            memcpy(before, entry, sizeof(before));
+        }
+        gameSequence = gameBodyOrder = gameCallbackOrder = 0;
+        gameSelf = nullptr;
+        gameDelta = 0;
+        bool installed = installGameUpdateAt(module, entry);
+        ok &= installed;
+        if (installed) {
+            ((GameUpdateFn)entry)(image + 0x500, nullptr, 37);
+            ok &= gameSelf == image + 0x500 && gameDelta == 37
+                && gameBodyOrder == 1
+                && gameCallbackOrder == (variant ? 0u : 2u);
+        }
+        tq::detour::detach(g_gameUpdateDetour);
+        g_gameUpdate = nullptr;
+        ok &= memcmp(before, entry, sizeof(before)) == 0;
+        ok &= memcmp(image + kGameHekWrapperRva, kGameHekWrapperBytes,
+                     sizeof(kGameHekWrapperBytes)) == 0;
+        ok &= *(void**)(image + 0x59b00c) == (void*)&mockGameCallback;
+    }
+    VirtualFree(image, 0, MEM_RELEASE);
+    return ok;
+}
+
 bool exerciseTraceOffHooksForTest() {
     using namespace detail;
     if (tq::probe::enabled()) return false;

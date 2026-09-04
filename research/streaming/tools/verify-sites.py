@@ -3954,13 +3954,15 @@ def check_deferred_passes(engine):
 
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
-    game = PE(os.path.join(GAME, "Game.dll"))
+    game = PE(os.environ.get("TQ_VERIFY_GAME_DLL") or os.path.join(GAME, "Game.dll"))
     exe = PE(os.path.join(GAME, "TQ.exe"))
 
     print("Image identity")
     ok(engine.imagesize == const("kEngineImageSize"), "Engine.dll SizeOfImage %#x" % engine.imagesize)
     check_legacy_scalar_contract(engine)
-    ok(game.imagesize == const("kGameImageSize"), "Game.dll SizeOfImage %#x" % game.imagesize)
+    hek = game.imagesize == const("kGameHekImageSize")
+    ok(game.imagesize in (const("kGameImageSize"), const("kGameHekImageSize")),
+       "Game.dll supported SizeOfImage %#x" % game.imagesize)
     ok(exe.imagesize == const("kExecutableImageSize"), "TQ.exe SizeOfImage %#x" % exe.imagesize)
 
     print("\nEngine.dll byte tables")
@@ -4096,8 +4098,39 @@ def main():
                win_rva, "kRegionLockRelocs")
 
     print("\nGame.dll byte tables")
-    window(game, "kGameUpdateBytes", "kGameUpdateBytes", const("kGameUpdateRva"),
+    update_bytes = "kGameHekUpdateBytes" if hek else "kGameUpdateBytes"
+    window(game, update_bytes, update_bytes, const("kGameUpdateRva"),
            "kGameUpdateRelocs")
+    if hek:
+        window(game, "HekTo Update wrapper", "kGameHekWrapperBytes",
+               const("kGameHekWrapperRva"), None)
+        window(game, "HekTo relocated prologue", "kGameHekTrampolineBytes",
+               const("kGameHekTrampolineRva"), None)
+        ok(len(game.sections) == 7
+           and game.sections[5][:3] == ('.rxHekTo', 0x59a000, 0x1000)
+           and game.sections[6][:3] == ('.rwHekTo', 0x59b000, 0x1000),
+           "HekTo appended section layout")
+        for site, target in [(const("kGameUpdateRva"), const("kGameHekWrapperRva")),
+                             (const("kGameHekWrapperRva") + 6, const("kGameHekTrampolineRva")),
+                             (const("kGameHekTrampolineRva") + 6, const("kGameUpdateRva") + 6)]:
+            delta = struct.unpack('<i', game.read(site + 1, 4))[0]
+            ok(site + 5 + delta == target,
+               "HekTo branch %#x -> %#x preserves original update chain" % (site, target))
+
+    # The existing frustum hook resolves imports and requires this unique
+    # complete call window, independently of the GameEngine update profile.
+    imports_by_name = {name: address for address, (_, name) in game.imports().items()}
+    viewport = imports_by_name.get('??0Viewport@GAME@@QAE@HHHH@Z')
+    frustum = imports_by_name.get('?GetFrustum@WorldCamera@GAME@@QBE?AVWorldFrustum@2@ABVViewport@2@@Z')
+    pattern = (bytes.fromhex('68 00 03 00 00 68 00 04 00 00 6a 00 6a 00 8d 4c 24 18 ff 15')
+               + struct.pack('<I', viewport or 0)
+               + bytes.fromhex('8d 44 24 08 50 8d 84 24 5c 06 00 00 50 8d 4c 24 20 ff 15')
+               + struct.pack('<I', frustum or 0)
+               + bytes.fromhex('b9 02 01 00 00 8b f0 f3 a5'))
+    text_section = next(s for s in game.sections if s[0] == '.text')
+    code = game.read(text_section[1], text_section[2])
+    ok(viewport and frustum and code.count(pattern) == 1,
+       "Game.dll retains the unique imported update-viewport/frustum call window")
 
     print("\nExported targets resolve to the recorded RVAs")
     for pe, label, name_const, rva_const in [
