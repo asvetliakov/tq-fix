@@ -73,8 +73,15 @@ typedef HRESULT(WINAPI* CreateRenderTargetViewFn)(ID3D11Device*, ID3D11Resource*
                                                    ID3D11RenderTargetView**);
 typedef void(WINAPI* PSSetShaderFn)(ID3D11DeviceContext*, ID3D11PixelShader*,
                                     ID3D11ClassInstance* const*, UINT);
+typedef void(WINAPI* VSSetShaderFn)(ID3D11DeviceContext*, ID3D11VertexShader*,
+                                    ID3D11ClassInstance* const*, UINT);
 typedef void(WINAPI* PSSetShaderResourcesFn)(ID3D11DeviceContext*, UINT, UINT,
                                              ID3D11ShaderResourceView* const*);
+typedef void(WINAPI* IASetVertexBuffersFn)(ID3D11DeviceContext*, UINT, UINT,
+                                           ID3D11Buffer* const*, const UINT*,
+                                           const UINT*);
+typedef void(WINAPI* IASetIndexBufferFn)(ID3D11DeviceContext*, ID3D11Buffer*,
+                                         DXGI_FORMAT, UINT);
 typedef void(WINAPI* DrawFn)(ID3D11DeviceContext*, UINT, UINT);
 typedef void(WINAPI* DrawIndexedFn)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(WINAPI* ClearRenderTargetViewFn)(ID3D11DeviceContext*,
@@ -97,7 +104,10 @@ UnmapFn              g_unmap;
 CreateShaderResourceViewFn g_createShaderResourceView;
 CreateRenderTargetViewFn g_createRenderTargetView;
 PSSetShaderFn g_psSetShader;
+VSSetShaderFn g_vsSetShader;
 PSSetShaderResourcesFn g_psSetShaderResources;
+IASetVertexBuffersFn g_iaSetVertexBuffers;
+IASetIndexBufferFn g_iaSetIndexBuffer;
 DrawFn g_draw;
 DrawIndexedFn g_drawIndexed;
 ClearRenderTargetViewFn g_clearRenderTargetView;
@@ -105,6 +115,9 @@ OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
 RSSetScissorsFn g_rsSetScissors;
 UpdateSubresourceFn g_updateSubresource;
+
+tq::engineprobe::DeferredDrawBindings g_deferredBindings;
+bool g_deferredBindingTracing;
 
 ID3D11Device* g_device;
 ID3D11DeviceContext* g_context;
@@ -1053,6 +1066,14 @@ void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
                                      ID3D11ShaderResourceView* const* views) {
     if (!views || !count || count > D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT
         || !tq::upload::ready()) {
+        if (g_deferredBindingTracing && !g_inside && context == g_context
+            && views && start < tq::engineprobe::DeferredTracePixelResourceSlots) {
+            UINT kept = count;
+            if (kept > tq::engineprobe::DeferredTracePixelResourceSlots - start)
+                kept = tq::engineprobe::DeferredTracePixelResourceSlots - start;
+            for (UINT i = 0; i < kept; ++i)
+                g_deferredBindings.pixelResources[start + i] = views[i];
+        }
         g_psSetShaderResources(context, start, count, views);
         return;
     }
@@ -1065,6 +1086,14 @@ void WINAPI hookPSSetShaderResources(ID3D11DeviceContext* context, UINT start,
     // where it goes; keeping it here keeps this commit a move.
     tq::upload::lock();
     tq::upload::substituteLocked(count, substituted);
+    if (g_deferredBindingTracing && !g_inside && context == g_context
+        && start < tq::engineprobe::DeferredTracePixelResourceSlots) {
+        UINT kept = count;
+        if (kept > tq::engineprobe::DeferredTracePixelResourceSlots - start)
+            kept = tq::engineprobe::DeferredTracePixelResourceSlots - start;
+        for (UINT i = 0; i < kept; ++i)
+            g_deferredBindings.pixelResources[start + i] = substituted[i];
+    }
     g_psSetShaderResources(context, start, count, substituted);
     tq::upload::unlock();
 }
@@ -1277,16 +1306,31 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
     // engine channel instead, where they survive.
     const bool renderThread = tq::probe::isRenderThread();
     const int64_t started = tq::probe::enabled() ? tq::probe::now() : 0;
+    const unsigned startFrame = started ? tq::probe::currentFrameIndex() : 0;
     if (renderThread) tq::probe::count(tq::probe::CounterTextureCreate);
     else tq::probe::engineCount(tq::probe::CounterEngineTexCreateOff);
     HRESULT hr = createTexture2DDispatch(device, desc, initial, texture, caller);
+    uint32_t elapsed = 0;
     if (started) {
         if (renderThread)
-            tq::probe::addPhase(tq::probe::PhaseTextureCreate, started);
-        else
+            elapsed = tq::probe::finishPhase(
+                tq::probe::PhaseTextureCreate, started);
+        else {
+            elapsed = tq::probe::microsecondsSince(started);
             tq::probe::engineCount(tq::probe::CounterEngineTexCreateOffUs,
-                                   tq::probe::microsecondsSince(started));
+                                   elapsed);
+        }
     }
+    if (SUCCEEDED(hr) && texture && *texture && desc)
+        tq::engineprobe::noteDeferredTextureCreated(
+            *texture, elapsed, desc->Width, desc->Height, desc->MipLevels,
+            (unsigned)desc->Format, desc->BindFlags, desc->MiscFlags);
+    if (!renderThread && SUCCEEDED(hr) && texture && *texture && desc)
+        tq::engineprobe::noteOffMainTextureCreated(
+            startFrame, tq::probe::currentFrameIndex(), elapsed,
+            GetCurrentThreadId(), desc->Width, desc->Height, desc->MipLevels,
+            (unsigned)desc->Format, desc->BindFlags, desc->MiscFlags,
+            initial != nullptr);
     return hr;
 }
 
@@ -1399,7 +1443,48 @@ void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* sha
                 replacement = g_hdr.tonePS;
         }
     }
+    if (g_deferredBindingTracing && !g_inside && context == g_context)
+        g_deferredBindings.pixelShader = replacement;
     g_psSetShader(context, replacement, classes, count);
+}
+
+void WINAPI hookVSSetShader(ID3D11DeviceContext* context,
+                            ID3D11VertexShader* shader,
+                            ID3D11ClassInstance* const* classes, UINT count) {
+    if (g_deferredBindingTracing && !g_inside && context == g_context)
+        g_deferredBindings.vertexShader = shader;
+    g_vsSetShader(context, shader, classes, count);
+}
+
+void WINAPI hookIASetVertexBuffers(ID3D11DeviceContext* context, UINT start,
+                                   UINT count, ID3D11Buffer* const* buffers,
+                                   const UINT* strides, const UINT* offsets) {
+    if (g_deferredBindingTracing && !g_inside && context == g_context
+        && start < tq::engineprobe::DeferredTraceVertexBufferSlots) {
+        UINT kept = count;
+        if (kept > tq::engineprobe::DeferredTraceVertexBufferSlots - start)
+            kept = tq::engineprobe::DeferredTraceVertexBufferSlots - start;
+        for (UINT i = 0; i < kept; ++i) {
+            g_deferredBindings.vertexBuffers[start + i] =
+                buffers ? buffers[i] : nullptr;
+            g_deferredBindings.vertexStrides[start + i] =
+                strides ? strides[i] : 0;
+            g_deferredBindings.vertexOffsets[start + i] =
+                offsets ? offsets[i] : 0;
+        }
+    }
+    g_iaSetVertexBuffers(context, start, count, buffers, strides, offsets);
+}
+
+void WINAPI hookIASetIndexBuffer(ID3D11DeviceContext* context,
+                                 ID3D11Buffer* buffer, DXGI_FORMAT format,
+                                 UINT offset) {
+    if (g_deferredBindingTracing && !g_inside && context == g_context) {
+        g_deferredBindings.indexBuffer = buffer;
+        g_deferredBindings.indexFormat = (unsigned)format;
+        g_deferredBindings.indexOffset = offset;
+    }
+    g_iaSetIndexBuffer(context, buffer, format, offset);
 }
 
 const ShadowTexture* dsvShadowTexture(ID3D11DepthStencilView* dsv) {
@@ -2765,9 +2850,16 @@ void WINAPI hookClearRenderTargetView(ID3D11DeviceContext* context,
 HRESULT WINAPI hookCreateBuffer(ID3D11Device* device, const D3D11_BUFFER_DESC* desc,
                                 const D3D11_SUBRESOURCE_DATA* initial,
                                 ID3D11Buffer** buffer) {
-    tq::probe::Scope timing(tq::probe::PhaseBufferCreate);
+    const int64_t started = tq::probe::enabled() ? tq::probe::now() : 0;
     tq::probe::count(tq::probe::CounterBufferCreate);
     HRESULT result = g_createBuffer(device, desc, initial, buffer);
+    const uint32_t elapsed = started && tq::probe::isRenderThread()
+        ? tq::probe::finishPhase(tq::probe::PhaseBufferCreate, started)
+        : started ? tq::probe::microsecondsSince(started) : 0;
+    if (SUCCEEDED(result) && buffer && *buffer && desc)
+        tq::engineprobe::noteDeferredBufferCreated(
+            *buffer, elapsed, desc->ByteWidth, desc->BindFlags,
+            (unsigned)desc->Usage, desc->CPUAccessFlags, desc->MiscFlags);
     if (SUCCEEDED(result) && buffer && *buffer)
         tq::grass::noteBufferCreated(*buffer, desc);
     return result;
@@ -2828,6 +2920,10 @@ void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT ba
 }
 
 void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
+    if (!g_inside && tq::engineprobe::secondaryAdmissionDrawSuppressed()) {
+        tq::engineprobe::noteSecondaryAdmissionDrawSkipped();
+        return;
+    }
     if (!g_inside) tq::probe::count(tq::probe::CounterDraw);
     if (!g_inside) tracePostProcessBinding(context);
     if (!g_inside) restoreBeforeBackBufferDraw(context);
@@ -2840,17 +2936,32 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
+    const bool gpuChunkDraw = !g_inside
+        && tq::engineprobe::gpuChunkDrawActive();
+    if (gpuChunkDraw) tq::engineprobe::beginGpuChunkDraw(context);
     {
         const int64_t started =
             tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
         g_draw(context, count, start);
-        if (started) tq::probe::addPhase(tq::probe::PhaseDrawSubmit, started);
+        if (started) {
+            const uint32_t elapsed = tq::probe::finishPhase(
+                tq::probe::PhaseDrawSubmit, started);
+            tq::engineprobe::countDeferredDraw(
+                elapsed, false, count, start, 0, &g_deferredBindings);
+        }
     }
+    if (gpuChunkDraw)
+        tq::engineprobe::finishGpuChunkDraw(
+            false, count, &g_deferredBindings);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
 
 void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    if (!g_inside && tq::engineprobe::secondaryAdmissionDrawSuppressed()) {
+        tq::engineprobe::noteSecondaryAdmissionDrawSkipped();
+        return;
+    }
     if (!g_inside) tq::probe::count(tq::probe::CounterDrawIndexed);
     if (!g_inside) tracePostProcessBinding(context);
     if (!g_inside) restoreBeforeBackBufferDraw(context);
@@ -2870,6 +2981,9 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         tq::probe::count(tq::probe::CounterGrassDraw);
         tq::probe::gpuBegin(context, tq::probe::GpuGrass);
     }
+    const bool gpuChunkDraw = !g_inside
+        && tq::engineprobe::gpuChunkDrawActive();
+    if (gpuChunkDraw) tq::engineprobe::beginGpuChunkDraw(context);
     {
         // Brackets the game's own call and nothing else. Our grass cross draw
         // below has its own phase, and SMAA and bloom take theirs; a bracket
@@ -2878,7 +2992,12 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         const int64_t started =
             tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
         g_drawIndexed(context, count, start, base);
-        if (started) tq::probe::addPhase(tq::probe::PhaseDrawSubmit, started);
+        if (started) {
+            const uint32_t elapsed = tq::probe::finishPhase(
+                tq::probe::PhaseDrawSubmit, started);
+            tq::engineprobe::countDeferredDraw(
+                elapsed, true, count, start, base, &g_deferredBindings);
+        }
     }
     if (grassDraw) {
         {
@@ -2887,6 +3006,9 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
         }
         tq::probe::gpuEnd(context, tq::probe::GpuGrass);
     }
+    if (gpuChunkDraw)
+        tq::engineprobe::finishGpuChunkDraw(
+            true, count, &g_deferredBindings);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -2904,6 +3026,11 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         return;
     }
     readOptions();
+    g_deferredBindingTracing =
+        tq::engineprobe::deferredDrawTraceRequested();
+    const bool secondaryAdmissionDrawHooks =
+        tq::engineprobe::secondaryPassAdmissionRequested();
+    memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
     g_bloomToggleKeyDown = false;
     g_bloomEnhancedRuntime = true;
     const char* bloomName = g_options.bloom == BloomOriginal ? "original"
@@ -2981,12 +3108,18 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (g_options.anisotropy > 1)
         ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
     else g_createSamplerState = (CreateSamplerStateFn)dv[23];
-    if (grassBufferHooks) {
+    if (grassBufferHooks || g_deferredBindingTracing
+        || tq::engineprobe::reflectionAdmissionBufferTrackingRequested()) {
         ok &= patchSlot(&dv[3], (void*)&hookCreateBuffer, (void**)&g_createBuffer);
+    } else {
+        g_createBuffer = (CreateBufferFn)dv[3];
+    }
+    if (grassBufferHooks) {
         ok &= patchSlot(&cv[14], (void*)&hookMap, (void**)&g_map);
         ok &= patchSlot(&cv[15], (void*)&hookUnmap, (void**)&g_unmap);
     }
-    if (g_options.shadows || g_options.streaming || toneEnabled)
+    if (g_options.shadows || g_options.streaming || toneEnabled
+        || g_deferredBindingTracing)
         ok &= patchSlot(&dv[5], (void*)&hookCreateTexture2D, (void**)&g_createTexture2D);
     else g_createTexture2D = (CreateTexture2DFn)dv[5];
     if (g_options.streaming || hdrRuntime.fp16Active)
@@ -3000,17 +3133,37 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&dv[9], (void*)&hookCreateRenderTargetView,
                         (void**)&g_createRenderTargetView);
     else g_createRenderTargetView = (CreateRenderTargetViewFn)dv[9];
-    if (g_options.smaa || toneEnabled)
+    if (g_options.smaa || toneEnabled || g_deferredBindingTracing)
         ok &= patchSlot(&cv[9], (void*)&hookPSSetShader, (void**)&g_psSetShader);
     else g_psSetShader = (PSSetShaderFn)cv[9];
-    if (g_options.smaa || toneEnabled || nativeBloomControl) {
-        ok &= patchSlot(&cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
-        ok &= patchSlot(&cv[13], (void*)&hookDraw, (void**)&g_draw);
+    if (g_deferredBindingTracing) {
+        ok &= patchSlot(&cv[11], (void*)&hookVSSetShader,
+                        (void**)&g_vsSetShader);
+        ok &= patchSlot(&cv[18], (void*)&hookIASetVertexBuffers,
+                        (void**)&g_iaSetVertexBuffers);
+        ok &= patchSlot(&cv[19], (void*)&hookIASetIndexBuffer,
+                        (void**)&g_iaSetIndexBuffer);
+    } else {
+        g_vsSetShader = (VSSetShaderFn)cv[11];
+        g_iaSetVertexBuffers = (IASetVertexBuffersFn)cv[18];
+        g_iaSetIndexBuffer = (IASetIndexBufferFn)cv[19];
+    }
+    bool secondaryAdmissionDrawHooksReady = false;
+    if (g_options.smaa || toneEnabled || nativeBloomControl
+        || g_deferredBindingTracing || secondaryAdmissionDrawHooks) {
+        const bool indexedOk = patchSlot(
+            &cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
+        const bool drawOk = patchSlot(
+            &cv[13], (void*)&hookDraw, (void**)&g_draw);
+        secondaryAdmissionDrawHooksReady = indexedOk && drawOk;
+        ok &= secondaryAdmissionDrawHooksReady;
     } else {
         g_drawIndexed = (DrawIndexedFn)cv[12];
         g_draw = (DrawFn)cv[13];
     }
-    if (g_options.streaming)
+    tq::engineprobe::setSecondaryAdmissionDrawHooksReady(
+        secondaryAdmissionDrawHooks && secondaryAdmissionDrawHooksReady);
+    if (g_options.streaming || g_deferredBindingTracing)
         ok &= patchSlot(&cv[8], (void*)&hookPSSetShaderResources,
                         (void**)&g_psSetShaderResources);
     else g_psSetShaderResources = (PSSetShaderResourcesFn)cv[8];
@@ -3068,6 +3221,8 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         tq::hdr::log("Shader program build requested\r\n");
     }
     if (!ok) {
+        g_deferredBindingTracing = false;
+        memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
         tq::bloomhook::shutdown();
         g_globalBloomEnabled = false;
         restoreSlots();
@@ -3091,6 +3246,7 @@ void onPresent(IDXGISwapChain* swapChain) {
     // were accumulated over: our own post-work here, the game's Present, and
     // the game's next rendered frame.
     tq::frameoverlay::recordFrame();
+    tq::engineprobe::secondaryAdmissionFrameBoundary();
     tq::probe::beginFrame(g_context);
     // The probe and the overlay both need device objects, and the worker that
     // builds them is otherwise only started by a matched shader -- which never
@@ -3170,6 +3326,8 @@ void shutdown() {
     // First: these are writes into Engine.dll's .text, and every one of them
     // has to be back before the probe they report into goes away.
     tq::engineprobe::shutdown();
+    g_deferredBindingTracing = false;
+    memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
     tq::streaming::setPresentCallback(nullptr);
     tq::streaming::setPostPresentCallback(nullptr);
     tq::streaming::setPreResizeCallback(nullptr);
@@ -3225,11 +3383,16 @@ void shutdown() {
     InterlockedExchange(&g_firstFlipOutputRestoreLogged, 0);
     g_backBufferIdentity = nullptr; g_backBufferWidth = g_backBufferHeight = 0;
     g_createTexture2D = nullptr;
+    g_createBuffer = nullptr;
     g_createPixelShader = nullptr;
     g_createShaderResourceView = nullptr;
     g_createRenderTargetView = nullptr;
     g_clearRenderTargetView = nullptr;
     g_psSetShaderResources = nullptr;
+    g_psSetShader = nullptr;
+    g_vsSetShader = nullptr;
+    g_iaSetVertexBuffers = nullptr;
+    g_iaSetIndexBuffer = nullptr;
     g_updateSubresource = nullptr;
     g_archiveUnmap = nullptr;
     g_directoryOpenFile = nullptr;

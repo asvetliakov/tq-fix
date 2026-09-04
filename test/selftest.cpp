@@ -697,6 +697,197 @@ void testEngineProbe() {
           && tq::probe::phaseForTest(0, tq::probe::PhaseMapResource) == 0.0f,
           "draw_submit records into its own column and not its neighbour");
 
+    // The deferred-pass partition reuses the Draw hook's one ending clock
+    // sample.  Drive two distinct pass buckets directly so an enum/name shift
+    // cannot silently charge the wait to its neighbour.
+    tq::probe::beginFrame(nullptr);
+    const int64_t partitionStart = tq::probe::now();
+    while (tq::probe::now() == partitionStart) {}
+    const uint32_t partitionUs = tq::probe::finishPhase(
+        tq::probe::PhaseDrawSubmit, partitionStart);
+    tq::engineprobe::setDeferredOwnerContextForTest(1, 1);  // setup site
+    tq::engineprobe::setDeferredPassForTest(1);  // geometry
+    tq::engineprobe::countDeferredDrawForTest(partitionUs);
+    tq::engineprobe::noteDeferredCreationForTest(true, 23);
+    tq::engineprobe::noteDeferredCreationForTest(false, 17);
+    tq::engineprobe::resetOffMainTexturesForTest();
+    tq::engineprobe::noteOffMainTextureCreated(
+        70, 71, 1234, 99, 2048, 1024, 12, 77, 8, 4, true);
+    unsigned offStart = 0, offFinish = 0, offElapsed = 0, offThread = 0;
+    unsigned offWidth = 0, offHeight = 0, offMips = 0;
+    bool offInitial = false;
+    const bool offTexture = tq::engineprobe::latestOffMainTextureForTest(
+        &offStart, &offFinish, &offElapsed, &offThread, &offWidth,
+        &offHeight, &offMips, &offInitial);
+    tq::engineprobe::setDeferredOwnerContextForTest(1, 0);  // owner remainder
+    tq::engineprobe::setDeferredPassForTest(6);  // post
+    tq::engineprobe::countDeferredDrawForTest(17);
+    tq::engineprobe::setDeferredPassForTest(0);
+    tq::probe::endFrame(16.7f);
+    check(partitionUs > 0
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredGeometryDrawUs)
+                 == partitionUs
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredPostDrawUs) == 17
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredLightingDrawUs) == 0,
+          "one Draw interval lands in only the active deferred-renderer pass");
+    check(offTexture && offStart == 70 && offFinish == 71
+          && offElapsed == 1234 && offThread == 99
+          && offWidth == 2048 && offHeight == 1024 && offMips == 12
+          && offInitial,
+          "off-main texture trace publishes exact descriptor and frame extent");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineDeferredI1GeometrySetupDrawUs)
+              == partitionUs
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredI2GeometrySetupDrawUs) == 0
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredI1GeometrySetupTexCreate)
+                 == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredI1GeometrySetupTexCreateUs)
+                 == 23
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredI1GeometrySetupBufCreate)
+                 == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineDeferredI1GeometrySetupBufCreateUs)
+                 == 17,
+          "owner invocation and geometry site partition Draw and D3D creation");
+
+    tq::probe::beginFrame(nullptr);
+    tq::engineprobe::setReflectionContextForTest(2, 1);
+    tq::engineprobe::countDeferredDrawForTest(31);
+    tq::engineprobe::noteDeferredCreationForTest(true, 29);
+    tq::engineprobe::noteDeferredCreationForTest(false, 19);
+    tq::engineprobe::setReflectionContextForTest(0, 0);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineReflectionManagerDrawUs) == 31
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2DrawUs) == 31
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2P1DrawUs) == 31
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI1P1DrawUs) == 0
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2P1TexCreate) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2P1TexCreateUs) == 29
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2P1BufCreate) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineReflectionI2P1BufCreateUs) == 19,
+          "reflection manager and plane partition Draw and D3D creation");
+
+    // One newly created main-thread vertex buffer is then consumed by the
+    // exact reflection-plane, directional-shadow, and deferred-owner classes.
+    // The milestone counters must fire only as each new family is reached.
+    tq::probe::beginFrame(nullptr);
+    const void* const crossBuffer = (const void*)0x12345678;
+    tq::engineprobe::setCrossPassTracingForTest(true);
+    tq::engineprobe::setReflectionContextForTest(2, 1);
+    tq::engineprobe::noteCrossPassBufferForTest(crossBuffer, 256);
+    tq::engineprobe::countCrossPassDrawForTest(crossBuffer);
+    tq::engineprobe::setReflectionContextForTest(0, 0);
+    tq::engineprobe::setDirectionalContextForTest(true);
+    tq::engineprobe::countCrossPassDrawForTest(crossBuffer);
+    tq::engineprobe::setDirectionalContextForTest(false);
+    tq::engineprobe::setDeferredOwnerContextForTest(2, 2);  // scene site
+    tq::engineprobe::setDeferredPassForTest(1);  // geometry
+    tq::engineprobe::countCrossPassDrawForTest(crossBuffer);
+    tq::engineprobe::setDeferredPassForTest(0);
+    tq::engineprobe::setDeferredOwnerContextForTest(0, 0);
+    tq::engineprobe::setCrossPassTracingForTest(false);
+    tq::probe::endFrame(16.7f);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineCrossPassBufferCreated) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassBufferCreatedBytes) == 256
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassReflectionDraw) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassShadowDraw) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassDeferredDraw) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineShadowDirectionalDraw) == 1,
+          "cross-pass trace classifies one draw in each exact family");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineCrossPassFreshReflectionBuffer) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassFreshShadowBuffer) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassFreshDeferredBuffer) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassJoinReflectionShadow) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassJoinReflectionDeferred) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassJoinShadowDeferred) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassJoinAllThree) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassIndexOverflow) == 0
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineCrossPassRecentEviction) == 0,
+          "fresh-buffer joins fire once when each cross-pass relation appears");
+
+    // Run 79 spends the same sixteen timestamp pairs continuously across
+    // reflection draws 1--320. Exercise the partition without a device and
+    // prove that the retained call stream distinguishes both TerrainBlock
+    // and GraphicsMeshInstance while keeping nested terrain work.
+    tq::probe::beginFrame(nullptr);
+    tq::engineprobe::setGpuChunkTracingForTest(true);
+    check(!tq::engineprobe::gpuChunkDrawActive(),
+          "ordinary draws bypass sparse GPU chunk helpers");
+    tq::engineprobe::armGpuChunksForTest();
+    check(tq::engineprobe::gpuChunkDrawActive(),
+          "selected reflection RenderLightStyle opens the draw gate");
+    tq::engineprobe::recordGpuChunkTerrainCallForTest(
+        true, (const void*)2, 31, 19, 17);
+    for (unsigned i = 0; i < 18; ++i) {
+        tq::engineprobe::beginGpuChunkDraw(nullptr);
+        tq::engineprobe::finishGpuChunkDraw(true, 3, nullptr);
+    }
+    tq::engineprobe::recordGpuChunkMeshCallForTest((const void*)3, 41);
+    for (unsigned i = 0; i < 18; ++i) {
+        tq::engineprobe::beginGpuChunkDraw(nullptr);
+        tq::engineprobe::finishGpuChunkDraw(true, 3, nullptr);
+    }
+    tq::engineprobe::closeGpuChunksForTest();
+    check(!tq::engineprobe::gpuChunkDrawActive(),
+          "reflection RenderLightStyle exit closes the draw gate");
+    tq::probe::endFrame(16.7f);
+    bool terrainBlock = false;
+    unsigned terrainFirst = 0, terrainLast = 0, terrainCpu = 0;
+    unsigned terrainResources = 0, terrainResourceUs = 0;
+    unsigned terrainTextures = 0, terrainTextureUs = 0;
+    const bool terrainCall = tq::engineprobe::gpuChunkTerrainCallForTest(
+        0, &terrainBlock, &terrainFirst, &terrainLast, &terrainCpu,
+        &terrainResources, &terrainResourceUs, &terrainTextures,
+        &terrainTextureUs);
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineGpuChunkReflectionArm) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineGpuChunkReflectionStartDraw) == 1
+          && tq::probe::counterForTest(
+                 0, tq::probe::CounterEngineGpuChunkReflectionDraw) == 40
+          && tq::engineprobe::gpuChunkBinDrawsForTest(0) == 20
+          && tq::engineprobe::gpuChunkBinDrawsForTest(1) == 20,
+          "reflection GPU chunks cover draws 1--40 as two 20-draw bins");
+    check(terrainCall && terrainBlock && terrainFirst == 1
+          && terrainLast == 2 && terrainCpu == 31
+          && terrainResources == 1 && terrainResourceUs == 19
+          && terrainTextures == 1 && terrainTextureUs == 17,
+          "selected TerrainBlock retains draw ordinals and nested work");
+    check(tq::engineprobe::gpuChunkRenderableKindForTest(0) == 2
+          && tq::engineprobe::gpuChunkRenderableKindForTest(1) == 3,
+          "reflection renderable calls distinguish terrain and mesh classes");
+    tq::engineprobe::setGpuChunkTracingForTest(false);
+
     WritePrivateProfileStringW(L"debug", L"draw_timing", L"0", ini);
     tq::probe::readOptions(ini);
     tq::probe::setOutputPath(csv);
@@ -795,7 +986,8 @@ void testEngineProbe() {
     // what makes them say no is the probe being off.
     check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(4)
           && !tq::engineprobe::wantsForTest(1024)
-          && !tq::engineprobe::wantsForTest(16384),
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(65536),
           "a cache-only boot installs no trace group, whatever engine_trace says");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -838,7 +1030,8 @@ void testEngineProbe() {
     // on its own; what makes them say no is the probe being off.
     check(!tq::engineprobe::wantsForTest(2) && !tq::engineprobe::wantsForTest(16)
           && !tq::engineprobe::wantsForTest(8192)
-          && !tq::engineprobe::wantsForTest(16384),
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(65536),
           "an async-only boot installs no trace group either");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -865,7 +1058,8 @@ void testEngineProbe() {
           "shadow_transition_reuse reaches install() with the probe off, and"
           " still refuses a module that is not Engine.dll");
     check(!tq::engineprobe::wantsForTest(2)
-          && !tq::engineprobe::wantsForTest(16384),
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(65536),
           "a shadow-reuse-only boot installs no trace group");
 
     uint32_t oldMatrix[16], outputMatrix[16];
@@ -913,7 +1107,8 @@ void testEngineProbe() {
           "shadow_defer_cold_alpha reaches install() with the probe off, and"
           " still refuses a module that is not Engine.dll");
     check(!tq::engineprobe::wantsForTest(2)
-          && !tq::engineprobe::wantsForTest(16384),
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(65536),
           "a cold-alpha-shadow-only boot installs no trace group");
     check(tq::engineprobe::shouldDeferShadowAlphaForTest(3, 0)
           && tq::engineprobe::shouldDeferShadowAlphaForTest(4, 1)
@@ -959,7 +1154,8 @@ void testEngineProbe() {
           "shadow_defer_cold_actor_pose reaches install() with the probe off,"
           " and still refuses a module that is not Engine.dll");
     check(!tq::engineprobe::wantsForTest(2)
-          && !tq::engineprobe::wantsForTest(16384),
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(65536),
           "an actor-pose-defer-only boot installs no trace group");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -985,7 +1181,8 @@ void testEngineProbe() {
           " still refuses a module that is not Engine.dll");
     check(!tq::engineprobe::wantsForTest(2)
           && !tq::engineprobe::wantsForTest(16384)
-          && !tq::engineprobe::wantsForTest(32768),
+          && !tq::engineprobe::wantsForTest(32768)
+          && !tq::engineprobe::wantsForTest(65536),
           "a terrain-layer-preload-only boot installs no trace group");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
@@ -993,6 +1190,139 @@ void testEngineProbe() {
     check(!tq::engineprobe::terrainPreloadLayersForTest(),
           "re-reading no INI puts terrain_preload_layers back off");
     DeleteFileW(ini);
+
+    // The tenth independent way in stages transition-sized reflection scene
+    // admission. It counts exact BuildScene buffer creations and omits only
+    // GraphicsMeshInstance reflection calls for that one RenderLightStyle;
+    // it is a fix, not a trace dependency.
+    check(!tq::engineprobe::reflectionDeferAdmissionMeshForTest(),
+          "reflection_defer_admission_mesh is off with no INI at all");
+    WritePrivateProfileStringW(L"performance",
+                               L"reflection_defer_admission_mesh", L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::reflectionDeferAdmissionMeshForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "reflection_defer_admission_mesh reaches install() with the probe"
+          " off, and still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(32768)
+          && !tq::engineprobe::wantsForTest(65536)
+          && !tq::engineprobe::wantsForTest(131072),
+          "a reflection-admission-only boot installs no trace group");
+    check(!tq::engineprobe::reflectionAdmissionTriggeredForTest(31)
+          && tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
+          "reflection admission defers at the verified 32-buffer boundary");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::reflectionDeferAdmissionMeshForTest(),
+          "re-reading no INI puts reflection_defer_admission_mesh back off");
+    DeleteFileW(ini);
+
+    // Run 81 left a terrain-only 42 ms reflection interval after all 87 mesh
+    // calls were omitted.  The next independent behavior A/B skips that one
+    // complete reflection child without enabling the reflection trace.
+    check(!tq::engineprobe::reflectionDeferAdmissionAllForTest(),
+          "reflection_defer_admission_all is off with no INI at all");
+    WritePrivateProfileStringW(L"performance",
+                               L"reflection_defer_admission_all", L"1", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::reflectionDeferAdmissionAllForTest()
+          && !tq::engineprobe::reflectionDeferAdmissionMeshForTest()
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "reflection_defer_admission_all reaches install() with the probe"
+          " off, and still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(32768)
+          && !tq::engineprobe::wantsForTest(65536)
+          && !tq::engineprobe::wantsForTest(131072),
+          "a whole-reflection-admission-only boot installs no trace group");
+    check(!tq::engineprobe::reflectionAdmissionTriggeredForTest(31)
+          && tq::engineprobe::reflectionAdmissionTriggeredForTest(32),
+          "whole reflection admission defers at the verified 32-buffer boundary");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(!tq::engineprobe::reflectionDeferAdmissionAllForTest(),
+          "re-reading no INI puts reflection_defer_admission_all back off");
+    DeleteFileW(ini);
+
+    // The next independent behavior path keeps normal colour stock but
+    // budgets first reflection/directional GPU participation as one object
+    // population. It must work with the probe off and imply no trace group.
+    check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 0,
+          "secondary_pass_admission_budget is off with no INI at all");
+    WritePrivateProfileStringW(L"performance",
+                               L"secondary_pass_admission_budget", L"8", ini);
+    tq::probe::readOptions(ini);
+    tq::engineprobe::readOptions(ini);
+    check(!tq::probe::enabled()
+          && tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 8
+          && !tq::engineprobe::install((HMODULE)image)
+          && tq::engineprobe::installedForTest() == 0,
+          "secondary_pass_admission_budget reaches install() with the probe"
+          " off, and still refuses a module that is not Engine.dll");
+    check(!tq::engineprobe::wantsForTest(2)
+          && !tq::engineprobe::wantsForTest(16384)
+          && !tq::engineprobe::wantsForTest(32768)
+          && !tq::engineprobe::wantsForTest(65536)
+          && !tq::engineprobe::wantsForTest(131072),
+          "a secondary-pass-admission-only boot installs no trace group");
+    check(!tq::engineprobe::reflectionAdmissionTriggeredForTest(31)
+          && !tq::engineprobe::reflectionAdmissionTriggeredForTest(32)
+          && !tq::engineprobe::reflectionAdmissionBufferTrackingRequested(),
+          "secondary-pass admission does not use reflection buffers");
+    tq::engineprobe::shutdown();
+    tq::engineprobe::readOptions(nullptr);
+    tq::probe::readOptions(nullptr);
+    check(tq::engineprobe::secondaryPassAdmissionBudgetForTest() == 0,
+          "re-reading no INI puts secondary_pass_admission_budget back off");
+    DeleteFileW(ini);
+
+    // The next passive trace must distinguish an object's first visit to each
+    // exact consumer, without mistaking a repeat call or another class for it.
+    int admissionObject = 0;
+    tq::engineprobe::resetAdmissionRenderableIdentitiesForTest();
+    check(tq::engineprobe::admissionRenderableFirstForTest(
+              &admissionObject, 1, 1)
+          && !tq::engineprobe::admissionRenderableFirstForTest(
+              &admissionObject, 1, 1)
+          && tq::engineprobe::admissionRenderableFirstForTest(
+              &admissionObject, 1, 4)
+          && tq::engineprobe::admissionRenderableFirstForTest(
+              &admissionObject, 2, 1),
+          "admission identities are first once per renderable class and exact consumer");
+
+    // The controlled population is its own signal: two new identities fit
+    // this synthetic frame's budget without arming, while the third self-arms
+    // and remains pending. Admission is global across reflection and
+    // directional shadow, so an admitted object spends no second slot there.
+    int secondaryObjects[4] = {};
+    tq::engineprobe::resetSecondaryAdmissionForTest(2, false);
+    check(!tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[0], 3, true, false)
+          && !tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[0], 3, false, true)
+          && !tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[1], 3, false, true)
+          && !tq::engineprobe::secondaryAdmissionArmedForTest(),
+          "one frame admits two shared secondary identities without arming");
+    check(tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[2], 3, true, false)
+          && tq::engineprobe::secondaryAdmissionArmedForTest()
+          && tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[2], 3, false, true),
+          "identity budget plus one self-arms and remains pending globally");
+    tq::engineprobe::secondaryAdmissionFrameBoundary();
+    check(!tq::engineprobe::secondaryAdmissionRenderableDeferredForTest(
+              &secondaryObjects[2], 3, true, false),
+          "a pending secondary identity can enter on the next frame's budget");
 
     // The slow-LoadLevel caller table. Five calls a session decide where
     // Stage 5.1 should point, so a slot bug costs a boot rather than a build;
@@ -2605,6 +2935,30 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && strstr(csvText, "gpu_terrain_plug_ms") == nullptr
           && strstr(csvText, "gpu_terrain_block_ms") == nullptr,
           "the header carries the TerrainRT load and colour-render chain");
+    check(csvText
+          && strstr(csvText, "engine_deferred_geometry_us") != nullptr
+          && strstr(csvText, "engine_deferred_geometry_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_shadows_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_lighting_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_resolve_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_late_scene_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_post_draw_us") != nullptr
+          && strstr(csvText, "engine_deferred_owner_overflow") != nullptr
+          && strstr(csvText, "engine_deferred_i1_geometry_setup_us") != nullptr
+          && strstr(csvText, "engine_deferred_i1_geometry_scene_draw_us")
+                 != nullptr
+          && strstr(csvText, "engine_deferred_i2_geometry_setup_res_load_us")
+                 != nullptr
+          && strstr(csvText, "engine_deferred_i2_geometry_scene_tex_create_us")
+                 != nullptr
+          && strstr(csvText, "engine_deferred_i2_other_buf_create_us")
+                 != nullptr
+          && strstr(csvText, "gpu_deferred_i1_geometry_setup_ms") != nullptr
+          && strstr(csvText, "gpu_deferred_i1_geometry_scene_ms") != nullptr
+          && strstr(csvText, "gpu_deferred_i2_geometry_setup_ms") != nullptr
+          && strstr(csvText, "gpu_deferred_i2_geometry_scene_ms") != nullptr
+          && strstr(csvText, "gpu_deferred_geometry_ms") == nullptr,
+          "the header carries the per-invocation geometry partition");
     check(csvText && strstr(csvText, "engine_res_outside_dir_us") != nullptr
           && strstr(csvText, "engine_res_outside_dir_render_us") != nullptr
           && strstr(csvText, "engine_res_outside_dir_update_us") != nullptr

@@ -251,6 +251,16 @@ Engine::UpdateFrustum
 UpdateFrustum@Engine
 Engine::EvictOldResources
 EvictOldResources@Engine
+GraphicsPortalRenderer::Render
+Render@GraphicsPortalRenderer
+GraphicsDeferredRendererX::Render
+Render@GraphicsDeferredRendererX
+GraphicsReflectionManager::RenderReflections
+RenderReflections@GraphicsReflectionManager
+GraphicsForwardRenderer::BuildScene
+BuildScene@GraphicsForwardRenderer
+GraphicsForwardRenderer::RenderLightStyle
+RenderLightStyle@GraphicsForwardRenderer
 GraphicsEngine::LoadTexture
 LoadTexture@GraphicsEngine
 GraphicsEngine::LoadMesh
@@ -300,6 +310,8 @@ FUN_10033770
 FUN_1018c520
 FUN_1018c650
 FUN_1018c870
+@0x1018c520
+@0x1018c870
 Initialize@GraphicsTexture
 GetIsReadyToUse
 GetThreadInfos
@@ -330,6 +342,19 @@ RenderGrass@TerrainRenderInterfaceRT
 @0x1023d8d0
 @0x1023ded0
 @0x1023e1e0
+
+# ---------------------------------------------------------------------------
+# Complete DX11 play-render flow.  The exported names above anchor the named
+# stages; these address roots retain the unexported portal recursion,
+# reflection helpers, and shared scene-list builder even when they otherwise
+# land at the audit's call-depth boundary.
+# ---------------------------------------------------------------------------
+@0x1017e2c0
+@0x1017ead0
+@0x101861d0
+@0x10186a00
+@0x101883f0
+@0x1017aaa0
 
 # ---------------------------------------------------------------------------
 # Address seeds: the two file-source vtable slots the mod already patches

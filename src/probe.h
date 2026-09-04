@@ -732,6 +732,184 @@ enum Counter {
     CounterEngineTerrainPlugUs,
     CounterEngineTerrainBlock,
     CounterEngineTerrainBlockUs,
+    // The direct children of GraphicsDeferredRendererX::Render, grouped into
+    // six ordered top-level spans.  These are engine work, not mod work, so
+    // CPU and Draw/DrawIndexed durations use the integer `_us` channel.  The
+    // matching GPU spans below are timestamped without waiting for results.
+    CounterEngineDeferredGeometry,
+    CounterEngineDeferredGeometryUs,
+    CounterEngineDeferredGeometryDrawUs,
+    CounterEngineDeferredShadows,
+    CounterEngineDeferredShadowsUs,
+    CounterEngineDeferredShadowsDrawUs,
+    CounterEngineDeferredLighting,
+    CounterEngineDeferredLightingUs,
+    CounterEngineDeferredLightingDrawUs,
+    CounterEngineDeferredResolve,
+    CounterEngineDeferredResolveUs,
+    CounterEngineDeferredResolveDrawUs,
+    CounterEngineDeferredLateScene,
+    CounterEngineDeferredLateSceneUs,
+    CounterEngineDeferredLateSceneDrawUs,
+    CounterEngineDeferredPost,
+    CounterEngineDeferredPostUs,
+    CounterEngineDeferredPostDrawUs,
+    // Run 70 proved the owner is invoked twice per frame.  These split the
+    // two geometry children by exact call site and owner invocation.  The
+    // six location blocks below then say where synchronous Resource and D3D
+    // creation work happened: in either exact geometry child, or elsewhere
+    // inside that invocation.  They are game/engine time and therefore stay
+    // on the integer `_us` channel.
+    CounterEngineDeferredOwner,
+    CounterEngineDeferredOwnerOverflow,
+    CounterEngineDeferredI1GeometrySetup,
+    CounterEngineDeferredI1GeometrySetupUs,
+    CounterEngineDeferredI1GeometrySetupDrawUs,
+    CounterEngineDeferredI1GeometryScene,
+    CounterEngineDeferredI1GeometrySceneUs,
+    CounterEngineDeferredI1GeometrySceneDrawUs,
+    CounterEngineDeferredI2GeometrySetup,
+    CounterEngineDeferredI2GeometrySetupUs,
+    CounterEngineDeferredI2GeometrySetupDrawUs,
+    CounterEngineDeferredI2GeometryScene,
+    CounterEngineDeferredI2GeometrySceneUs,
+    CounterEngineDeferredI2GeometrySceneDrawUs,
+
+    CounterEngineDeferredI1OtherResLoad,
+    CounterEngineDeferredI1OtherResLoadUs,
+    CounterEngineDeferredI1OtherTexCreate,
+    CounterEngineDeferredI1OtherTexCreateUs,
+    CounterEngineDeferredI1OtherBufCreate,
+    CounterEngineDeferredI1OtherBufCreateUs,
+    CounterEngineDeferredI1GeometrySetupResLoad,
+    CounterEngineDeferredI1GeometrySetupResLoadUs,
+    CounterEngineDeferredI1GeometrySetupTexCreate,
+    CounterEngineDeferredI1GeometrySetupTexCreateUs,
+    CounterEngineDeferredI1GeometrySetupBufCreate,
+    CounterEngineDeferredI1GeometrySetupBufCreateUs,
+    CounterEngineDeferredI1GeometrySceneResLoad,
+    CounterEngineDeferredI1GeometrySceneResLoadUs,
+    CounterEngineDeferredI1GeometrySceneTexCreate,
+    CounterEngineDeferredI1GeometrySceneTexCreateUs,
+    CounterEngineDeferredI1GeometrySceneBufCreate,
+    CounterEngineDeferredI1GeometrySceneBufCreateUs,
+    CounterEngineDeferredI2OtherResLoad,
+    CounterEngineDeferredI2OtherResLoadUs,
+    CounterEngineDeferredI2OtherTexCreate,
+    CounterEngineDeferredI2OtherTexCreateUs,
+    CounterEngineDeferredI2OtherBufCreate,
+    CounterEngineDeferredI2OtherBufCreateUs,
+    CounterEngineDeferredI2GeometrySetupResLoad,
+    CounterEngineDeferredI2GeometrySetupResLoadUs,
+    CounterEngineDeferredI2GeometrySetupTexCreate,
+    CounterEngineDeferredI2GeometrySetupTexCreateUs,
+    CounterEngineDeferredI2GeometrySetupBufCreate,
+    CounterEngineDeferredI2GeometrySetupBufCreateUs,
+    CounterEngineDeferredI2GeometrySceneResLoad,
+    CounterEngineDeferredI2GeometrySceneResLoadUs,
+    CounterEngineDeferredI2GeometrySceneTexCreate,
+    CounterEngineDeferredI2GeometrySceneTexCreateUs,
+    CounterEngineDeferredI2GeometrySceneBufCreate,
+    CounterEngineDeferredI2GeometrySceneBufCreateUs,
+    // Reflection rendering precedes each recursive deferred portal/region
+    // owner. The manager is split by its first two branch invocations and
+    // each manager's first two water planes. Resource and D3D creation clocks
+    // are game work, so every duration stays on the integer `_us` channel.
+    CounterEngineReflectionManager,
+    CounterEngineReflectionManagerUs,
+    CounterEngineReflectionManagerDrawUs,
+    CounterEngineReflectionManagerResLoad,
+    CounterEngineReflectionManagerResLoadUs,
+    CounterEngineReflectionManagerTexCreate,
+    CounterEngineReflectionManagerTexCreateUs,
+    CounterEngineReflectionManagerBufCreate,
+    CounterEngineReflectionManagerBufCreateUs,
+    CounterEngineReflectionManagerOverflow,
+    CounterEngineReflectionI1,
+    CounterEngineReflectionI1Us,
+    CounterEngineReflectionI1DrawUs,
+    CounterEngineReflectionI2,
+    CounterEngineReflectionI2Us,
+    CounterEngineReflectionI2DrawUs,
+    CounterEngineReflectionPlaneOverflow,
+#define TQ_REFLECTION_CELL_COUNTERS(prefix) \
+    CounterEngineReflection##prefix, \
+    CounterEngineReflection##prefix##Us, \
+    CounterEngineReflection##prefix##DrawUs, \
+    CounterEngineReflection##prefix##ResLoad, \
+    CounterEngineReflection##prefix##ResLoadUs, \
+    CounterEngineReflection##prefix##TexCreate, \
+    CounterEngineReflection##prefix##TexCreateUs, \
+    CounterEngineReflection##prefix##BufCreate, \
+    CounterEngineReflection##prefix##BufCreateUs, \
+    CounterEngineReflection##prefix##BuildScene, \
+    CounterEngineReflection##prefix##BuildSceneUs, \
+    CounterEngineReflection##prefix##RenderLight, \
+    CounterEngineReflection##prefix##RenderLightUs
+    TQ_REFLECTION_CELL_COUNTERS(I1P1),
+    TQ_REFLECTION_CELL_COUNTERS(I1P2),
+    TQ_REFLECTION_CELL_COUNTERS(I2P1),
+    TQ_REFLECTION_CELL_COUNTERS(I2P2),
+#undef TQ_REFLECTION_CELL_COUNTERS
+    // A behavior A/B, not a duration: a reflection BuildScene that creates
+    // the transition-sized buffer population can defer resident mesh-instance
+    // draws until the normal color pass has consumed that scene once.
+    CounterEngineReflectionAdmissionDeferred,
+    CounterEngineReflectionAdmissionMeshDeferred,
+    CounterEngineReflectionAdmissionAllDeferred,
+    // A coordinated behavior A/B: the first N previously unseen identities in
+    // a frame issue their first reflection/directional-shadow draws, and N+1
+    // self-arms deferral. Resource/material preparation still runs; these
+    // counters contain no durations.
+    CounterEngineSecondaryAdmissionTrigger,
+    CounterEngineSecondaryAdmissionReflectionAdmitted,
+    CounterEngineSecondaryAdmissionReflectionDeferred,
+    CounterEngineSecondaryAdmissionShadowAdmitted,
+    CounterEngineSecondaryAdmissionShadowDeferred,
+    CounterEngineSecondaryAdmissionDrawSkipped,
+    // Passive first-consumer identity. Each exact renderer records its draw
+    // population plus the three major renderable classes; "First" means this
+    // object identity has not previously reached that exact consumer.
+#define TQ_ADMISSION_RENDER_COUNTERS(prefix) \
+    CounterEngineAdmission##prefix##Draw, \
+    CounterEngineAdmission##prefix##TerrainPlug, \
+    CounterEngineAdmission##prefix##TerrainPlugFirst, \
+    CounterEngineAdmission##prefix##TerrainBlock, \
+    CounterEngineAdmission##prefix##TerrainBlockFirst, \
+    CounterEngineAdmission##prefix##Mesh, \
+    CounterEngineAdmission##prefix##MeshFirst
+    TQ_ADMISSION_RENDER_COUNTERS(ReflectionI2P1),
+    TQ_ADMISSION_RENDER_COUNTERS(DeferredI2Setup),
+    TQ_ADMISSION_RENDER_COUNTERS(DeferredI2Scene),
+    TQ_ADMISSION_RENDER_COUNTERS(ShadowDirectional),
+#undef TQ_ADMISSION_RENDER_COUNTERS
+    CounterEngineAdmissionIdentityOverflow,
+    // Run 74 correlates newly created main-thread D3D buffers across the
+    // exact reflection-plane, directional-shadow, and deferred-owner classes.
+    // These are counts/bytes only; all draw clocks remain the existing sample.
+    CounterEngineCrossPassBufferCreated,
+    CounterEngineCrossPassBufferCreatedBytes,
+    CounterEngineCrossPassReflectionDraw,
+    CounterEngineCrossPassShadowDraw,
+    CounterEngineCrossPassDeferredDraw,
+    CounterEngineCrossPassFreshReflectionBuffer,
+    CounterEngineCrossPassFreshShadowBuffer,
+    CounterEngineCrossPassFreshDeferredBuffer,
+    CounterEngineCrossPassJoinReflectionShadow,
+    CounterEngineCrossPassJoinReflectionDeferred,
+    CounterEngineCrossPassJoinShadowDeferred,
+    CounterEngineCrossPassJoinAllThree,
+    CounterEngineCrossPassIndexOverflow,
+    CounterEngineCrossPassRecentEviction,
+    CounterEngineShadowDirectionalDraw,
+    // Sparse reflection draw-record subdivision. Run 78 counts past the
+    // Run-77-excluded first 192 draws, then times draws 193--320 in sixteen
+    // eight-draw bins. These are counts/ordinals, never CPU durations.
+    CounterEngineGpuChunkReflectionArm,
+    CounterEngineGpuChunkReflectionStartDraw,
+    CounterEngineGpuChunkReflectionDraw,
+    CounterEngineGpuChunkReflectionOverflow,
+    CounterEngineGpuChunkReflectionCollision,
     // A human observation, not an inferred hitch class. With
     // [debug] stutter_marker=1, an F12 key-down returned by the game's message
     // pump marks the Present interval in which it was retrieved.
@@ -754,6 +932,43 @@ enum GpuPhase {
     GpuBloom,
     GpuTerrainGround,
     GpuTerrainRtLoadRender,
+    // One query pair for each geometry site in each of the two observed
+    // owner invocations. Unlike Run 70's group pairs, none can span from the
+    // first GraphicsDeferredRendererX::Render call into the second.
+    GpuDeferredI1GeometrySetup,
+    GpuDeferredI1GeometryScene,
+    GpuDeferredI2GeometrySetup,
+    GpuDeferredI2GeometryScene,
+    GpuReflectionI1,
+    GpuReflectionI2,
+    GpuReflectionI1P1,
+    GpuReflectionI1P2,
+    GpuReflectionI2P1,
+    GpuReflectionI2P2,
+    GpuReflectionI1P1BuildScene,
+    GpuReflectionI1P1RenderLight,
+    GpuReflectionI1P2BuildScene,
+    GpuReflectionI1P2RenderLight,
+    GpuReflectionI2P1BuildScene,
+    GpuReflectionI2P1RenderLight,
+    GpuReflectionI2P2BuildScene,
+    GpuReflectionI2P2RenderLight,
+    GpuChunkReflection00,
+    GpuChunkReflection01,
+    GpuChunkReflection02,
+    GpuChunkReflection03,
+    GpuChunkReflection04,
+    GpuChunkReflection05,
+    GpuChunkReflection06,
+    GpuChunkReflection07,
+    GpuChunkReflection08,
+    GpuChunkReflection09,
+    GpuChunkReflection10,
+    GpuChunkReflection11,
+    GpuChunkReflection12,
+    GpuChunkReflection13,
+    GpuChunkReflection14,
+    GpuChunkReflection15,
     GpuPhaseCount
 };
 
@@ -806,6 +1021,16 @@ int64_t now();
 void addPhaseInternal(Phase phase, int64_t startTicks);
 inline void addPhase(Phase phase, int64_t startTicks) {
     if (detail::active) addPhaseInternal(phase, startTicks);
+}
+
+// The Draw hooks need the same completed interval both in draw_submit_ms and
+// in the active engine-render-pass `_draw_us` bucket.  This variant takes the
+// ending clock sample once, records the phase with full tick precision, and
+// returns its duration for the integer engine channel.  It therefore adds no
+// second QueryPerformanceCounter call to a path used thousands of times.
+uint32_t finishPhaseInternal(Phase phase, int64_t startTicks);
+inline uint32_t finishPhase(Phase phase, int64_t startTicks) {
+    return detail::active ? finishPhaseInternal(phase, startTicks) : 0;
 }
 
 // Scoped form. Costs one predictable branch while the probe is off.

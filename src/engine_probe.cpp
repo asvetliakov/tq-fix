@@ -11,6 +11,10 @@
 
 namespace tq {
 namespace engineprobe {
+namespace detail {
+volatile LONG gpuChunkDrawActive = 0;
+volatile LONG secondaryAdmissionDrawSuppressDepth = 0;
+}
 namespace {
 
 using tq::detour::CallPatch;
@@ -678,6 +682,38 @@ const BYTE kShadowOutputCopyBytes[] = {
     0x8b, 0xf0,                                // source matrix
     0xb9, 0x10, 0x00, 0x00, 0x00,              // 16 dwords
     0xf3, 0xa5                                 // rep movsd
+};
+
+// GraphicsShadowMapRenderer::Render first builds a vector of 0x88-byte
+// caster/pass records, then submits it through this one DX11-only E8. The DX9
+// branch calls FUN_10187360 instead. Run 75 began bin zero at the outer
+// GraphicsShadowMapDx11::RenderDirectional boundary and therefore mixed
+// setup/record construction with record submission. Patch this call to put
+// the boundary at the executor without touching its shared entry.
+const DWORD kShadowRecordExecutorCallWindowRva = 0x18d054;
+const unsigned kShadowRecordExecutorCallOffset = 9;
+const DWORD kShadowRecordExecutorRva = 0x18c520;
+const BYTE kShadowRecordExecutorCallWindowBytes[] = {
+    0x51,
+    0x8d, 0x44, 0x24, 0x14,
+    0x50,
+    0x57,
+    0x8b, 0xce,
+    0xe8, 0xbe, 0xf4, 0xff, 0xff,
+    0xc6, 0x44, 0x24, 0x40, 0x00,
+    0x8b, 0x44, 0x24, 0x10
+};
+const BYTE kShadowRecordExecutorBytes[] = {
+    0x83, 0xec, 0x10, 0x53, 0x8b, 0x5c, 0x24, 0x1c,
+    0x55, 0x8b, 0x53, 0x04, 0x89, 0x4c, 0x24, 0x10,
+    0x8b, 0x0b, 0x56, 0x57, 0xc6, 0x44, 0x24, 0x1c
+};
+const DWORD kShadowRecordExecutorTailRva = 0x18c631;
+const BYTE kShadowRecordExecutorTailBytes[] = {
+    0x85, 0xff, 0x74, 0x07, 0x8b, 0xcf,
+    0xe8, 0xc4, 0xf8, 0xff, 0xff,
+    0x5f, 0x5e, 0x5d, 0x5b, 0x83, 0xc4, 0x10,
+    0xc2, 0x0c, 0x00                         // three explicit arguments
 };
 
 // --- TerrainType's own semantic preload and its two parameter binders.
@@ -1440,6 +1476,399 @@ const BYTE kEngineRenderBytes[] = {
 };
 const Relocation kEngineRenderRelocs[] = {{13, 0x2ac1b8}};
 
+// --- Reflection rendering inside one recursive DX11 portal/region branch.
+// FUN_1017ead0 calls the exported manager before it admits the branch's
+// regions to GraphicsDeferredRendererX. The manager then calls FUN_101861d0
+// once per 0x48-byte water-reflection record. Both are unique E8 sites on this
+// path, so patch the calls rather than either shared function entry.
+const DWORD kReflectionManagerRva = 0x187270;
+const char kReflectionManagerName[] =
+    "?RenderReflections@GraphicsReflectionManager@GAME@@QAEHAAV"
+    "GraphicsCanvas@2@ABVRenderSet@12@@Z";
+const BYTE kReflectionManagerBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec,
+    0x0c, 0x53, 0x56, 0x57, 0xff, 0x75, 0x0c, 0x8b,
+    0xf1, 0x89, 0x74, 0x24, 0x14
+};
+const DWORD kReflectionManagerCallWindowRva = 0x17f2c6;
+const unsigned kReflectionManagerCallOffset = 13;
+const BYTE kReflectionManagerCallWindowBytes[] = {
+    0x8d, 0x4c, 0x24, 0x58, 0x66, 0x0f, 0xd6, 0x84,
+    0x24, 0x44, 0x01, 0x00, 0x00, 0xe8, 0x98, 0x7f,
+    0x00, 0x00, 0x01, 0x86, 0xf8, 0x00, 0x00, 0x00
+};
+const DWORD kReflectionManagerTailRva = 0x1872c3;
+const BYTE kReflectionManagerTailBytes[] = {
+    0x4f, 0x75, 0xea, 0x8b, 0x44, 0x24, 0x14, 0x5f,
+    0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc2, 0x08, 0x00
+};
+
+const DWORD kReflectionPlaneRva = 0x1861d0;
+const BYTE kReflectionPlaneBytes[] = {
+    0x6a, 0xff, 0x68, 0x00, 0x00, 0x00, 0x00, 0x64,
+    0xa1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x81, 0xec,
+    0x48, 0x0f, 0x00, 0x00
+};
+const Relocation kReflectionPlaneRelocs[] = {{3, 0x299dcb}};
+const DWORD kReflectionPlaneCallWindowRva = 0x1872b0;
+const unsigned kReflectionPlaneCallOffset = 11;
+const BYTE kReflectionPlaneCallWindowBytes[] = {
+    0xff, 0x75, 0x0c, 0x8b, 0x0b, 0xff, 0x75, 0x08,
+    0x03, 0xce, 0x51, 0xe8, 0x10, 0xef, 0xff, 0xff,
+    0x83, 0xc6, 0x48, 0x4f
+};
+const DWORD kReflectionPlaneTailRva = 0x1869e4;
+const BYTE kReflectionPlaneTailBytes[] = {
+    0x8b, 0x8c, 0x24, 0x40, 0x0f, 0x00, 0x00, 0x33,
+    0xcc, 0xe8, 0x7e, 0x47, 0xf7, 0xff, 0x81, 0xc4,
+    0x54, 0x0f, 0x00, 0x00, 0xc2, 0x0c, 0x00, 0xcc
+};
+
+// Direct children of one reflection-plane helper. These two unique E8 sites
+// split first-use scene admission from forward colour submission without
+// detouring either shared GraphicsForwardRenderer entry.
+const DWORD kReflectionBuildSceneRva = 0x17d9d0;
+const char kReflectionBuildSceneName[] =
+    "?BuildScene@GraphicsForwardRenderer@GAME@@QAEX_N@Z";
+const BYTE kReflectionBuildSceneBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x6a, 0xff,
+    0x68, 0, 0, 0, 0, 0x64, 0xa1, 0, 0, 0, 0,
+    0x50, 0x83, 0xec, 0x18, 0x53
+};
+const Relocation kReflectionBuildSceneRelocs[] = {{9, 0x299ca0}};
+const DWORD kReflectionBuildSceneCallWindowRva = 0x1864f0;
+const unsigned kReflectionBuildSceneCallOffset = 17;
+const BYTE kReflectionBuildSceneCallWindowBytes[] = {
+    0x66, 0xc7, 0x84, 0x24, 0x20, 0x0e, 0x00, 0x00,
+    0x00, 0x00, 0x89, 0x84, 0x24, 0xe0, 0x0d, 0x00,
+    0x00, 0xe8, 0xca, 0x74, 0xff, 0xff
+};
+const DWORD kReflectionBuildSceneTailRva = 0x17dac3;
+const BYTE kReflectionBuildSceneTailBytes[] = {
+    0x64, 0x89, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x59,
+    0x5f, 0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc2, 0x04, 0x00
+};
+
+const DWORD kReflectionRenderLightRva = 0x179a40;
+const char kReflectionRenderLightName[] =
+    "?RenderLightStyle@GraphicsForwardRenderer@GAME@@QAEXAAV"
+    "GraphicsCanvas@2@ABVGraphicsLight@2@ABVName@2@I@Z";
+const BYTE kReflectionRenderLightBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x81, 0xec,
+    0xa0, 0x00, 0x00, 0x00, 0xa1, 0, 0, 0, 0, 0x33, 0xc4
+};
+const Relocation kReflectionRenderLightRelocs[] = {{13, 0x36f000}};
+const DWORD kReflectionRenderLightCallWindowRva = 0x18693b;
+const unsigned kReflectionRenderLightCallOffset = 18;
+const BYTE kReflectionRenderLightCallWindowBytes[] = {
+    0x6a, 0x00, 0x68, 0, 0, 0, 0, 0xff,
+    0x70, 0x18, 0x8d, 0x8c, 0x24, 0xd0, 0x04, 0x00,
+    0x00, 0x56, 0xe8, 0xee, 0x30, 0xff, 0xff
+};
+const Relocation kReflectionRenderLightCallRelocs[] = {{3, 0x41b3c8}};
+const DWORD kReflectionRenderLightTailRva = 0x179bc4;
+const BYTE kReflectionRenderLightTailBytes[] = {
+    0x8b, 0x8c, 0x24, 0xa4, 0x00, 0x00, 0x00, 0x5f,
+    0x5e, 0x33, 0xcc, 0xe8, 0x9c, 0x15, 0xf8, 0xff,
+    0x8b, 0xe5, 0x5d, 0xc2, 0x10, 0x00
+};
+
+// The RenderLightStyle scene-list executor dispatches RenderPass through
+// GraphicsRenderable's virtual slot +0x28, so there is no direct E8 that can
+// be narrowed with patchCall. This exact exported GraphicsMeshInstance
+// override supplies the missing major renderable class for Run 79. Its
+// opening is one of four shared `55 8b ec 83 e4 f8` targets: verify all 24
+// bytes, including the relocated security-cookie address, and steal only the
+// first six complete non-relative bytes. The independent tail proves four
+// explicit stack arguments (`ret 0x10`).
+const DWORD kGraphicsMeshInstanceRenderPassRva = 0x172dd0;
+const char kGraphicsMeshInstanceRenderPassName[] =
+    "?RenderPass@GraphicsMeshInstance@GAME@@UBEX"
+    "ABURenderablePass@2@ABVName@2@AAVGraphicsCanvas@2@"
+    "ABVGraphicsSceneRenderer@2@@Z";
+const BYTE kGraphicsMeshInstanceRenderPassBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8,
+    0x81, 0xec, 0xfc, 0x00, 0x00, 0x00,
+    0xa1, 0x00, 0x00, 0x00, 0x00,
+    0x33, 0xc4, 0x89, 0x84, 0x24, 0xf8, 0x00
+};
+const Relocation kGraphicsMeshInstanceRenderPassRelocs[] = {
+    {13, 0x36f000}
+};
+const DWORD kGraphicsMeshInstanceRenderPassTailRva = 0x173127;
+const BYTE kGraphicsMeshInstanceRenderPassTailBytes[] = {
+    0x8b, 0x8c, 0x24, 0x04, 0x01, 0x00, 0x00,
+    0x5f, 0x5e, 0x5b, 0x33, 0xcc,
+    0xe8, 0x38, 0x80, 0xf8, 0xff,
+    0x8b, 0xe5, 0x5d, 0xc2, 0x10, 0x00
+};
+
+// --- GraphicsDeferredRendererX::Render pass partition.  Run 69 leaves
+// 97.007 ms of the transition frame's GPU interval outside every existing
+// named GPU region, followed by 97.651 ms blocked in Draw/DrawIndexed on the
+// next frame.  These are the direct, ordered children of the exported DX11
+// deferred-renderer entry.  We patch their E8 sites rather than any callee
+// entry, so other renderer call paths remain byte-identical.
+//
+// Several sites are closer than a 16-byte verification window.  As with the
+// seven sweep calls below, every original window is therefore verified before
+// the first write, and patchCall then rechecks the exact E8 plus its resolved
+// target.  Each wide window is 16 bytes; the renderer entry is independently
+// identified by its decorated export, RVA, and 24-byte opening (including the
+// relocated exception handler).
+const DWORD kDeferredRenderRva = 0x166130;
+const char kDeferredRenderName[] =
+    "?Render@GraphicsDeferredRendererX@GAME@@QAEPAVRenderTexture@2@"
+    "AAVGraphicsCanvas@2@MPAV32@_N2PAVRenderSurface@2@2@Z";
+const BYTE kDeferredRenderBytes[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x6a, 0xff,
+    0x68, 0, 0, 0, 0, 0x64, 0xa1, 0x00,
+    0x00, 0x00, 0x00, 0x50, 0x81, 0xec, 0xa8, 0x00
+};
+const Relocation kDeferredRenderRelocs[] = {{9, 0x298f0d}};
+
+// FUN_1017ead0 is the sole direct caller in the complete Engine.dll callgraph.
+// Patch its E8 instead of the shared renderer prologue. The 24-byte window
+// proves the last two arguments and ECX setup around the call; the independent
+// 20-byte callee tail proves that the wrapper must pop seven stack arguments.
+const DWORD kDeferredOwnerCallWindowRva = 0x17fc8b;
+const unsigned kDeferredOwnerCallOffset = 16;
+const BYTE kDeferredOwnerCallWindowBytes[] = {
+    0x51, 0x8d, 0x8c, 0x24, 0x34, 0x07, 0x00, 0x00,
+    0xf3, 0x0f, 0x11, 0x04, 0x24, 0xff, 0x70, 0x04,
+    0xe8, 0x90, 0x64, 0xfe, 0xff, 0x8d, 0x8c, 0x24
+};
+const DWORD kDeferredRenderTailRva = 0x1665cf;
+const BYTE kDeferredRenderTailBytes[] = {
+    0x8b, 0x8c, 0x24, 0xa0, 0x00, 0x00, 0x00, 0x33,
+    0xcc, 0xe8, 0x93, 0x4b, 0xf9, 0xff, 0x8b, 0xe5,
+    0x5d, 0xc2, 0x1c, 0x00
+};
+
+const BYTE kDeferredGeometrySetupCallBytes[] = {
+    0xe8, 0xf3, 0xef, 0xff, 0xff, 0x83, 0x3d, 0, 0, 0, 0,
+    0x00, 0x74, 0x0a, 0x53, 0x8b
+};
+const Relocation kDeferredGeometrySetupCallRelocs[] = {{7, 0x374418}};
+const BYTE kDeferredGeometrySceneCallBytes[] = {
+    0xe8, 0xd9, 0x1f, 0x02, 0x00, 0xc7, 0x44, 0x24,
+    0x14, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x44, 0x24
+};
+const BYTE kDeferredShadowsCallBytes[] = {
+    0xe8, 0xf7, 0xdb, 0xff, 0xff, 0x8d, 0x44, 0x24,
+    0x14, 0x50, 0x53, 0x8b, 0xcf, 0xe8, 0xda, 0xe1
+};
+const BYTE kDeferredLightingCallBytes[] = {
+    0xe8, 0xda, 0xe1, 0xff, 0xff, 0x8b, 0xf0, 0x80,
+    0x7c, 0x24, 0x13, 0x00, 0x8b, 0x4c, 0x24, 0x24
+};
+const BYTE kDeferredResolveCallBytes[] = {
+    0xe8, 0x7e, 0x03, 0x00, 0x00, 0x8b, 0x87, 0x24,
+    0x09, 0x00, 0x00, 0x85, 0xc0, 0x74, 0x12, 0x50
+};
+const BYTE kDeferredAoCallBytes[] = {
+    0xe8, 0x4c, 0x64, 0xff, 0xff, 0xc7, 0x87, 0x24,
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8d
+};
+const BYTE kDeferredLateSceneACallBytes[] = {
+    0xe8, 0xd5, 0xb7, 0xff, 0xff, 0x53, 0x8b, 0xcf,
+    0xe8, 0x4d, 0xb5, 0xff, 0xff, 0xa1, 0x04, 0xa4
+};
+const BYTE kDeferredLateSceneBCallBytes[] = {
+    0xe8, 0x4d, 0xb5, 0xff, 0xff, 0xa1, 0, 0, 0, 0,
+    0x6a, 0x00, 0x6a, 0x00, 0x68, 0x20
+};
+const Relocation kDeferredLateSceneBCallRelocs[] = {{6, 0x41a404}};
+const BYTE kDeferredLateSceneListCallBytes[] = {
+    0xe8, 0xe9, 0x1e, 0x02, 0x00, 0x53, 0x8b, 0xcf,
+    0xe8, 0x61, 0xb5, 0xff, 0xff, 0xff, 0x75, 0x20
+};
+const BYTE kDeferredPostHighlightCallBytes[] = {
+    0xe8, 0x61, 0xb5, 0xff, 0xff, 0xff, 0x75, 0x20,
+    0x8b, 0xcf, 0x53, 0xe8, 0x86, 0xf5, 0xff, 0xff
+};
+const BYTE kDeferredPostFogCallBytes[] = {
+    0xe8, 0x86, 0xf5, 0xff, 0xff, 0x33, 0xf6, 0x80,
+    0x7d, 0x14, 0x00, 0x74, 0x0a, 0x53, 0x8b, 0xcf
+};
+const BYTE kDeferredPostMaskCallBytes[] = {
+    0xe8, 0xd6, 0xbc, 0xff, 0xff, 0x8b, 0xf0, 0x80,
+    0xbf, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x74, 0x35
+};
+const BYTE kDeferredPostCompositeCallBytes[] = {
+    0xe8, 0x23, 0xf2, 0xff, 0xff, 0xa1, 0, 0, 0, 0,
+    0x8b, 0x80, 0x60, 0x01, 0x00, 0x00
+};
+const Relocation kDeferredPostCompositeCallRelocs[] = {{6, 0x3743f0}};
+const BYTE kDeferredPostDebugCallBytes[] = {
+    0xe8, 0x77, 0xb1, 0xff, 0xff, 0x8b, 0x44, 0x24,
+    0x14, 0x85, 0xc0, 0x74, 0x0a, 0x50, 0xff, 0x15
+};
+
+// The callee-cleaned x86 ABI is part of each wrapper's correctness.  These
+// independently re-read 16-byte epilogues and make the `ret` immediate agree
+// with the explicit-argument count below.  This is the check that prevents a
+// decompiler's implicit-this count from becoming another stack imbalance.
+const BYTE kDeferredGeometrySetupTailBytes[] = {
+    0x8b, 0xcf, 0xe8, 0x6a, 0x2e, 0x02, 0x00, 0x5f,
+    0x5e, 0x5b, 0x83, 0xc4, 0x38, 0xc2, 0x08, 0x00
+};
+const BYTE kDeferredSceneListTailBytes[] = {
+    0x0d, 0x00, 0x00, 0x00, 0x00, 0x59, 0x5f, 0x5e,
+    0x5d, 0x5b, 0x83, 0xc4, 0x3c, 0xc2, 0x14, 0x00
+};
+const BYTE kDeferredShadowsTailBytes[] = {
+    0x00, 0x00, 0x59, 0x5f, 0x5e, 0x5d, 0x5b, 0x81,
+    0xc4, 0x18, 0x02, 0x00, 0x00, 0xc2, 0x08, 0x00
+};
+const BYTE kDeferredLightingTailBytes[] = {
+    0x33, 0xcc, 0xe8, 0x3f, 0x5e, 0xf9, 0xff, 0x81,
+    0xc4, 0xc4, 0x00, 0x00, 0x00, 0xc2, 0x08, 0x00
+};
+const BYTE kDeferredResolveTailBytes[] = {
+    0x00, 0xe8, 0x28, 0x53, 0x02, 0x00, 0x5f, 0x5e,
+    0x5d, 0x5b, 0x83, 0xc4, 0x18, 0xc2, 0x0c, 0x00
+};
+const BYTE kDeferredAoTailBytes[] = {
+    0x4f, 0x08, 0xe8, 0x33, 0xf5, 0x02, 0x00, 0x5f,
+    0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc2, 0x04, 0x00
+};
+const BYTE kDeferredLateSceneATailBytes[] = {
+    0x0d, 0x00, 0x00, 0x00, 0x00, 0x59, 0x5f, 0x5e,
+    0x5d, 0x5b, 0x83, 0xc4, 0x30, 0xc2, 0x08, 0x00
+};
+const BYTE kDeferredLateSceneBTailBytes[] = {
+    0x8f, 0x69, 0x02, 0x00, 0xc6, 0x87, 0x69, 0x09,
+    0x00, 0x00, 0x00, 0x5f, 0x5e, 0xc2, 0x04, 0x00
+};
+const BYTE kDeferredPostHighlightTailBytes[] = {
+    0x00, 0x00, 0x59, 0x5f, 0x5e, 0x5d, 0x5b, 0x81,
+    0xc4, 0xac, 0x00, 0x00, 0x00, 0xc2, 0x04, 0x00
+};
+const BYTE kDeferredPostFogTailBytes[] = {
+    0x33, 0xcc, 0xe8, 0x49, 0x50, 0xf9, 0xff, 0x81,
+    0xc4, 0xc8, 0x00, 0x00, 0x00, 0xc2, 0x08, 0x00
+};
+const BYTE kDeferredPostMaskTailBytes[] = {
+    0x40, 0xc2, 0x04, 0x00, 0x5f, 0x5e, 0x5d, 0x33,
+    0xc0, 0x5b, 0x83, 0xc4, 0x40, 0xc2, 0x04, 0x00
+};
+const BYTE kDeferredPostCompositeTailBytes[] = {
+    0xce, 0xe8, 0xa1, 0x9d, 0xff, 0xff, 0x5f, 0x5e,
+    0x5d, 0x5b, 0x83, 0xc4, 0x30, 0xc2, 0x14, 0x00
+};
+const BYTE kDeferredPostDebugTailBytes[] = {
+    0x0f, 0x82, 0xbb, 0xfe, 0xff, 0xff, 0x5f, 0x5e,
+    0x5d, 0x5b, 0x83, 0xc4, 0x58, 0xc2, 0x04, 0x00
+};
+
+struct DeferredTargetAbi {
+    DWORD targetRva;
+    DWORD tailRva;
+    const BYTE* bytes;
+    unsigned arguments;
+};
+const DeferredTargetAbi kDeferredTargetAbis[] = {
+    {0x1653a0, 0x16557f, kDeferredGeometrySetupTailBytes, 2},
+    {0x1883f0, 0x1885ec, kDeferredSceneListTailBytes, 5},
+    {0x164050, 0x16458b, kDeferredShadowsTailBytes, 2},
+    {0x164640, 0x16532a, kDeferredLightingTailBytes, 2},
+    {0x166800, 0x166bd2, kDeferredResolveTailBytes, 3},
+    {0x15c8e0, 0x15c9c6, kDeferredAoTailBytes, 1},
+    {0x161c80, 0x16212d, kDeferredLateSceneATailBytes, 2},
+    {0x161a00, 0x161a5d, kDeferredLateSceneBTailBytes, 1},
+    {0x161a70, 0x161c6b, kDeferredPostHighlightTailBytes, 1},
+    {0x165aa0, 0x166120, kDeferredPostFogTailBytes, 2},
+    {0x162200, 0x1625b0, kDeferredPostMaskTailBytes, 1},
+    {0x1657b0, 0x165a89, kDeferredPostCompositeTailBytes, 5},
+    {0x161720, 0x16193f, kDeferredPostDebugTailBytes, 1},
+};
+const unsigned kDeferredTargetAbiCount =
+    sizeof(kDeferredTargetAbis) / sizeof(kDeferredTargetAbis[0]);
+
+enum DeferredPass {
+    DeferredPassNone,
+    DeferredPassGeometry,
+    DeferredPassShadows,
+    DeferredPassLighting,
+    DeferredPassResolve,
+    DeferredPassLateScene,
+    DeferredPassPost,
+    DeferredPassCount
+};
+
+enum DeferredGeometrySite {
+    DeferredGeometrySiteNone,
+    DeferredGeometrySiteSetup,
+    DeferredGeometrySiteScene,
+    DeferredGeometrySiteCount
+};
+
+// CSV creation/load bins. "Other" is deliberately not called a gap: it can
+// be owner code between direct children or one of the other named children.
+enum DeferredOwnerBin {
+    DeferredOwnerBinNone,
+    DeferredOwnerBinI1Other,
+    DeferredOwnerBinI1GeometrySetup,
+    DeferredOwnerBinI1GeometryScene,
+    DeferredOwnerBinI2Other,
+    DeferredOwnerBinI2GeometrySetup,
+    DeferredOwnerBinI2GeometryScene,
+    DeferredOwnerBinCount
+};
+
+enum DeferredGeometryCell {
+    DeferredGeometryCellNone,
+    DeferredGeometryCellI1Setup,
+    DeferredGeometryCellI1Scene,
+    DeferredGeometryCellI2Setup,
+    DeferredGeometryCellI2Scene,
+    DeferredGeometryCellCount
+};
+
+struct DeferredCallSite {
+    DWORD callRva;
+    DWORD targetRva;
+    const BYTE* bytes;
+    const Relocation* relocations;
+    unsigned relocationCount;
+    DeferredPass pass;
+    unsigned arguments;
+};
+
+const DeferredCallSite kDeferredCallSites[] = {
+    {0x1663a8, 0x1653a0, kDeferredGeometrySetupCallBytes,
+     kDeferredGeometrySetupCallRelocs, 1, DeferredPassGeometry, 2},
+    {0x166412, 0x1883f0, kDeferredGeometrySceneCallBytes,
+     nullptr, 0, DeferredPassGeometry, 5},
+    {0x166454, 0x164050, kDeferredShadowsCallBytes,
+     nullptr, 0, DeferredPassShadows, 2},
+    {0x166461, 0x164640, kDeferredLightingCallBytes,
+     nullptr, 0, DeferredPassLighting, 2},
+    {0x16647d, 0x166800, kDeferredResolveCallBytes,
+     nullptr, 0, DeferredPassResolve, 3},
+    {0x16648f, 0x15c8e0, kDeferredAoCallBytes,
+     nullptr, 0, DeferredPassResolve, 1},
+    {0x1664a6, 0x161c80, kDeferredLateSceneACallBytes,
+     nullptr, 0, DeferredPassLateScene, 2},
+    {0x1664ae, 0x161a00, kDeferredLateSceneBCallBytes,
+     kDeferredLateSceneBCallRelocs, 1, DeferredPassLateScene, 1},
+    {0x166502, 0x1883f0, kDeferredLateSceneListCallBytes,
+     nullptr, 0, DeferredPassLateScene, 5},
+    {0x16650a, 0x161a70, kDeferredPostHighlightCallBytes,
+     nullptr, 0, DeferredPassPost, 1},
+    {0x166515, 0x165aa0, kDeferredPostFogCallBytes,
+     nullptr, 0, DeferredPassPost, 2},
+    {0x166525, 0x162200, kDeferredPostMaskCallBytes,
+     nullptr, 0, DeferredPassPost, 1},
+    {0x166588, 0x1657b0, kDeferredPostCompositeCallBytes,
+     kDeferredPostCompositeCallRelocs, 1, DeferredPassPost, 5},
+    {0x1665a4, 0x161720, kDeferredPostDebugCallBytes,
+     nullptr, 0, DeferredPassPost, 1},
+};
+const unsigned kDeferredCallSiteCount =
+    sizeof(kDeferredCallSites) / sizeof(kDeferredCallSites[0]);
+
 // The loader fence. `push -1; push [g_fence]; call WaitForSingleObject`.
 // §6.2 argues the event is normally already signalled, so a non-zero total
 // here is exactly the evidence that argument is wrong.
@@ -1552,6 +1981,8 @@ const unsigned kGroupArcIo = 0x1000;
 const unsigned kGroupBlocking = 0x2000;
 const unsigned kGroupShadow = 0x4000;
 const unsigned kGroupTerrain = 0x8000;
+const unsigned kGroupDeferredPasses = 0x10000;
+const unsigned kGroupReflections = 0x20000;
 
 unsigned g_traceMask = 1;
 unsigned g_timerPeriodMs;   // 0 = leave the game's own period alone
@@ -1612,6 +2043,33 @@ bool g_shadowActorPoseDeferActive;
 bool g_terrainPreloadLayers;
 bool g_terrainPreloadLayersActive;
 bool g_terrainTracing;
+// [performance] reflection_defer_admission_mesh. The exact reflection
+// BuildScene call is the only writer, and CreateBuffer observes it on the same
+// render thread. A fixed count is preferable to a machine-dependent elapsed
+// time: the marked transition population was 63--172 buffers in seven
+// independent runs, while the largest neighbouring population was 30.
+const unsigned kReflectionAdmissionBufferThreshold = 32;
+const unsigned kSecondaryPassAdmissionBudgetMax = 64;
+bool g_reflectionDeferAdmissionMesh;
+bool g_reflectionDeferAdmissionMeshActive;
+bool g_reflectionDeferAdmissionAll;
+bool g_reflectionDeferAdmissionAllActive;
+// [performance] secondary_pass_admission_budget. Unlike the rejected
+// one-consumer omissions, this keeps resource/material preparation in place
+// and budgets first GPU participation across reflection and directional
+// shadow as one population.
+unsigned g_secondaryPassAdmissionBudget;
+bool g_secondaryPassAdmissionActive;
+bool g_secondaryAdmissionArmed;
+bool g_secondaryAdmissionDrawHooksReady;
+bool g_insideReflectionRenderLight;
+unsigned g_secondaryAdmissionFrameSerial;
+unsigned g_secondaryAdmissionBudgetFrame;
+unsigned g_secondaryAdmissionUsedThisFrame;
+bool g_reflectionAdmissionBuildActive;
+unsigned g_reflectionAdmissionBuildBuffers;
+bool g_reflectionAdmissionPending;
+bool g_reflectionAdmissionRenderActive;
 // Whether this install() is installing the trace at all. archive_cache_mb can
 // reach install() with the performance probe off, and without this every
 // wants() below would read the trace mask -- which defaults to 1 -- and put
@@ -1634,6 +2092,10 @@ const volatile DWORD* g_mainThreadId;
 
 bool onMainThread() {
     return g_mainThreadId && *g_mainThreadId == GetCurrentThreadId();
+}
+
+bool reflectionAdmissionThresholdReached(unsigned buffers) {
+    return buffers >= kReflectionAdmissionBufferThreshold;
 }
 
 // ---------------------------------------------------------------------------
@@ -1696,6 +2158,30 @@ typedef void (__fastcall* TerrainTypeLoadTexturesFn)(void* self, void* edx);
 typedef void (__fastcall* TerrainColourRenderFn)(
     void* self, void* edx, const void* a, const void* b, const void* c,
     const void* d);
+typedef void (__fastcall* GraphicsMeshInstanceRenderPassFn)(
+    void* self, void* edx, const void* pass, const void* name, void* canvas,
+    const void* sceneRenderer);
+typedef uintptr_t (__fastcall* DeferredFn1)(
+    void* self, void* edx, uintptr_t a);
+typedef uintptr_t (__fastcall* DeferredFn2)(
+    void* self, void* edx, uintptr_t a, uintptr_t b);
+typedef uintptr_t (__fastcall* DeferredFn3)(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c);
+typedef uintptr_t (__fastcall* DeferredFn5)(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e);
+typedef uintptr_t (__fastcall* DeferredRenderFn)(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g);
+typedef int (__fastcall* ReflectionManagerFn)(
+    void* self, void* edx, uintptr_t canvas, uintptr_t renderSet);
+typedef uintptr_t (__stdcall* ReflectionPlaneFn)(
+    uintptr_t record, uintptr_t canvas, uintptr_t renderSet);
+typedef void (__fastcall* ReflectionBuildSceneFn)(
+    void* self, void* edx, int includeHidden);
+typedef void (__fastcall* ReflectionRenderLightFn)(
+    void* self, void* edx, uintptr_t canvas, uintptr_t light,
+    uintptr_t styleName, uintptr_t flags);
 typedef void (__fastcall* UnloadLevelFn)(void* self, void* edx, int a, int b);
 typedef void (__fastcall* EnqueueFn)(void* self, void* edx, const void* resource,
                                      int priority, int a, int b);
@@ -1759,6 +2245,26 @@ TerrainRtLayerTypeFn g_terrainRtLayerType;
 TerrainTypeLoadTexturesFn g_terrainRtLoadTextures;
 TerrainColourRenderFn g_terrainPlugRender;
 TerrainColourRenderFn g_terrainBlockRender;
+GraphicsMeshInstanceRenderPassFn g_graphicsMeshInstanceRenderPass;
+DeferredRenderFn g_deferredRender;
+DeferredFn2 g_deferredGeometrySetup;
+DeferredFn5 g_deferredGeometryScene;
+DeferredFn2 g_deferredShadows;
+DeferredFn2 g_deferredLighting;
+DeferredFn3 g_deferredResolve;
+DeferredFn1 g_deferredAo;
+DeferredFn2 g_deferredLateSceneA;
+DeferredFn1 g_deferredLateSceneB;
+DeferredFn5 g_deferredLateSceneList;
+DeferredFn1 g_deferredPostHighlight;
+DeferredFn2 g_deferredPostFog;
+DeferredFn1 g_deferredPostMask;
+DeferredFn5 g_deferredPostComposite;
+DeferredFn1 g_deferredPostDebug;
+ReflectionManagerFn g_reflectionManager;
+ReflectionPlaneFn g_reflectionPlane;
+ReflectionBuildSceneFn g_reflectionBuildScene;
+ReflectionRenderLightFn g_reflectionRenderLight;
 UnloadLevelFn g_unloadLevel;
 EnqueueFn g_enqueue;
 ReadFromFileFn g_readFromFile;
@@ -1773,6 +2279,27 @@ SetFilePointerExFn g_setFilePointerEx;
 ReadFileFn g_readFile;
 WaitFn g_engineWait;
 WaitMultipleFn g_engineWaitMultiple;
+
+CallPatch g_deferredCallPatches[kDeferredCallSiteCount];
+CallPatch g_deferredOwnerPatch;
+CallPatch g_reflectionManagerPatch;
+CallPatch g_reflectionPlanePatch;
+CallPatch g_reflectionBuildScenePatch;
+CallPatch g_reflectionRenderLightPatch;
+bool g_deferredPassTracing;
+volatile LONG g_deferredPass;
+volatile LONG g_deferredGeometrySite;
+volatile LONG g_deferredOwnerInvocation;
+unsigned g_deferredOwnerFrame;
+unsigned g_deferredOwnerCallsThisFrame;
+bool g_reflectionTracing;
+bool g_gpuChunkTracing;
+volatile LONG g_reflectionManagerInvocation;
+volatile LONG g_reflectionPlaneInvocation;
+volatile LONG g_reflectionChild;
+unsigned g_reflectionManagerFrame;
+unsigned g_reflectionManagerCallsThisFrame;
+unsigned g_reflectionPlaneCallsThisManager;
 SleepFn g_engineSleep;
 unsigned g_renderTicks;
 
@@ -1797,6 +2324,7 @@ Detour g_terrainRtLoadRenderDataDetour;
 Detour g_terrainRtPreloadDetour;
 Detour g_terrainPlugRenderDetour;
 Detour g_terrainBlockRenderDetour;
+Detour g_graphicsMeshInstanceRenderPassDetour;
 CallPatch g_terrainRtLoadTexturesPatch;
 CallPatch g_newArrayPatch;
 CallPatch g_deleteArrayPatch;
@@ -1828,6 +2356,8 @@ int g_cachedShadowResult;
 bool g_cachedShadowValid;
 bool g_reusedLastShadow;
 bool g_shadowTracing;
+bool g_crossPassTracing;
+bool g_reflectionChildTracing;
 bool g_resourceStateVerified;
 bool g_resourceFileNameVerified;
 bool g_shaderHasParameterVerified;
@@ -1842,6 +2372,2153 @@ uint32_t g_shadowMaterialTexturePendingUs;
 uint32_t g_shadowMaterialPendingNameHash;
 LONG g_shadowMaterialReports;
 LONG g_shadowTextureChainReports;
+
+const tq::probe::Counter kDeferredPassCountCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredGeometry,
+    tq::probe::CounterEngineDeferredShadows,
+    tq::probe::CounterEngineDeferredLighting,
+    tq::probe::CounterEngineDeferredResolve,
+    tq::probe::CounterEngineDeferredLateScene,
+    tq::probe::CounterEngineDeferredPost,
+};
+const tq::probe::Counter kDeferredPassDurationCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredGeometryUs,
+    tq::probe::CounterEngineDeferredShadowsUs,
+    tq::probe::CounterEngineDeferredLightingUs,
+    tq::probe::CounterEngineDeferredResolveUs,
+    tq::probe::CounterEngineDeferredLateSceneUs,
+    tq::probe::CounterEngineDeferredPostUs,
+};
+const tq::probe::Counter kDeferredPassDrawCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredGeometryDrawUs,
+    tq::probe::CounterEngineDeferredShadowsDrawUs,
+    tq::probe::CounterEngineDeferredLightingDrawUs,
+    tq::probe::CounterEngineDeferredResolveDrawUs,
+    tq::probe::CounterEngineDeferredLateSceneDrawUs,
+    tq::probe::CounterEngineDeferredPostDrawUs,
+};
+const tq::probe::Counter kDeferredGeometryCountCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredI1GeometrySetup,
+    tq::probe::CounterEngineDeferredI1GeometryScene,
+    tq::probe::CounterEngineDeferredI2GeometrySetup,
+    tq::probe::CounterEngineDeferredI2GeometryScene,
+};
+const tq::probe::Counter kDeferredGeometryDurationCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredI1GeometrySetupUs,
+    tq::probe::CounterEngineDeferredI1GeometrySceneUs,
+    tq::probe::CounterEngineDeferredI2GeometrySetupUs,
+    tq::probe::CounterEngineDeferredI2GeometrySceneUs,
+};
+const tq::probe::Counter kDeferredGeometryDrawCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineDeferredI1GeometrySetupDrawUs,
+    tq::probe::CounterEngineDeferredI1GeometrySceneDrawUs,
+    tq::probe::CounterEngineDeferredI2GeometrySetupDrawUs,
+    tq::probe::CounterEngineDeferredI2GeometrySceneDrawUs,
+};
+const tq::probe::GpuPhase kDeferredGeometryGpuPhases[] = {
+    tq::probe::GpuPhaseCount,
+    tq::probe::GpuDeferredI1GeometrySetup,
+    tq::probe::GpuDeferredI1GeometryScene,
+    tq::probe::GpuDeferredI2GeometrySetup,
+    tq::probe::GpuDeferredI2GeometryScene,
+};
+
+struct DeferredOwnerBinCounters {
+    tq::probe::Counter resourceCount;
+    tq::probe::Counter resourceUs;
+    tq::probe::Counter textureCount;
+    tq::probe::Counter textureUs;
+    tq::probe::Counter bufferCount;
+    tq::probe::Counter bufferUs;
+};
+
+const DeferredOwnerBinCounters kDeferredOwnerBinCounters[] = {
+    {tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount},
+    {tq::probe::CounterEngineDeferredI1OtherResLoad,
+     tq::probe::CounterEngineDeferredI1OtherResLoadUs,
+     tq::probe::CounterEngineDeferredI1OtherTexCreate,
+     tq::probe::CounterEngineDeferredI1OtherTexCreateUs,
+     tq::probe::CounterEngineDeferredI1OtherBufCreate,
+     tq::probe::CounterEngineDeferredI1OtherBufCreateUs},
+    {tq::probe::CounterEngineDeferredI1GeometrySetupResLoad,
+     tq::probe::CounterEngineDeferredI1GeometrySetupResLoadUs,
+     tq::probe::CounterEngineDeferredI1GeometrySetupTexCreate,
+     tq::probe::CounterEngineDeferredI1GeometrySetupTexCreateUs,
+     tq::probe::CounterEngineDeferredI1GeometrySetupBufCreate,
+     tq::probe::CounterEngineDeferredI1GeometrySetupBufCreateUs},
+    {tq::probe::CounterEngineDeferredI1GeometrySceneResLoad,
+     tq::probe::CounterEngineDeferredI1GeometrySceneResLoadUs,
+     tq::probe::CounterEngineDeferredI1GeometrySceneTexCreate,
+     tq::probe::CounterEngineDeferredI1GeometrySceneTexCreateUs,
+     tq::probe::CounterEngineDeferredI1GeometrySceneBufCreate,
+     tq::probe::CounterEngineDeferredI1GeometrySceneBufCreateUs},
+    {tq::probe::CounterEngineDeferredI2OtherResLoad,
+     tq::probe::CounterEngineDeferredI2OtherResLoadUs,
+     tq::probe::CounterEngineDeferredI2OtherTexCreate,
+     tq::probe::CounterEngineDeferredI2OtherTexCreateUs,
+     tq::probe::CounterEngineDeferredI2OtherBufCreate,
+     tq::probe::CounterEngineDeferredI2OtherBufCreateUs},
+    {tq::probe::CounterEngineDeferredI2GeometrySetupResLoad,
+     tq::probe::CounterEngineDeferredI2GeometrySetupResLoadUs,
+     tq::probe::CounterEngineDeferredI2GeometrySetupTexCreate,
+     tq::probe::CounterEngineDeferredI2GeometrySetupTexCreateUs,
+     tq::probe::CounterEngineDeferredI2GeometrySetupBufCreate,
+     tq::probe::CounterEngineDeferredI2GeometrySetupBufCreateUs},
+    {tq::probe::CounterEngineDeferredI2GeometrySceneResLoad,
+     tq::probe::CounterEngineDeferredI2GeometrySceneResLoadUs,
+     tq::probe::CounterEngineDeferredI2GeometrySceneTexCreate,
+     tq::probe::CounterEngineDeferredI2GeometrySceneTexCreateUs,
+     tq::probe::CounterEngineDeferredI2GeometrySceneBufCreate,
+     tq::probe::CounterEngineDeferredI2GeometrySceneBufCreateUs},
+};
+static_assert(sizeof(kDeferredPassCountCounters)
+                  / sizeof(kDeferredPassCountCounters[0])
+                  == DeferredPassCount,
+              "every deferred pass needs a call counter");
+static_assert(sizeof(kDeferredPassDurationCounters)
+                  / sizeof(kDeferredPassDurationCounters[0])
+                  == DeferredPassCount,
+              "every deferred pass needs a duration counter");
+static_assert(sizeof(kDeferredPassDrawCounters)
+                  / sizeof(kDeferredPassDrawCounters[0])
+                  == DeferredPassCount,
+              "every deferred pass needs a draw-duration counter");
+static_assert(sizeof(kDeferredGeometryCountCounters)
+                  / sizeof(kDeferredGeometryCountCounters[0])
+                  == DeferredGeometryCellCount,
+              "every exact geometry cell needs a call counter");
+static_assert(sizeof(kDeferredGeometryDurationCounters)
+                  / sizeof(kDeferredGeometryDurationCounters[0])
+                  == DeferredGeometryCellCount,
+              "every exact geometry cell needs a duration counter");
+static_assert(sizeof(kDeferredGeometryDrawCounters)
+                  / sizeof(kDeferredGeometryDrawCounters[0])
+                  == DeferredGeometryCellCount,
+              "every exact geometry cell needs a draw counter");
+static_assert(sizeof(kDeferredGeometryGpuPhases)
+                  / sizeof(kDeferredGeometryGpuPhases[0])
+                  == DeferredGeometryCellCount,
+              "every exact geometry cell needs a GPU phase");
+static_assert(sizeof(kDeferredOwnerBinCounters)
+                  / sizeof(kDeferredOwnerBinCounters[0])
+                  == DeferredOwnerBinCount,
+              "every owner bin needs Resource and D3D counters");
+
+enum ReflectionCell {
+    ReflectionCellNone,
+    ReflectionCellI1P1,
+    ReflectionCellI1P2,
+    ReflectionCellI2P1,
+    ReflectionCellI2P2,
+    ReflectionCellCount
+};
+
+struct ReflectionCellCounters {
+    tq::probe::Counter count;
+    tq::probe::Counter durationUs;
+    tq::probe::Counter drawUs;
+    tq::probe::Counter resourceCount;
+    tq::probe::Counter resourceUs;
+    tq::probe::Counter textureCount;
+    tq::probe::Counter textureUs;
+    tq::probe::Counter bufferCount;
+    tq::probe::Counter bufferUs;
+    tq::probe::Counter buildSceneCount;
+    tq::probe::Counter buildSceneUs;
+    tq::probe::Counter renderLightCount;
+    tq::probe::Counter renderLightUs;
+};
+
+#define TQ_REFLECTION_CELL_ROW(prefix) \
+    {tq::probe::CounterEngineReflection##prefix, \
+     tq::probe::CounterEngineReflection##prefix##Us, \
+     tq::probe::CounterEngineReflection##prefix##DrawUs, \
+     tq::probe::CounterEngineReflection##prefix##ResLoad, \
+     tq::probe::CounterEngineReflection##prefix##ResLoadUs, \
+     tq::probe::CounterEngineReflection##prefix##TexCreate, \
+     tq::probe::CounterEngineReflection##prefix##TexCreateUs, \
+     tq::probe::CounterEngineReflection##prefix##BufCreate, \
+     tq::probe::CounterEngineReflection##prefix##BufCreateUs, \
+     tq::probe::CounterEngineReflection##prefix##BuildScene, \
+     tq::probe::CounterEngineReflection##prefix##BuildSceneUs, \
+     tq::probe::CounterEngineReflection##prefix##RenderLight, \
+     tq::probe::CounterEngineReflection##prefix##RenderLightUs}
+const ReflectionCellCounters kReflectionCellCounters[] = {
+    {tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount, tq::probe::CounterCount,
+     tq::probe::CounterCount},
+    TQ_REFLECTION_CELL_ROW(I1P1),
+    TQ_REFLECTION_CELL_ROW(I1P2),
+    TQ_REFLECTION_CELL_ROW(I2P1),
+    TQ_REFLECTION_CELL_ROW(I2P2),
+};
+#undef TQ_REFLECTION_CELL_ROW
+
+const tq::probe::Counter kReflectionManagerCountCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineReflectionI1,
+    tq::probe::CounterEngineReflectionI2,
+};
+const tq::probe::Counter kReflectionManagerDurationCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineReflectionI1Us,
+    tq::probe::CounterEngineReflectionI2Us,
+};
+const tq::probe::Counter kReflectionManagerDrawCounters[] = {
+    tq::probe::CounterCount,
+    tq::probe::CounterEngineReflectionI1DrawUs,
+    tq::probe::CounterEngineReflectionI2DrawUs,
+};
+const tq::probe::GpuPhase kReflectionManagerGpuPhases[] = {
+    tq::probe::GpuPhaseCount,
+    tq::probe::GpuReflectionI1,
+    tq::probe::GpuReflectionI2,
+};
+const tq::probe::GpuPhase kReflectionCellGpuPhases[] = {
+    tq::probe::GpuPhaseCount,
+    tq::probe::GpuReflectionI1P1,
+    tq::probe::GpuReflectionI1P2,
+    tq::probe::GpuReflectionI2P1,
+    tq::probe::GpuReflectionI2P2,
+};
+enum ReflectionChild {
+    ReflectionChildBuildScene,
+    ReflectionChildRenderLight,
+    ReflectionChildCount
+};
+const tq::probe::GpuPhase kReflectionChildGpuPhases[][ReflectionChildCount] = {
+    {tq::probe::GpuPhaseCount, tq::probe::GpuPhaseCount},
+    {tq::probe::GpuReflectionI1P1BuildScene,
+     tq::probe::GpuReflectionI1P1RenderLight},
+    {tq::probe::GpuReflectionI1P2BuildScene,
+     tq::probe::GpuReflectionI1P2RenderLight},
+    {tq::probe::GpuReflectionI2P1BuildScene,
+     tq::probe::GpuReflectionI2P1RenderLight},
+    {tq::probe::GpuReflectionI2P2BuildScene,
+     tq::probe::GpuReflectionI2P2RenderLight},
+};
+static_assert(sizeof(kReflectionCellCounters)
+                  / sizeof(kReflectionCellCounters[0])
+                  == ReflectionCellCount,
+              "every reflection plane cell needs all counters");
+static_assert(sizeof(kReflectionCellGpuPhases)
+                  / sizeof(kReflectionCellGpuPhases[0])
+                  == ReflectionCellCount,
+              "every reflection plane cell needs a GPU phase");
+static_assert(sizeof(kReflectionChildGpuPhases)
+                  / sizeof(kReflectionChildGpuPhases[0])
+                  == ReflectionCellCount,
+              "every reflection plane cell needs both child GPU phases");
+static_assert(sizeof(kReflectionManagerCountCounters)
+                  / sizeof(kReflectionManagerCountCounters[0]) == 3
+              && sizeof(kReflectionManagerDurationCounters)
+                  / sizeof(kReflectionManagerDurationCounters[0]) == 3
+              && sizeof(kReflectionManagerDrawCounters)
+                  / sizeof(kReflectionManagerDrawCounters[0]) == 3
+              && sizeof(kReflectionManagerGpuPhases)
+                  / sizeof(kReflectionManagerGpuPhases[0]) == 3,
+              "reflection manager invocation arrays cover i1 and i2");
+
+ReflectionCell reflectionCell(unsigned manager, unsigned plane) {
+    if (manager == 1 && plane == 1) return ReflectionCellI1P1;
+    if (manager == 1 && plane == 2) return ReflectionCellI1P2;
+    if (manager == 2 && plane == 1) return ReflectionCellI2P1;
+    if (manager == 2 && plane == 2) return ReflectionCellI2P2;
+    return ReflectionCellNone;
+}
+
+struct ReflectionLocation {
+    unsigned manager;
+    unsigned plane;
+    ReflectionCell cell;
+};
+
+ReflectionLocation currentReflectionLocation() {
+    ReflectionLocation result = {};
+    if (!g_reflectionTracing || !onMainThread()) return result;
+    const LONG manager = InterlockedCompareExchange(
+        &g_reflectionManagerInvocation, 0, 0);
+    const LONG plane = InterlockedCompareExchange(
+        &g_reflectionPlaneInvocation, 0, 0);
+    if (manager <= 0) return result;
+    result.manager = (unsigned)manager;
+    result.plane = plane > 0 ? (unsigned)plane : 0;
+    result.cell = reflectionCell(result.manager, result.plane);
+    return result;
+}
+
+// Runs 77 and 78 proved that a fixed moving ordinal window can miss the marked
+// reflection producer: Run 78's selected child ended at exactly draw 192.
+// Run 79 keeps the same sixteen distinct query pairs but covers draws 1--320
+// continuously in 20-draw bins. Ordinary frames still execute only the
+// inactive inline branch in the D3D hooks.
+enum GpuChunkClass {
+    GpuChunkNone,
+    GpuChunkReflection,
+    GpuChunkClassCount
+};
+const unsigned kGpuChunkDraws = 20;
+const unsigned kGpuChunkStartDraw = 1;
+const unsigned kGpuChunkCount = 16;
+const unsigned kGpuChunkEventSlots = 32;
+const unsigned kGpuChunkMarkerFrames = 120;
+const unsigned kGpuChunkRenderableCallSlots = 256;
+const unsigned kGpuChunkRenderableHotCpuUs = 250;
+const unsigned kGpuChunkReflectionBuildSceneTriggerUs = 2000;
+
+struct GpuChunkBin {
+    unsigned firstDraw;
+    unsigned draws;
+    unsigned indexedDraws;
+    unsigned long long elements;
+    unsigned pixelShaderNullDraws;
+    unsigned resource0NullDraws;
+    unsigned bindingChanges;
+    const void* firstVertexShader;
+    const void* lastVertexShader;
+    const void* firstPixelShader;
+    const void* lastPixelShader;
+    const void* firstResource0;
+    const void* lastResource0;
+    const void* firstVertexBuffer0;
+    const void* lastVertexBuffer0;
+    const void* firstIndexBuffer;
+    const void* lastIndexBuffer;
+};
+
+enum GpuChunkRenderableKind {
+    GpuChunkRenderableNone,
+    GpuChunkTerrainPlug,
+    GpuChunkTerrainBlock,
+    GpuChunkMeshInstance
+};
+
+struct GpuChunkRenderableCall {
+    GpuChunkRenderableKind kind;
+    const void* object;
+    const void* terrainType;
+    int materialIndex;
+    unsigned firstDraw;
+    unsigned lastDraw;
+    unsigned cpuUs;
+    unsigned resourceCount;
+    unsigned resourceUs;
+    unsigned textureCount;
+    unsigned textureUs;
+    unsigned bufferCount;
+    unsigned bufferUs;
+};
+
+struct GpuChunkEvent {
+    unsigned framePlusOne;
+    GpuChunkClass kind;
+    unsigned manager;
+    unsigned plane;
+    unsigned startDraw;
+    unsigned triggerUs;
+    unsigned chunks;
+    bool overflow;
+    unsigned renderableCalls;
+    bool renderableCallOverflow;
+    GpuChunkBin bins[kGpuChunkCount];
+    GpuChunkRenderableCall renderables[kGpuChunkRenderableCallSlots];
+};
+
+struct ActiveGpuChunkEvent {
+    GpuChunkEvent* event;
+    ID3D11DeviceContext* context;
+    unsigned chunk;
+    unsigned drawsSeen;
+    bool opened;
+    bool recording;
+};
+
+GpuChunkEvent g_gpuChunkEvents[kGpuChunkEventSlots];
+unsigned g_gpuChunkEventSequence;
+ActiveGpuChunkEvent g_activeGpuChunks[GpuChunkClassCount];
+unsigned g_gpuChunkLastFrame[GpuChunkClassCount];
+bool g_reflectionGpuChunkPending;
+unsigned g_reflectionGpuChunkTriggerUs;
+GpuChunkRenderableCall* g_activeGpuChunkRenderableCall;
+
+tq::probe::GpuPhase gpuChunkPhase(unsigned chunk) {
+    if (chunk >= kGpuChunkCount) return tq::probe::GpuPhaseCount;
+    return (tq::probe::GpuPhase)(tq::probe::GpuChunkReflection00 + chunk);
+}
+
+void openGpuChunk(ActiveGpuChunkEvent& active) {
+    if (!active.event || !active.recording
+        || active.chunk >= kGpuChunkCount || active.opened
+        || active.drawsSeen + 1 < active.event->startDraw)
+        return;
+    if (!active.context) return;
+    tq::probe::gpuBegin(active.context, gpuChunkPhase(active.chunk));
+    active.opened = true;
+}
+
+void refreshGpuChunkDrawGate() {
+    const ActiveGpuChunkEvent& reflection =
+        g_activeGpuChunks[GpuChunkReflection];
+    const bool active = reflection.event && reflection.recording;
+    InterlockedExchange(&detail::gpuChunkDrawActive, active ? 1 : 0);
+}
+
+void armGpuChunks(const ReflectionLocation& reflection, unsigned triggerUs) {
+    if (!g_gpuChunkTracing) return;
+    const unsigned frame = tq::probe::currentFrameIndex();
+    ActiveGpuChunkEvent& active = g_activeGpuChunks[GpuChunkReflection];
+    if (active.event
+        || g_gpuChunkLastFrame[GpuChunkReflection] == frame + 1) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineGpuChunkReflectionCollision);
+        return;
+    }
+    GpuChunkEvent& event =
+        g_gpuChunkEvents[g_gpuChunkEventSequence++ % kGpuChunkEventSlots];
+    memset(&event, 0, sizeof(event));
+    event.framePlusOne = frame + 1;
+    event.kind = GpuChunkReflection;
+    event.startDraw = kGpuChunkStartDraw;
+    event.triggerUs = triggerUs;
+    event.manager = reflection.manager;
+    event.plane = reflection.plane;
+    active.event = &event;
+    active.context = tq::probe::currentGpuContext();
+    active.chunk = 0;
+    active.drawsSeen = 0;
+    active.opened = false;
+    active.recording = true;
+    g_gpuChunkLastFrame[GpuChunkReflection] = frame + 1;
+    tq::probe::engineCount(tq::probe::CounterEngineGpuChunkReflectionArm);
+    tq::probe::engineCount(
+        tq::probe::CounterEngineGpuChunkReflectionStartDraw,
+        kGpuChunkStartDraw);
+    refreshGpuChunkDrawGate();
+}
+
+void closeGpuChunks() {
+    ActiveGpuChunkEvent& active = g_activeGpuChunks[GpuChunkReflection];
+    if (!active.event) return;
+    if (active.opened)
+        tq::probe::gpuEnd(active.context, gpuChunkPhase(active.chunk));
+    if (active.chunk < kGpuChunkCount)
+        active.event->chunks = active.chunk
+            + (active.event->bins[active.chunk].draws || active.opened
+               ? 1u : 0u);
+    else
+        active.event->chunks = kGpuChunkCount;
+    active = {};
+    g_activeGpuChunkRenderableCall = nullptr;
+    refreshGpuChunkDrawGate();
+}
+
+void beginGpuChunkDrawInternal(ID3D11DeviceContext* context) {
+    if (!g_gpuChunkTracing || !onMainThread()) return;
+    ActiveGpuChunkEvent& active = g_activeGpuChunks[GpuChunkReflection];
+    if (!active.event || !active.recording) return;
+    if (!active.context) active.context = context;
+    openGpuChunk(active);
+}
+
+void finishGpuChunkDrawInternal(
+    bool indexed, unsigned count,
+    const tq::engineprobe::DeferredDrawBindings* bindings) {
+    if (!g_gpuChunkTracing || !onMainThread()) return;
+    ActiveGpuChunkEvent& active = g_activeGpuChunks[GpuChunkReflection];
+    if (!active.event || !active.recording) return;
+    const unsigned ordinal = ++active.drawsSeen;
+    tq::probe::engineCount(tq::probe::CounterEngineGpuChunkReflectionDraw);
+    if (ordinal < active.event->startDraw) {
+        // Open immediately after the preceding draw so bin zero also includes
+        // resource and setup commands issued before the start draw reaches
+        // the D3D hook.
+        if (ordinal + 1 == active.event->startDraw) openGpuChunk(active);
+        return;
+    }
+    if (active.chunk >= kGpuChunkCount) {
+        active.event->overflow = true;
+        tq::probe::engineCount(
+            tq::probe::CounterEngineGpuChunkReflectionOverflow);
+        active.recording = false;
+        refreshGpuChunkDrawGate();
+        return;
+    }
+    GpuChunkBin& bin = active.event->bins[active.chunk];
+        if (!bin.draws) {
+            bin.firstDraw = ordinal;
+            if (bindings) {
+                bin.firstVertexShader = bindings->vertexShader;
+                bin.firstPixelShader = bindings->pixelShader;
+                bin.firstResource0 = bindings->pixelResources[0];
+                bin.firstVertexBuffer0 = bindings->vertexBuffers[0];
+                bin.firstIndexBuffer = bindings->indexBuffer;
+            }
+        } else if (bindings
+                   && (bin.lastVertexShader != bindings->vertexShader
+                       || bin.lastPixelShader != bindings->pixelShader
+                       || bin.lastResource0 != bindings->pixelResources[0]
+                       || bin.lastVertexBuffer0 != bindings->vertexBuffers[0]
+                       || bin.lastIndexBuffer != bindings->indexBuffer)) {
+            ++bin.bindingChanges;
+        }
+        ++bin.draws;
+        if (indexed) ++bin.indexedDraws;
+        bin.elements += count;
+        if (bindings) {
+            if (!bindings->pixelShader) ++bin.pixelShaderNullDraws;
+            if (!bindings->pixelResources[0]) ++bin.resource0NullDraws;
+            bin.lastVertexShader = bindings->vertexShader;
+            bin.lastPixelShader = bindings->pixelShader;
+            bin.lastResource0 = bindings->pixelResources[0];
+            bin.lastVertexBuffer0 = bindings->vertexBuffers[0];
+            bin.lastIndexBuffer = bindings->indexBuffer;
+        }
+    if (bin.draws != kGpuChunkDraws) return;
+    if (active.opened)
+        tq::probe::gpuEnd(active.context, gpuChunkPhase(active.chunk));
+    active.opened = false;
+    ++active.chunk;
+    active.event->chunks = active.chunk;
+    // Open the next interval now, not at the next Draw call, so work between
+    // renderables belongs to the following draw range.
+    if (active.chunk < kGpuChunkCount) openGpuChunk(active);
+}
+
+const char* gpuChunkRenderableName(GpuChunkRenderableKind kind) {
+    return kind == GpuChunkTerrainPlug ? "TerrainPlug"
+         : kind == GpuChunkTerrainBlock ? "TerrainBlock"
+         : kind == GpuChunkMeshInstance ? "GraphicsMeshInstance" : "none";
+}
+
+struct GpuChunkRenderableCallScope {
+    GpuChunkRenderableCall* call;
+    GpuChunkRenderableCall* prior;
+
+    GpuChunkRenderableCallScope(GpuChunkRenderableKind kind,
+                                const void* object)
+        : call(nullptr), prior(g_activeGpuChunkRenderableCall) {
+        if (!g_gpuChunkTracing || !onMainThread()) return;
+        ActiveGpuChunkEvent& active =
+            g_activeGpuChunks[GpuChunkReflection];
+        if (!active.event || !active.recording) return;
+        GpuChunkEvent& event = *active.event;
+        // Retain every major renderable call that can overlap the continuous
+        // draw window. Calls beyond draw 320 cannot explain a covered bin.
+        if (active.drawsSeen + 1 < event.startDraw) return;
+        if (event.renderableCalls >= kGpuChunkRenderableCallSlots) {
+            event.renderableCallOverflow = true;
+            return;
+        }
+        call = &event.renderables[event.renderableCalls++];
+        memset(call, 0, sizeof(*call));
+        call->kind = kind;
+        call->object = object;
+        call->materialIndex = -1;
+        call->firstDraw = active.drawsSeen + 1;
+        g_activeGpuChunkRenderableCall = call;
+    }
+
+    void finish(unsigned elapsedUs) {
+        if (!call) return;
+        call->cpuUs = elapsedUs;
+        call->lastDraw =
+            g_activeGpuChunks[GpuChunkReflection].drawsSeen;
+    }
+
+    ~GpuChunkRenderableCallScope() {
+        g_activeGpuChunkRenderableCall = prior;
+    }
+};
+
+void noteGpuChunkRenderableResource(unsigned elapsedUs,
+                                    const void* terrainType,
+                                    int materialIndex) {
+    if (!g_activeGpuChunkRenderableCall || !onMainThread()) return;
+    GpuChunkRenderableCall& call = *g_activeGpuChunkRenderableCall;
+    ++call.resourceCount;
+    call.resourceUs += elapsedUs;
+    if (terrainType) {
+        call.terrainType = terrainType;
+        call.materialIndex = materialIndex;
+    }
+}
+
+void noteGpuChunkRenderableCreation(bool texture, unsigned elapsedUs) {
+    if (!g_activeGpuChunkRenderableCall || !onMainThread()) return;
+    GpuChunkRenderableCall& call = *g_activeGpuChunkRenderableCall;
+    if (texture) {
+        ++call.textureCount;
+        call.textureUs += elapsedUs;
+    } else {
+        ++call.bufferCount;
+        call.bufferUs += elapsedUs;
+    }
+}
+
+void reportGpuChunksAtMarker() {
+    if (!g_gpuChunkTracing) return;
+    const unsigned marker = tq::probe::currentFrameIndex();
+    const unsigned count = g_gpuChunkEventSequence < kGpuChunkEventSlots
+        ? g_gpuChunkEventSequence : kGpuChunkEventSlots;
+    unsigned retained = 0;
+    for (unsigned offset = 0; offset < count; ++offset) {
+        const GpuChunkEvent& event = g_gpuChunkEvents[
+            (g_gpuChunkEventSequence - count + offset)
+                % kGpuChunkEventSlots];
+        if (event.framePlusOne && event.framePlusOne - 1 <= marker
+            && marker - (event.framePlusOne - 1) <= kGpuChunkMarkerFrames)
+            ++retained;
+    }
+    tq::hdr::log("Engine trace: F12 frame %u, retained GPU chunk events %u"
+                 " (preceding %u frames)\r\n",
+                 marker, retained, kGpuChunkMarkerFrames);
+    // Oldest first is deliberate. The human-reaction candidate normally ends
+    // 0.3--0.8 seconds before F12; Run 79 printed a newer event first and its
+    // per-call dump exhausted the session log before the older event appeared.
+    for (unsigned offset = 0; offset < count; ++offset) {
+        const GpuChunkEvent& event = g_gpuChunkEvents[
+            (g_gpuChunkEventSequence - count + offset)
+                % kGpuChunkEventSlots];
+        if (!event.framePlusOne) continue;
+        const unsigned frame = event.framePlusOne - 1;
+        if (frame > marker || marker - frame > kGpuChunkMarkerFrames)
+            continue;
+        tq::hdr::log(
+            "Engine trace: GPU chunks frame %u, %s, i%u/p%u,"
+            " start draw %u, trigger %u us, chunks %u, overflow %u\r\n",
+            frame, "reflection RenderLightStyle", event.manager, event.plane,
+            event.startDraw, event.triggerUs, event.chunks,
+            event.overflow ? 1u : 0u);
+        for (unsigned i = 0; i < event.chunks && i < kGpuChunkCount; ++i) {
+            const GpuChunkBin& bin = event.bins[i];
+            tq::hdr::log(
+                "Engine trace: GPU chunk frame %u, %s, bin %u,"
+                " draws %u-%u (%u, indexed %u, elements %llu),"
+                " ps-null %u, srv0-null %u, binding changes %u,"
+                " vs %p/%p ps %p/%p srv0 %p/%p vb0 %p/%p ib %p/%p\r\n",
+                frame, "reflection RenderLightStyle", i, bin.firstDraw,
+                bin.firstDraw + (bin.draws ? bin.draws - 1 : 0), bin.draws,
+                bin.indexedDraws, bin.elements, bin.pixelShaderNullDraws,
+                bin.resource0NullDraws, bin.bindingChanges,
+                bin.firstVertexShader, bin.lastVertexShader,
+                bin.firstPixelShader, bin.lastPixelShader,
+                bin.firstResource0, bin.lastResource0,
+                bin.firstVertexBuffer0, bin.lastVertexBuffer0,
+                bin.firstIndexBuffer, bin.lastIndexBuffer);
+            unsigned classCalls[GpuChunkMeshInstance + 1] = {};
+            unsigned classDraws[GpuChunkMeshInstance + 1] = {};
+            const unsigned binLast = bin.firstDraw
+                + (bin.draws ? bin.draws - 1 : 0);
+            for (unsigned j = 0;
+                 j < event.renderableCalls
+                     && j < kGpuChunkRenderableCallSlots; ++j) {
+                const GpuChunkRenderableCall& call = event.renderables[j];
+                if (call.kind <= GpuChunkRenderableNone
+                    || call.kind > GpuChunkMeshInstance
+                    || !bin.draws || call.lastDraw < bin.firstDraw
+                    || call.firstDraw > binLast)
+                    continue;
+                const unsigned first = call.firstDraw > bin.firstDraw
+                    ? call.firstDraw : bin.firstDraw;
+                const unsigned last = call.lastDraw < binLast
+                    ? call.lastDraw : binLast;
+                ++classCalls[call.kind];
+                classDraws[call.kind] += last - first + 1;
+            }
+            tq::hdr::log(
+                "Engine trace: GPU chunk classes frame %u, bin %u,"
+                " TerrainPlug %u/%u, TerrainBlock %u/%u,"
+                " GraphicsMeshInstance %u/%u (calls/draws)\r\n",
+                frame, i,
+                classCalls[GpuChunkTerrainPlug],
+                classDraws[GpuChunkTerrainPlug],
+                classCalls[GpuChunkTerrainBlock],
+                classDraws[GpuChunkTerrainBlock],
+                classCalls[GpuChunkMeshInstance],
+                classDraws[GpuChunkMeshInstance]);
+        }
+        tq::hdr::log(
+            "Engine trace: reflection renderable calls frame %u, retained %u,"
+            " overflow %u\r\n",
+            frame, event.renderableCalls,
+            event.renderableCallOverflow ? 1u : 0u);
+        unsigned kindCalls[GpuChunkMeshInstance + 1] = {};
+        unsigned kindDraws[GpuChunkMeshInstance + 1] = {};
+        unsigned kindCpuUs[GpuChunkMeshInstance + 1] = {};
+        unsigned kindResourceCount[GpuChunkMeshInstance + 1] = {};
+        unsigned kindResourceUs[GpuChunkMeshInstance + 1] = {};
+        unsigned hotCalls = 0;
+        for (unsigned i = 0;
+             i < event.renderableCalls
+                 && i < kGpuChunkRenderableCallSlots; ++i) {
+            const GpuChunkRenderableCall& call = event.renderables[i];
+            const unsigned draws = call.lastDraw >= call.firstDraw
+                ? call.lastDraw - call.firstDraw + 1 : 0;
+            if (call.kind > GpuChunkRenderableNone
+                && call.kind <= GpuChunkMeshInstance) {
+                ++kindCalls[call.kind];
+                kindDraws[call.kind] += draws;
+                kindCpuUs[call.kind] += call.cpuUs;
+                kindResourceCount[call.kind] += call.resourceCount;
+                kindResourceUs[call.kind] += call.resourceUs;
+            }
+            if (!call.resourceCount && !call.textureCount
+                && !call.bufferCount
+                && call.cpuUs < kGpuChunkRenderableHotCpuUs)
+                continue;
+            ++hotCalls;
+            tq::hdr::log(
+                "Engine trace: reflection hot renderable frame %u, call %u,"
+                " %s self %p, draws %u-%u (%u), cpu %u us, Resource %u/%u"
+                " us, texture create %u/%u us, buffer create %u/%u us,"
+                " TerrainType %p material %d\r\n",
+                frame, i, gpuChunkRenderableName(call.kind), call.object,
+                call.firstDraw, call.lastDraw, draws, call.cpuUs,
+                call.resourceCount, call.resourceUs,
+                call.textureCount, call.textureUs,
+                call.bufferCount, call.bufferUs,
+                call.terrainType, call.materialIndex);
+        }
+        for (unsigned kind = GpuChunkTerrainPlug;
+             kind <= GpuChunkMeshInstance; ++kind) {
+            tq::hdr::log(
+                "Engine trace: reflection renderable class frame %u, %s,"
+                " calls %u, draws %u, cpu %u us, Resource %u/%u us\r\n",
+                frame,
+                gpuChunkRenderableName((GpuChunkRenderableKind)kind),
+                kindCalls[kind], kindDraws[kind], kindCpuUs[kind],
+                kindResourceCount[kind], kindResourceUs[kind]);
+        }
+        tq::hdr::log(
+            "Engine trace: reflection renderable frame %u emitted %u hot"
+            " calls; cheap calls represented by class totals\r\n",
+            frame, hotCalls);
+    }
+}
+
+void countReflectionResource(unsigned elapsedUs) {
+    const ReflectionLocation location = currentReflectionLocation();
+    if (!location.manager) return;
+    tq::probe::engineCount(tq::probe::CounterEngineReflectionManagerResLoad);
+    tq::probe::engineCount(
+        tq::probe::CounterEngineReflectionManagerResLoadUs, elapsedUs);
+    if (location.cell <= ReflectionCellNone
+        || location.cell >= ReflectionCellCount) return;
+    const ReflectionCellCounters& counters =
+        kReflectionCellCounters[location.cell];
+    tq::probe::engineCount(counters.resourceCount);
+    tq::probe::engineCount(counters.resourceUs, elapsedUs);
+}
+
+void countReflectionCreation(bool texture, unsigned elapsedUs) {
+    noteGpuChunkRenderableCreation(texture, elapsedUs);
+    const ReflectionLocation location = currentReflectionLocation();
+    if (!location.manager) return;
+    tq::probe::engineCount(
+        texture ? tq::probe::CounterEngineReflectionManagerTexCreate
+                : tq::probe::CounterEngineReflectionManagerBufCreate);
+    tq::probe::engineCount(
+        texture ? tq::probe::CounterEngineReflectionManagerTexCreateUs
+                : tq::probe::CounterEngineReflectionManagerBufCreateUs,
+        elapsedUs);
+    if (location.cell <= ReflectionCellNone
+        || location.cell >= ReflectionCellCount) return;
+    const ReflectionCellCounters& counters =
+        kReflectionCellCounters[location.cell];
+    tq::probe::engineCount(texture ? counters.textureCount
+                                   : counters.bufferCount);
+    tq::probe::engineCount(texture ? counters.textureUs : counters.bufferUs,
+                           elapsedUs);
+}
+
+void countReflectionDraw(unsigned elapsedUs) {
+    if (!elapsedUs) return;
+    const ReflectionLocation location = currentReflectionLocation();
+    if (!location.manager) return;
+    tq::probe::engineCount(
+        tq::probe::CounterEngineReflectionManagerDrawUs, elapsedUs);
+    if (location.manager <= 2)
+        tq::probe::engineCount(
+            kReflectionManagerDrawCounters[location.manager], elapsedUs);
+    if (location.cell <= ReflectionCellNone
+        || location.cell >= ReflectionCellCount) return;
+    tq::probe::engineCount(kReflectionCellCounters[location.cell].drawUs,
+                           elapsedUs);
+}
+
+DeferredGeometryCell deferredGeometryCell(unsigned invocation,
+                                          DeferredGeometrySite site) {
+    if (invocation == 1 && site == DeferredGeometrySiteSetup)
+        return DeferredGeometryCellI1Setup;
+    if (invocation == 1 && site == DeferredGeometrySiteScene)
+        return DeferredGeometryCellI1Scene;
+    if (invocation == 2 && site == DeferredGeometrySiteSetup)
+        return DeferredGeometryCellI2Setup;
+    if (invocation == 2 && site == DeferredGeometrySiteScene)
+        return DeferredGeometryCellI2Scene;
+    return DeferredGeometryCellNone;
+}
+
+DeferredOwnerBin deferredOwnerBin(unsigned invocation,
+                                  DeferredGeometrySite site) {
+    if (invocation == 1) {
+        if (site == DeferredGeometrySiteSetup)
+            return DeferredOwnerBinI1GeometrySetup;
+        if (site == DeferredGeometrySiteScene)
+            return DeferredOwnerBinI1GeometryScene;
+        return DeferredOwnerBinI1Other;
+    }
+    if (invocation == 2) {
+        if (site == DeferredGeometrySiteSetup)
+            return DeferredOwnerBinI2GeometrySetup;
+        if (site == DeferredGeometrySiteScene)
+            return DeferredOwnerBinI2GeometryScene;
+        return DeferredOwnerBinI2Other;
+    }
+    return DeferredOwnerBinNone;
+}
+
+struct DeferredLocation {
+    unsigned invocation;
+    DeferredPass pass;
+    DeferredGeometrySite site;
+    DeferredOwnerBin bin;
+};
+
+DeferredLocation currentDeferredLocation() {
+    DeferredLocation result = {};
+    if (!g_deferredPassTracing || !onMainThread()) return result;
+    const LONG invocation = InterlockedCompareExchange(
+        &g_deferredOwnerInvocation, 0, 0);
+    const LONG pass = InterlockedCompareExchange(&g_deferredPass, 0, 0);
+    const LONG site = InterlockedCompareExchange(&g_deferredGeometrySite, 0, 0);
+    if (invocation <= 0) return result;
+    result.invocation = (unsigned)invocation;
+    result.pass = pass > DeferredPassNone && pass < DeferredPassCount
+        ? (DeferredPass)pass : DeferredPassNone;
+    result.site = site > DeferredGeometrySiteNone
+               && site < DeferredGeometrySiteCount
+        ? (DeferredGeometrySite)site : DeferredGeometrySiteNone;
+    result.bin = deferredOwnerBin(result.invocation, result.site);
+    return result;
+}
+
+// Run 82 removed the complete first reflection child, but the same marked
+// transition paid first-use GPU work in the next exact colour and directional
+// consumers.  Keep one bounded identity table across the session so a frame
+// can distinguish a large newly seen renderable population from ordinary
+// repeated draws.  This is trace-only and adds no Engine patch or clock.
+enum AdmissionConsumer {
+    AdmissionConsumerNone,
+    AdmissionConsumerReflectionI2P1,
+    AdmissionConsumerDeferredI2Setup,
+    AdmissionConsumerDeferredI2Scene,
+    AdmissionConsumerShadowDirectional,
+    AdmissionConsumerCount
+};
+
+struct AdmissionConsumerCounters {
+    tq::probe::Counter draw;
+    tq::probe::Counter renderable[GpuChunkMeshInstance + 1];
+    tq::probe::Counter first[GpuChunkMeshInstance + 1];
+};
+
+const AdmissionConsumerCounters
+    kAdmissionConsumerCounters[AdmissionConsumerCount] = {
+    {},
+    {tq::probe::CounterEngineAdmissionReflectionI2P1Draw,
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionReflectionI2P1TerrainPlug,
+      tq::probe::CounterEngineAdmissionReflectionI2P1TerrainBlock,
+      tq::probe::CounterEngineAdmissionReflectionI2P1Mesh},
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionReflectionI2P1TerrainPlugFirst,
+      tq::probe::CounterEngineAdmissionReflectionI2P1TerrainBlockFirst,
+      tq::probe::CounterEngineAdmissionReflectionI2P1MeshFirst}},
+    {tq::probe::CounterEngineAdmissionDeferredI2SetupDraw,
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupTerrainPlug,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupTerrainBlock,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupMesh},
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupTerrainPlugFirst,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupTerrainBlockFirst,
+      tq::probe::CounterEngineAdmissionDeferredI2SetupMeshFirst}},
+    {tq::probe::CounterEngineAdmissionDeferredI2SceneDraw,
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneTerrainPlug,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneTerrainBlock,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneMesh},
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneTerrainPlugFirst,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneTerrainBlockFirst,
+      tq::probe::CounterEngineAdmissionDeferredI2SceneMeshFirst}},
+    {tq::probe::CounterEngineAdmissionShadowDirectionalDraw,
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionShadowDirectionalTerrainPlug,
+      tq::probe::CounterEngineAdmissionShadowDirectionalTerrainBlock,
+      tq::probe::CounterEngineAdmissionShadowDirectionalMesh},
+     {tq::probe::CounterCount,
+      tq::probe::CounterEngineAdmissionShadowDirectionalTerrainPlugFirst,
+      tq::probe::CounterEngineAdmissionShadowDirectionalTerrainBlockFirst,
+      tq::probe::CounterEngineAdmissionShadowDirectionalMeshFirst}}
+};
+
+const unsigned kAdmissionRenderableIdentitySlots = 8192;
+const unsigned kAdmissionRenderableIdentityProbe = 16;
+const unsigned kAdmissionRenderableIdentityHashSalt = 0x9e3779b1;
+
+struct AdmissionRenderableIdentity {
+    const void* object;
+    unsigned kind;
+    unsigned consumerMask;
+    unsigned secondaryState;
+};
+
+AdmissionRenderableIdentity
+    g_admissionRenderableIdentities[kAdmissionRenderableIdentitySlots];
+
+unsigned admissionRenderableIdentityStart(const void* object,
+                                           GpuChunkRenderableKind kind) {
+    uintptr_t value = (uintptr_t)object;
+    value ^= value >> 7;
+    value ^= value >> 15;
+    value ^= (uintptr_t)kind * kAdmissionRenderableIdentityHashSalt;
+    return (unsigned)value & (kAdmissionRenderableIdentitySlots - 1);
+}
+
+AdmissionRenderableIdentity* findAdmissionRenderableIdentity(
+    const void* object, GpuChunkRenderableKind kind, bool create) {
+    if (!object || kind <= GpuChunkRenderableNone
+        || kind > GpuChunkMeshInstance) return nullptr;
+    const unsigned start = admissionRenderableIdentityStart(object, kind);
+    for (unsigned i = 0; i < kAdmissionRenderableIdentityProbe; ++i) {
+        AdmissionRenderableIdentity& entry =
+            g_admissionRenderableIdentities[
+                (start + i) & (kAdmissionRenderableIdentitySlots - 1)];
+        if (!entry.object) {
+            if (!create) return nullptr;
+            entry.object = object;
+            entry.kind = (unsigned)kind;
+            entry.consumerMask = 0;
+            entry.secondaryState = 0;
+            return &entry;
+        }
+        if (entry.object != object || entry.kind != (unsigned)kind) continue;
+        return &entry;
+    }
+    tq::probe::engineCount(tq::probe::CounterEngineAdmissionIdentityOverflow);
+    return nullptr;
+}
+
+bool admissionRenderableFirst(const void* object,
+                              GpuChunkRenderableKind kind,
+                              AdmissionConsumer consumer) {
+    if (consumer <= AdmissionConsumerNone
+        || consumer >= AdmissionConsumerCount) return false;
+    AdmissionRenderableIdentity* const entry =
+        findAdmissionRenderableIdentity(object, kind, true);
+    if (!entry) return false;
+    const unsigned mask = 1u << (unsigned)consumer;
+    if (entry->consumerMask & mask) return false;
+    entry->consumerMask |= mask;
+    return true;
+}
+
+enum SecondaryAdmissionState {
+    SecondaryAdmissionUnseen,
+    SecondaryAdmissionAdmitted,
+    SecondaryAdmissionPending
+};
+
+enum SecondaryAdmissionContext {
+    SecondaryAdmissionContextNone,
+    SecondaryAdmissionContextReflection,
+    SecondaryAdmissionContextShadow
+};
+
+SecondaryAdmissionContext currentSecondaryAdmissionContext() {
+    if (!g_secondaryPassAdmissionActive || !onMainThread())
+        return SecondaryAdmissionContextNone;
+    if (g_insideReflectionRenderLight)
+        return SecondaryAdmissionContextReflection;
+    if (InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0)
+        return SecondaryAdmissionContextShadow;
+    return SecondaryAdmissionContextNone;
+}
+
+void countSecondaryAdmission(SecondaryAdmissionContext context,
+                             bool admitted) {
+    const tq::probe::Counter counter =
+        context == SecondaryAdmissionContextReflection
+            ? (admitted
+                ? tq::probe::CounterEngineSecondaryAdmissionReflectionAdmitted
+                : tq::probe::CounterEngineSecondaryAdmissionReflectionDeferred)
+            : (admitted
+                ? tq::probe::CounterEngineSecondaryAdmissionShadowAdmitted
+                : tq::probe::CounterEngineSecondaryAdmissionShadowDeferred);
+    tq::probe::engineCount(counter);
+}
+
+void armSecondaryAdmission() {
+    if (!g_secondaryPassAdmissionActive || g_secondaryAdmissionArmed) return;
+    g_secondaryAdmissionArmed = true;
+    tq::probe::engineCount(tq::probe::CounterEngineSecondaryAdmissionTrigger);
+}
+
+bool shouldDeferSecondaryAdmission(GpuChunkRenderableKind kind,
+                                   const void* object) {
+    const SecondaryAdmissionContext context =
+        currentSecondaryAdmissionContext();
+    if (context == SecondaryAdmissionContextNone) return false;
+    AdmissionRenderableIdentity* const entry =
+        findAdmissionRenderableIdentity(object, kind, true);
+    if (!entry) return false;  // Untracked objects keep the safe stock path.
+    if (entry->secondaryState == SecondaryAdmissionAdmitted) return false;
+    if (g_secondaryAdmissionBudgetFrame != g_secondaryAdmissionFrameSerial) {
+        g_secondaryAdmissionBudgetFrame = g_secondaryAdmissionFrameSerial;
+        g_secondaryAdmissionUsedThisFrame = 0;
+    }
+    if (g_secondaryAdmissionUsedThisFrame < g_secondaryPassAdmissionBudget) {
+        ++g_secondaryAdmissionUsedThisFrame;
+        entry->secondaryState = SecondaryAdmissionAdmitted;
+        countSecondaryAdmission(context, true);
+        return false;
+    }
+    // The first identity beyond the frame budget is the transition signal.
+    // This observes the exact population being controlled and needs neither
+    // a reflection nor a change between two non-null shadow-region pointers.
+    armSecondaryAdmission();
+    entry->secondaryState = SecondaryAdmissionPending;
+    countSecondaryAdmission(context, false);
+    return true;
+}
+
+struct SecondaryAdmissionDrawScope {
+    bool active;
+    SecondaryAdmissionDrawScope(GpuChunkRenderableKind kind,
+                                const void* object)
+        : active(shouldDeferSecondaryAdmission(kind, object)) {
+        if (active)
+            InterlockedIncrement(
+                &detail::secondaryAdmissionDrawSuppressDepth);
+    }
+    ~SecondaryAdmissionDrawScope() {
+        if (active)
+            InterlockedDecrement(
+                &detail::secondaryAdmissionDrawSuppressDepth);
+    }
+};
+
+AdmissionConsumer currentAdmissionConsumer() {
+    if (!g_tracing || !onMainThread()) return AdmissionConsumerNone;
+    const ReflectionLocation reflection = currentReflectionLocation();
+    if (reflection.cell == ReflectionCellI2P1)
+        return AdmissionConsumerReflectionI2P1;
+    if (InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0)
+        return AdmissionConsumerShadowDirectional;
+    const DeferredLocation deferred = currentDeferredLocation();
+    if (deferred.invocation != 2) return AdmissionConsumerNone;
+    if (deferred.site == DeferredGeometrySiteSetup)
+        return AdmissionConsumerDeferredI2Setup;
+    if (deferred.site == DeferredGeometrySiteScene)
+        return AdmissionConsumerDeferredI2Scene;
+    return AdmissionConsumerNone;
+}
+
+void countAdmissionDraw() {
+    const AdmissionConsumer consumer = currentAdmissionConsumer();
+    if (consumer <= AdmissionConsumerNone || consumer >= AdmissionConsumerCount)
+        return;
+    tq::probe::engineCount(kAdmissionConsumerCounters[consumer].draw);
+}
+
+void countAdmissionRenderable(GpuChunkRenderableKind kind,
+                              const void* object) {
+    const AdmissionConsumer consumer = currentAdmissionConsumer();
+    if (consumer <= AdmissionConsumerNone || consumer >= AdmissionConsumerCount
+        || kind <= GpuChunkRenderableNone || kind > GpuChunkMeshInstance)
+        return;
+    const AdmissionConsumerCounters& counters =
+        kAdmissionConsumerCounters[consumer];
+    tq::probe::engineCount(counters.renderable[kind]);
+    if (admissionRenderableFirst(object, kind, consumer))
+        tq::probe::engineCount(counters.first[kind]);
+}
+
+const char* deferredPassName(DeferredPass pass) {
+    switch (pass) {
+    case DeferredPassGeometry: return "geometry";
+    case DeferredPassShadows: return "shadows";
+    case DeferredPassLighting: return "lighting";
+    case DeferredPassResolve: return "resolve";
+    case DeferredPassLateScene: return "late";
+    case DeferredPassPost: return "post";
+    default: return "gap";
+    }
+}
+
+const char* deferredSiteName(DeferredGeometrySite site) {
+    return site == DeferredGeometrySiteSetup ? "gsetup"
+         : site == DeferredGeometrySiteScene ? "gscene" : "none";
+}
+
+void countDeferredOwnerResource(unsigned elapsedUs) {
+    const DeferredLocation location = currentDeferredLocation();
+    if (location.bin <= DeferredOwnerBinNone
+        || location.bin >= DeferredOwnerBinCount) return;
+    const DeferredOwnerBinCounters& counters =
+        kDeferredOwnerBinCounters[location.bin];
+    tq::probe::engineCount(counters.resourceCount);
+    tq::probe::engineCount(counters.resourceUs, elapsedUs);
+}
+
+enum DeferredCreationKind {
+    DeferredCreationTexture,
+    DeferredCreationBuffer
+};
+
+enum CrossPassFamily {
+    CrossPassNone = 0,
+    CrossPassReflection = 1,
+    CrossPassShadow = 2,
+    CrossPassDeferred = 4
+};
+
+const unsigned kCrossPassBufferSlots = 4096;
+const unsigned kCrossPassIndexSlots = 8192;
+const unsigned kCrossPassIndexProbe = 16;
+const unsigned kCrossPassFreshFrames = 120;
+const unsigned kCrossPassMarkerReportLimit = 128;
+struct CrossPassBufferRecord {
+    const void* object;
+    unsigned sequence;
+    unsigned createdFrame;
+    unsigned byteWidth;
+    unsigned bindFlags;
+    unsigned createdReflectionManager;
+    unsigned createdReflectionPlane;
+    unsigned createdDeferredInvocation;
+    DeferredPass createdDeferredPass;
+    DeferredGeometrySite createdDeferredSite;
+    unsigned useMask;
+    unsigned reflectionFirstFrame;
+    unsigned reflectionManager;
+    unsigned reflectionPlane;
+    unsigned reflectionDraws;
+    unsigned shadowFirstFrame;
+    unsigned shadowDraws;
+    unsigned deferredFirstFrame;
+    unsigned deferredInvocation;
+    DeferredPass deferredPass;
+    DeferredGeometrySite deferredSite;
+    unsigned deferredDraws;
+};
+struct CrossPassIndexEntry {
+    const void* object;
+    unsigned sequence;
+};
+CrossPassBufferRecord g_crossPassBuffers[kCrossPassBufferSlots];
+CrossPassIndexEntry g_crossPassIndex[kCrossPassIndexSlots];
+unsigned g_crossPassBufferSequence;
+unsigned g_crossPassIndexOverflows;
+unsigned g_crossPassRecentEvictions;
+
+const void* const kCrossPassIndexTombstone = (const void*)(uintptr_t)1;
+
+unsigned crossPassIndexStart(const void* object) {
+    uintptr_t value = (uintptr_t)object;
+    value ^= value >> 13;
+    value ^= value >> 7;
+    return (unsigned)((value >> 3) & (kCrossPassIndexSlots - 1));
+}
+
+void removeCrossPassIndex(const void* object, unsigned sequence) {
+    if (!object || object == kCrossPassIndexTombstone) return;
+    const unsigned start = crossPassIndexStart(object);
+    for (unsigned i = 0; i < kCrossPassIndexProbe; ++i) {
+        CrossPassIndexEntry& entry =
+            g_crossPassIndex[(start + i) & (kCrossPassIndexSlots - 1)];
+        if (!entry.object) return;
+        if (entry.object == object && entry.sequence == sequence) {
+            entry.object = kCrossPassIndexTombstone;
+            entry.sequence = 0;
+            return;
+        }
+    }
+}
+
+bool insertCrossPassIndex(const void* object, unsigned sequence) {
+    if (!object || object == kCrossPassIndexTombstone) return false;
+    const unsigned start = crossPassIndexStart(object);
+    unsigned spare = kCrossPassIndexSlots;
+    for (unsigned i = 0; i < kCrossPassIndexProbe; ++i) {
+        const unsigned at = (start + i) & (kCrossPassIndexSlots - 1);
+        CrossPassIndexEntry& entry = g_crossPassIndex[at];
+        if (entry.object == object) {
+            entry.sequence = sequence;
+            return true;
+        }
+        if ((!entry.object || entry.object == kCrossPassIndexTombstone)
+            && spare == kCrossPassIndexSlots)
+            spare = at;
+        if (!entry.object) break;
+    }
+    if (spare == kCrossPassIndexSlots) return false;
+    g_crossPassIndex[spare].object = object;
+    g_crossPassIndex[spare].sequence = sequence;
+    return true;
+}
+
+void noteCrossPassBufferCreated(const void* object, unsigned byteWidth,
+                                unsigned bindFlags) {
+    if (!g_crossPassTracing || !object || !onMainThread()) return;
+    const unsigned frame = tq::probe::currentFrameIndex();
+    const unsigned sequence = ++g_crossPassBufferSequence;
+    CrossPassBufferRecord& record =
+        g_crossPassBuffers[(sequence - 1) % kCrossPassBufferSlots];
+    if (record.object && frame >= record.createdFrame
+        && frame - record.createdFrame <= kCrossPassFreshFrames) {
+        ++g_crossPassRecentEvictions;
+        tq::probe::engineCount(
+            tq::probe::CounterEngineCrossPassRecentEviction);
+    }
+    removeCrossPassIndex(record.object, record.sequence);
+    memset(&record, 0, sizeof(record));
+    record.object = object;
+    record.sequence = sequence;
+    record.createdFrame = frame;
+    record.byteWidth = byteWidth;
+    record.bindFlags = bindFlags;
+    const ReflectionLocation reflection = currentReflectionLocation();
+    record.createdReflectionManager = reflection.manager;
+    record.createdReflectionPlane = reflection.plane;
+    const DeferredLocation deferred = currentDeferredLocation();
+    record.createdDeferredInvocation = deferred.invocation;
+    record.createdDeferredPass = deferred.pass;
+    record.createdDeferredSite = deferred.site;
+    tq::probe::engineCount(tq::probe::CounterEngineCrossPassBufferCreated);
+    tq::probe::engineCount(
+        tq::probe::CounterEngineCrossPassBufferCreatedBytes, byteWidth);
+    if (!insertCrossPassIndex(object, sequence)) {
+        ++g_crossPassIndexOverflows;
+        tq::probe::engineCount(
+            tq::probe::CounterEngineCrossPassIndexOverflow);
+    }
+}
+
+const unsigned kDeferredCreationSlots = 4096;
+struct DeferredCreationRecord {
+    const void* object;
+    unsigned frame;
+    unsigned invocation;
+    DeferredPass pass;
+    DeferredGeometrySite site;
+    DeferredCreationKind kind;
+    unsigned elapsedUs;
+    unsigned a;
+    unsigned b;
+    unsigned c;
+    unsigned d;
+    unsigned e;
+    unsigned f;
+};
+DeferredCreationRecord g_deferredCreations[kDeferredCreationSlots];
+unsigned g_deferredCreationSequence;
+
+// Run 79's reacted-to play burst contained 51 off-main CreateTexture2D calls,
+// but the owner-scoped creation ring deliberately rejected them and therefore
+// retained no descriptor, thread, or cross-frame extent. This lock-free ring
+// publishes each completed record last. F12 takes a sequence snapshot and
+// accepts only slots whose publication sequence still matches, so a loader
+// thread can never leave a partially written record looking valid.
+const unsigned kOffMainTextureSlots = 512;
+const unsigned kOffMainTextureMarkerFrames = 120;
+const unsigned kOffMainTextureReportLimit = 192;
+struct OffMainTextureRecord {
+    volatile LONG publishedSequence;
+    unsigned startFrame;
+    unsigned finishFrame;
+    unsigned elapsedUs;
+    unsigned threadId;
+    unsigned width;
+    unsigned height;
+    unsigned mipLevels;
+    unsigned format;
+    unsigned bindFlags;
+    unsigned miscFlags;
+    bool hasInitialData;
+};
+OffMainTextureRecord g_offMainTextures[kOffMainTextureSlots];
+volatile LONG g_offMainTextureSequence;
+
+void reportOffMainTexturesAtMarker() {
+    if (!g_deferredPassTracing) return;
+    const unsigned marker = tq::probe::currentFrameIndex();
+    const LONG snapshot = InterlockedCompareExchange(
+        &g_offMainTextureSequence, 0, 0);
+    const LONG first = snapshot > (LONG)kOffMainTextureSlots
+        ? snapshot - (LONG)kOffMainTextureSlots + 1 : 1;
+    unsigned retained = 0;
+    unsigned elapsedUs = 0;
+    unsigned crossedFrames = 0;
+    for (LONG sequence = first; sequence <= snapshot; ++sequence) {
+        const OffMainTextureRecord& record =
+            g_offMainTextures[(sequence - 1) % kOffMainTextureSlots];
+        if (InterlockedCompareExchange(
+                const_cast<volatile LONG*>(&record.publishedSequence), 0, 0)
+                != sequence)
+            continue;
+        if (record.finishFrame > marker
+            || marker - record.finishFrame > kOffMainTextureMarkerFrames)
+            continue;
+        ++retained;
+        elapsedUs += record.elapsedUs;
+        if (record.startFrame != record.finishFrame) ++crossedFrames;
+    }
+    tq::hdr::log(
+        "Engine trace: F12 frame %u retained %u off-main texture creations"
+        " / %u us from the preceding %u frames; crossed-frame %u,"
+        " report limit %u\r\n",
+        marker, retained, elapsedUs, kOffMainTextureMarkerFrames,
+        crossedFrames, kOffMainTextureReportLimit);
+    unsigned emitted = 0;
+    for (LONG sequence = first; sequence <= snapshot; ++sequence) {
+        const OffMainTextureRecord& record =
+            g_offMainTextures[(sequence - 1) % kOffMainTextureSlots];
+        if (InterlockedCompareExchange(
+                const_cast<volatile LONG*>(&record.publishedSequence), 0, 0)
+                != sequence)
+            continue;
+        if (record.finishFrame > marker
+            || marker - record.finishFrame > kOffMainTextureMarkerFrames)
+            continue;
+        if (emitted >= kOffMainTextureReportLimit) continue;
+        tq::hdr::log(
+            "Engine trace: off-main texture seq %ld, frames %u-%u, thread %u,"
+            " %u us, %ux%u mips %u fmt %u bind %#x misc %#x initial %u\r\n",
+            sequence, record.startFrame, record.finishFrame, record.threadId,
+            record.elapsedUs, record.width, record.height, record.mipLevels,
+            record.format, record.bindFlags, record.miscFlags,
+            record.hasInitialData ? 1u : 0u);
+        ++emitted;
+    }
+    tq::hdr::log(
+        "Engine trace: F12 frame %u emitted %u off-main texture records;"
+        " omitted %u\r\n",
+        marker, emitted, retained - emitted);
+}
+
+void noteDeferredCreationInternal(DeferredCreationKind kind,
+                                  const void* object, unsigned elapsedUs,
+                                  unsigned a, unsigned b, unsigned c,
+                                  unsigned d, unsigned e, unsigned f) {
+    if (object)
+        countReflectionCreation(kind == DeferredCreationTexture, elapsedUs);
+    if (kind == DeferredCreationBuffer)
+        noteCrossPassBufferCreated(object, a, b);
+    const DeferredLocation location = currentDeferredLocation();
+    if (!object || location.bin <= DeferredOwnerBinNone
+        || location.bin >= DeferredOwnerBinCount) return;
+    const DeferredOwnerBinCounters& counters =
+        kDeferredOwnerBinCounters[location.bin];
+    tq::probe::engineCount(kind == DeferredCreationTexture
+                               ? counters.textureCount : counters.bufferCount);
+    tq::probe::engineCount(kind == DeferredCreationTexture
+                               ? counters.textureUs : counters.bufferUs,
+                           elapsedUs);
+    DeferredCreationRecord& record =
+        g_deferredCreations[g_deferredCreationSequence++
+                            % kDeferredCreationSlots];
+    record.object = object;
+    record.frame = tq::probe::currentFrameIndex();
+    record.invocation = location.invocation;
+    record.pass = location.pass;
+    record.site = location.site;
+    record.kind = kind;
+    record.elapsedUs = elapsedUs;
+    record.a = a; record.b = b; record.c = c; record.d = d; record.e = e;
+    record.f = f;
+}
+
+const DeferredCreationRecord* findDeferredBufferCreation(const void* object,
+                                                          unsigned atFrame) {
+    if (!object) return nullptr;
+    const unsigned count = g_deferredCreationSequence < kDeferredCreationSlots
+        ? g_deferredCreationSequence : kDeferredCreationSlots;
+    for (unsigned back = 0; back < count; ++back) {
+        const DeferredCreationRecord& record = g_deferredCreations[
+            (g_deferredCreationSequence - 1 - back) % kDeferredCreationSlots];
+        if (record.kind == DeferredCreationBuffer && record.object == object
+            && record.frame <= atFrame)
+            return &record;
+    }
+    return nullptr;
+}
+
+CrossPassBufferRecord* findCrossPassBuffer(const void* object,
+                                            unsigned atFrame) {
+    if (!object || object == kCrossPassIndexTombstone) return nullptr;
+    const unsigned start = crossPassIndexStart(object);
+    for (unsigned i = 0; i < kCrossPassIndexProbe; ++i) {
+        const CrossPassIndexEntry& entry =
+            g_crossPassIndex[(start + i) & (kCrossPassIndexSlots - 1)];
+        if (!entry.object) return nullptr;
+        if (entry.object != object) continue;
+        CrossPassBufferRecord& record = g_crossPassBuffers[
+            (entry.sequence - 1) % kCrossPassBufferSlots];
+        if (record.object != object || record.sequence != entry.sequence
+            || record.createdFrame > atFrame
+            || atFrame - record.createdFrame > kCrossPassFreshFrames)
+            return nullptr;
+        return &record;
+    }
+    return nullptr;
+}
+
+void countCrossPassDraw(
+    const tq::engineprobe::DeferredDrawBindings* bindings) {
+    if (!g_crossPassTracing || !bindings || !onMainThread()) return;
+    const ReflectionLocation reflection = currentReflectionLocation();
+    const bool directional =
+        InterlockedCompareExchange(&g_insideDirectional, 0, 0) > 0;
+    const DeferredLocation deferred = currentDeferredLocation();
+    CrossPassFamily family = CrossPassNone;
+    if (reflection.cell > ReflectionCellNone
+        && reflection.cell < ReflectionCellCount)
+        family = CrossPassReflection;
+    else if (directional)
+        family = CrossPassShadow;
+    else if (deferred.invocation)
+        family = CrossPassDeferred;
+    if (family == CrossPassNone) return;
+
+    tq::probe::engineCount(
+        family == CrossPassReflection
+            ? tq::probe::CounterEngineCrossPassReflectionDraw
+        : family == CrossPassShadow
+            ? tq::probe::CounterEngineCrossPassShadowDraw
+            : tq::probe::CounterEngineCrossPassDeferredDraw);
+    if (family == CrossPassShadow)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowDirectionalDraw);
+
+    const void* objects[tq::engineprobe::DeferredTraceVertexBufferSlots + 1];
+    unsigned objectCount = 0;
+    for (unsigned i = 0;
+         i < tq::engineprobe::DeferredTraceVertexBufferSlots; ++i) {
+        const void* object = bindings->vertexBuffers[i];
+        if (!object) continue;
+        bool duplicate = false;
+        for (unsigned j = 0; j < objectCount; ++j)
+            duplicate |= objects[j] == object;
+        if (!duplicate) objects[objectCount++] = object;
+    }
+    if (bindings->indexBuffer) {
+        bool duplicate = false;
+        for (unsigned j = 0; j < objectCount; ++j)
+            duplicate |= objects[j] == bindings->indexBuffer;
+        if (!duplicate) objects[objectCount++] = bindings->indexBuffer;
+    }
+
+    const unsigned frame = tq::probe::currentFrameIndex();
+    for (unsigned i = 0; i < objectCount; ++i) {
+        CrossPassBufferRecord* record =
+            findCrossPassBuffer(objects[i], frame);
+        if (!record) continue;
+        const unsigned before = record->useMask;
+        if (!(before & family)) {
+            tq::probe::engineCount(
+                family == CrossPassReflection
+                    ? tq::probe::CounterEngineCrossPassFreshReflectionBuffer
+                : family == CrossPassShadow
+                    ? tq::probe::CounterEngineCrossPassFreshShadowBuffer
+                    : tq::probe::CounterEngineCrossPassFreshDeferredBuffer);
+            record->useMask |= family;
+            if (family == CrossPassReflection) {
+                record->reflectionFirstFrame = frame;
+                record->reflectionManager = reflection.manager;
+                record->reflectionPlane = reflection.plane;
+            } else if (family == CrossPassShadow) {
+                record->shadowFirstFrame = frame;
+            } else {
+                record->deferredFirstFrame = frame;
+                record->deferredInvocation = deferred.invocation;
+                record->deferredPass = deferred.pass;
+                record->deferredSite = deferred.site;
+            }
+        }
+        if (family == CrossPassReflection) ++record->reflectionDraws;
+        else if (family == CrossPassShadow) ++record->shadowDraws;
+        else ++record->deferredDraws;
+
+        const unsigned after = record->useMask;
+#define TQ_COUNT_CROSS_JOIN(mask, counter) \
+        if ((after & (mask)) == (mask) && (before & (mask)) != (mask)) \
+            tq::probe::engineCount(tq::probe::counter)
+        TQ_COUNT_CROSS_JOIN(
+            CrossPassReflection | CrossPassShadow,
+            CounterEngineCrossPassJoinReflectionShadow);
+        TQ_COUNT_CROSS_JOIN(
+            CrossPassReflection | CrossPassDeferred,
+            CounterEngineCrossPassJoinReflectionDeferred);
+        TQ_COUNT_CROSS_JOIN(
+            CrossPassShadow | CrossPassDeferred,
+            CounterEngineCrossPassJoinShadowDeferred);
+        TQ_COUNT_CROSS_JOIN(
+            CrossPassReflection | CrossPassShadow | CrossPassDeferred,
+            CounterEngineCrossPassJoinAllThree);
+#undef TQ_COUNT_CROSS_JOIN
+    }
+}
+
+void reportCrossPassBuffersAtMarker() {
+    if (!g_crossPassTracing) return;
+    const unsigned marker = tq::probe::currentFrameIndex();
+    const unsigned count = g_crossPassBufferSequence < kCrossPassBufferSlots
+        ? g_crossPassBufferSequence : kCrossPassBufferSlots;
+    unsigned retained = 0, joined = 0, allThree = 0, emitted = 0;
+    for (unsigned back = 0; back < count; ++back) {
+        const CrossPassBufferRecord& record = g_crossPassBuffers[
+            (g_crossPassBufferSequence - 1 - back) % kCrossPassBufferSlots];
+        if (!record.object || record.createdFrame > marker
+            || marker - record.createdFrame > kCrossPassFreshFrames)
+            continue;
+        ++retained;
+        const bool multi = record.useMask == 3 || record.useMask == 5
+                        || record.useMask == 6 || record.useMask == 7;
+        if (!multi) continue;
+        ++joined;
+        if (record.useMask == 7) ++allThree;
+        if (emitted >= kCrossPassMarkerReportLimit) continue;
+        tq::hdr::log(
+            "Engine trace: cross-pass buffer %p created f%u %uB bind %#x"
+            " reflection i%u/p%u deferred i%u/%s/%s; uses %#x:"
+            " reflection f%u i%u/p%u draws%u, shadow f%u draws%u,"
+            " deferred f%u i%u/%s/%s draws%u\r\n",
+            record.object, record.createdFrame, record.byteWidth,
+            record.bindFlags, record.createdReflectionManager,
+            record.createdReflectionPlane, record.createdDeferredInvocation,
+            deferredPassName(record.createdDeferredPass),
+            deferredSiteName(record.createdDeferredSite), record.useMask,
+            record.reflectionFirstFrame, record.reflectionManager,
+            record.reflectionPlane, record.reflectionDraws,
+            record.shadowFirstFrame, record.shadowDraws,
+            record.deferredFirstFrame, record.deferredInvocation,
+            deferredPassName(record.deferredPass),
+            deferredSiteName(record.deferredSite), record.deferredDraws);
+        ++emitted;
+    }
+    tq::hdr::log(
+        "Engine trace: F12 frame %u cross-pass window %u frames: retained"
+        " %u created buffers, joined %u, all-three %u, emitted %u, omitted"
+        " %u, index overflows %u, recent ring evictions %u, ring capacity"
+        " %u\r\n",
+        marker, kCrossPassFreshFrames, retained, joined, allThree, emitted,
+        joined - emitted, g_crossPassIndexOverflows,
+        g_crossPassRecentEvictions,
+        kCrossPassBufferSlots);
+}
+
+const unsigned kDeferredSlowFrameSlots = 128;
+const unsigned kDeferredTopDrawsPerFrame = 12;
+const unsigned kDeferredSlowMarkerFrames = 120;
+const unsigned kDeferredSlowReportFrames = 8;
+const unsigned kDeferredSlowFrameMinUs = 15000;
+
+struct DeferredSlowDrawRecord {
+    unsigned elapsedUs;
+    unsigned ordinal;
+    bool indexed;
+    unsigned count;
+    unsigned start;
+    int base;
+    unsigned invocation;
+    DeferredGeometrySite site;
+    tq::engineprobe::DeferredDrawBindings bindings;
+};
+
+struct DeferredSlowFrame {
+    unsigned framePlusOne;
+    unsigned drawUs;
+    unsigned drawCount;
+    unsigned recordCount;
+    DeferredSlowDrawRecord records[kDeferredTopDrawsPerFrame];
+};
+DeferredSlowFrame g_deferredSlowFrames[kDeferredSlowFrameSlots];
+
+void rememberDeferredDraw(unsigned elapsedUs, bool indexed, unsigned count,
+                          unsigned start, int base,
+                          unsigned invocation, DeferredGeometrySite site,
+                          const tq::engineprobe::DeferredDrawBindings* bindings) {
+    if (!bindings) return;
+    const unsigned frame = tq::probe::currentFrameIndex();
+    DeferredSlowFrame& slot =
+        g_deferredSlowFrames[frame % kDeferredSlowFrameSlots];
+    if (slot.framePlusOne != frame + 1) {
+        memset(&slot, 0, sizeof(slot));
+        slot.framePlusOne = frame + 1;
+    }
+    if (UINT_MAX - slot.drawUs < elapsedUs) slot.drawUs = UINT_MAX;
+    else slot.drawUs += elapsedUs;
+    const unsigned ordinal = ++slot.drawCount;
+    if (slot.recordCount == kDeferredTopDrawsPerFrame
+        && elapsedUs <= slot.records[slot.recordCount - 1].elapsedUs)
+        return;
+    unsigned insert = slot.recordCount;
+    if (insert < kDeferredTopDrawsPerFrame) ++slot.recordCount;
+    else insert = kDeferredTopDrawsPerFrame - 1;
+    while (insert && elapsedUs > slot.records[insert - 1].elapsedUs) {
+        if (insert < kDeferredTopDrawsPerFrame)
+            slot.records[insert] = slot.records[insert - 1];
+        --insert;
+    }
+    DeferredSlowDrawRecord& record = slot.records[insert];
+    record.elapsedUs = elapsedUs;
+    record.ordinal = ordinal;
+    record.indexed = indexed;
+    record.count = count;
+    record.start = start;
+    record.base = base;
+    record.invocation = invocation;
+    record.site = site;
+    record.bindings = *bindings;
+}
+
+void countDeferredDrawInternal(
+    unsigned elapsedUs, bool indexed, unsigned count, unsigned start, int base,
+    const tq::engineprobe::DeferredDrawBindings* bindings) {
+    countCrossPassDraw(bindings);
+    countReflectionDraw(elapsedUs);
+    countAdmissionDraw();
+    if (!g_deferredPassTracing || !elapsedUs) return;
+    const LONG pass = InterlockedCompareExchange(&g_deferredPass, 0, 0);
+    if (pass <= DeferredPassNone || pass >= DeferredPassCount) return;
+    tq::probe::engineCount(kDeferredPassDrawCounters[pass], elapsedUs);
+    const unsigned invocation = (unsigned)InterlockedCompareExchange(
+        &g_deferredOwnerInvocation, 0, 0);
+    const DeferredGeometrySite site = (DeferredGeometrySite)
+        InterlockedCompareExchange(&g_deferredGeometrySite, 0, 0);
+    const DeferredGeometryCell cell =
+        deferredGeometryCell(invocation, site);
+    if (cell <= DeferredGeometryCellNone
+        || cell >= DeferredGeometryCellCount) return;
+    tq::probe::engineCount(kDeferredGeometryDrawCounters[cell], elapsedUs);
+    rememberDeferredDraw(elapsedUs, indexed, count, start, base,
+                         invocation, site, bindings);
+}
+
+void reportDeferredSlowDrawsAtMarker() {
+    if (!g_deferredPassTracing) return;
+    const unsigned marker = tq::probe::currentFrameIndex();
+    const DeferredSlowFrame* selected[kDeferredSlowReportFrames] = {};
+    unsigned selectedCount = 0;
+    for (unsigned back = 0; back <= kDeferredSlowMarkerFrames
+                            && back <= marker; ++back) {
+        const unsigned frame = marker - back;
+        const DeferredSlowFrame& candidate =
+            g_deferredSlowFrames[frame % kDeferredSlowFrameSlots];
+        if (candidate.framePlusOne != frame + 1
+            || candidate.drawUs < kDeferredSlowFrameMinUs)
+            continue;
+        unsigned insert = selectedCount;
+        if (insert < kDeferredSlowReportFrames) ++selectedCount;
+        else if (candidate.drawUs <= selected[insert - 1]->drawUs) continue;
+        else insert = kDeferredSlowReportFrames - 1;
+        while (insert && candidate.drawUs > selected[insert - 1]->drawUs) {
+            if (insert < kDeferredSlowReportFrames)
+                selected[insert] = selected[insert - 1];
+            --insert;
+        }
+        selected[insert] = &candidate;
+    }
+
+    tq::hdr::log("Engine trace: F12 frame %u retained %u geometry-draw"
+                 " frames >= %u us from the preceding %u frames\r\n",
+                 marker, selectedCount, kDeferredSlowFrameMinUs,
+                 kDeferredSlowMarkerFrames);
+    for (unsigned i = 0; i < selectedCount; ++i) {
+        const DeferredSlowFrame& frame = *selected[i];
+        const unsigned frameIndex = frame.framePlusOne - 1;
+        tq::hdr::log("Engine trace: geometry slow frame %u total %u us,"
+                     " draws %u, retained top %u\r\n",
+                     frameIndex, frame.drawUs, frame.drawCount,
+                     frame.recordCount);
+        for (unsigned j = 0; j < frame.recordCount; ++j) {
+            const DeferredSlowDrawRecord& draw = frame.records[j];
+            const DeferredCreationRecord* vb = findDeferredBufferCreation(
+                draw.bindings.vertexBuffers[0], frameIndex);
+            const DeferredCreationRecord* ib = findDeferredBufferCreation(
+                draw.bindings.indexBuffer, frameIndex);
+            tq::hdr::log(
+                "Engine trace: geometry slow draw frame %u rank %u, %u us,"
+                " i%u/%s, %s ordinal %u count %u start %u base %d,"
+                " vb0 %p new %d/%uB, vb1 %p, ib %p new %d/%uB/fmt%u,"
+                " vs %p ps %p, srv %p/%p/%p/%p/%p/%p/%p/%p\r\n",
+                frameIndex, j + 1, draw.elapsedUs, draw.invocation,
+                deferredSiteName(draw.site),
+                draw.indexed ? "indexed" : "draw", draw.ordinal,
+                draw.count, draw.start, draw.base,
+                draw.bindings.vertexBuffers[0], vb ? (int)vb->frame : -1,
+                vb ? vb->a : 0,
+                draw.bindings.vertexBuffers[1], draw.bindings.indexBuffer,
+                ib ? (int)ib->frame : -1, ib ? ib->a : 0,
+                draw.bindings.indexFormat,
+                draw.bindings.vertexShader, draw.bindings.pixelShader,
+                draw.bindings.pixelResources[0],
+                draw.bindings.pixelResources[1],
+                draw.bindings.pixelResources[2],
+                draw.bindings.pixelResources[3],
+                draw.bindings.pixelResources[4],
+                draw.bindings.pixelResources[5],
+                draw.bindings.pixelResources[6],
+                draw.bindings.pixelResources[7]);
+        }
+
+        unsigned textures = 0;
+        const unsigned creationCount =
+            g_deferredCreationSequence < kDeferredCreationSlots
+            ? g_deferredCreationSequence : kDeferredCreationSlots;
+        for (unsigned back = 0; back < creationCount && textures < 32;
+             ++back) {
+            const DeferredCreationRecord& creation = g_deferredCreations[
+                (g_deferredCreationSequence - 1 - back)
+                % kDeferredCreationSlots];
+            if (creation.kind != DeferredCreationTexture
+                || creation.frame != frameIndex) continue;
+            tq::hdr::log(
+                "Engine trace: geometry texture frame %u, %u us,"
+                " i%u/%s/%s, object %p, %ux%u mips %u fmt %u"
+                " bind %#x misc %#x\r\n",
+                frameIndex, creation.elapsedUs, creation.invocation,
+                deferredPassName(creation.pass),
+                deferredSiteName(creation.site), creation.object,
+                creation.a, creation.b, creation.c, creation.d,
+                creation.e, creation.f);
+            ++textures;
+        }
+    }
+}
+
+struct ReflectionManagerScope {
+    LONG priorManager;
+    LONG priorPlane;
+    unsigned priorPlaneCalls;
+    unsigned invocation;
+    int64_t started;
+    ID3D11DeviceContext* context;
+    bool active;
+
+    ReflectionManagerScope()
+        : priorManager(0), priorPlane(0), priorPlaneCalls(0), invocation(0),
+          started(0), context(nullptr),
+          active(g_reflectionTracing && onMainThread()) {
+        if (!active) return;
+        const unsigned frame = tq::probe::currentFrameIndex();
+        if (g_reflectionManagerFrame != frame) {
+            g_reflectionManagerFrame = frame;
+            g_reflectionManagerCallsThisFrame = 0;
+        }
+        invocation = ++g_reflectionManagerCallsThisFrame;
+        priorManager = InterlockedExchange(
+            &g_reflectionManagerInvocation, (LONG)invocation);
+        priorPlane = InterlockedExchange(&g_reflectionPlaneInvocation, 0);
+        priorPlaneCalls = g_reflectionPlaneCallsThisManager;
+        g_reflectionPlaneCallsThisManager = 0;
+        started = tq::probe::now();
+        if (invocation <= 2) {
+            context = tq::probe::currentGpuContext();
+            tq::probe::gpuBegin(
+                context, kReflectionManagerGpuPhases[invocation]);
+        }
+    }
+
+    ~ReflectionManagerScope() {
+        if (!active) return;
+        if (invocation <= 2)
+            tq::probe::gpuEnd(
+                context, kReflectionManagerGpuPhases[invocation]);
+        const unsigned elapsed = tq::probe::microsecondsSince(started);
+        tq::probe::engineCount(tq::probe::CounterEngineReflectionManager);
+        tq::probe::engineCount(
+            tq::probe::CounterEngineReflectionManagerUs, elapsed);
+        if (invocation <= 2) {
+            tq::probe::engineCount(
+                kReflectionManagerCountCounters[invocation]);
+            tq::probe::engineCount(
+                kReflectionManagerDurationCounters[invocation], elapsed);
+        } else {
+            tq::probe::engineCount(
+                tq::probe::CounterEngineReflectionManagerOverflow);
+        }
+        g_reflectionPlaneCallsThisManager = priorPlaneCalls;
+        InterlockedExchange(&g_reflectionPlaneInvocation, priorPlane);
+        InterlockedExchange(&g_reflectionManagerInvocation, priorManager);
+    }
+};
+
+struct ReflectionPlaneScope {
+    LONG priorPlane;
+    ReflectionCell cell;
+    int64_t started;
+    ID3D11DeviceContext* context;
+    bool active;
+
+    ReflectionPlaneScope()
+        : priorPlane(0), cell(ReflectionCellNone), started(0), context(nullptr),
+          active(g_reflectionTracing && onMainThread()
+                 && InterlockedCompareExchange(
+                        &g_reflectionManagerInvocation, 0, 0) > 0) {
+        if (!active) return;
+        g_reflectionGpuChunkPending = false;
+        g_reflectionGpuChunkTriggerUs = 0;
+        const unsigned manager = (unsigned)InterlockedCompareExchange(
+            &g_reflectionManagerInvocation, 0, 0);
+        const unsigned plane = ++g_reflectionPlaneCallsThisManager;
+        priorPlane = InterlockedExchange(
+            &g_reflectionPlaneInvocation, (LONG)plane);
+        cell = reflectionCell(manager, plane);
+        if (cell == ReflectionCellNone)
+            tq::probe::engineCount(
+                tq::probe::CounterEngineReflectionPlaneOverflow);
+        started = tq::probe::now();
+        if (cell != ReflectionCellNone) {
+            context = tq::probe::currentGpuContext();
+            tq::probe::gpuBegin(context, kReflectionCellGpuPhases[cell]);
+        }
+    }
+
+    ~ReflectionPlaneScope() {
+        if (!active) return;
+        if (cell != ReflectionCellNone)
+            tq::probe::gpuEnd(context, kReflectionCellGpuPhases[cell]);
+        const unsigned elapsed = tq::probe::microsecondsSince(started);
+        if (cell != ReflectionCellNone) {
+            const ReflectionCellCounters& counters =
+                kReflectionCellCounters[cell];
+            tq::probe::engineCount(counters.count);
+            tq::probe::engineCount(counters.durationUs, elapsed);
+        }
+        InterlockedExchange(&g_reflectionPlaneInvocation, priorPlane);
+    }
+};
+
+struct ReflectionChildScope {
+    ReflectionCell cell;
+    ReflectionChild child;
+    LONG priorChild;
+    int64_t started;
+    ID3D11DeviceContext* context;
+    bool active;
+
+    explicit ReflectionChildScope(ReflectionChild which)
+        : cell(ReflectionCellNone), child(which), priorChild(0),
+          started(0), context(nullptr), active(false) {
+        if (!g_reflectionChildTracing || which >= ReflectionChildCount)
+            return;
+        const ReflectionLocation location = currentReflectionLocation();
+        if (location.cell <= ReflectionCellNone
+            || location.cell >= ReflectionCellCount) return;
+        cell = location.cell;
+        active = true;
+        priorChild = InterlockedExchange(
+            &g_reflectionChild, (LONG)which + 1);
+        started = tq::probe::now();
+        context = tq::probe::currentGpuContext();
+        tq::probe::gpuBegin(context, kReflectionChildGpuPhases[cell][child]);
+    }
+
+    ~ReflectionChildScope() {
+        if (!active) return;
+        if (child == ReflectionChildRenderLight)
+            closeGpuChunks();
+        tq::probe::gpuEnd(context, kReflectionChildGpuPhases[cell][child]);
+        const unsigned elapsed = tq::probe::microsecondsSince(started);
+        const ReflectionCellCounters& counters = kReflectionCellCounters[cell];
+        tq::probe::engineCount(
+            child == ReflectionChildBuildScene
+                ? counters.buildSceneCount : counters.renderLightCount);
+        tq::probe::engineCount(
+            child == ReflectionChildBuildScene
+                ? counters.buildSceneUs : counters.renderLightUs,
+            elapsed);
+        if (child == ReflectionChildBuildScene
+            && cell == ReflectionCellI2P1) {
+            g_reflectionGpuChunkPending =
+                elapsed >= kGpuChunkReflectionBuildSceneTriggerUs;
+            g_reflectionGpuChunkTriggerUs = elapsed;
+        }
+        InterlockedExchange(&g_reflectionChild, priorChild);
+    }
+};
+
+int __fastcall hookReflectionManager(
+    void* self, void* edx, uintptr_t canvas, uintptr_t renderSet) {
+    ReflectionManagerScope scope;
+    return g_reflectionManager
+        ? g_reflectionManager(self, edx, canvas, renderSet) : 0;
+}
+
+uintptr_t __stdcall hookReflectionPlane(
+    uintptr_t record, uintptr_t canvas, uintptr_t renderSet) {
+    ReflectionPlaneScope scope;
+    return g_reflectionPlane
+        ? g_reflectionPlane(record, canvas, renderSet) : 0;
+}
+
+void __fastcall hookReflectionBuildScene(
+    void* self, void* edx, int includeHidden) {
+    const bool countAdmission = (g_reflectionDeferAdmissionMeshActive
+        || g_reflectionDeferAdmissionAllActive
+        || (g_tracing && tq::probe::drawTimingEnabled()))
+        && onMainThread();
+    const bool priorBuildActive = g_reflectionAdmissionBuildActive;
+    const unsigned priorBuildBuffers = g_reflectionAdmissionBuildBuffers;
+    if (countAdmission) {
+        g_reflectionAdmissionBuildBuffers = 0;
+        g_reflectionAdmissionBuildActive = true;
+    }
+    {
+        ReflectionChildScope scope(ReflectionChildBuildScene);
+        if (g_reflectionBuildScene)
+            g_reflectionBuildScene(self, edx, includeHidden);
+    }
+    if (countAdmission) {
+        const unsigned buffers = g_reflectionAdmissionBuildBuffers;
+        g_reflectionAdmissionBuildActive = priorBuildActive;
+        g_reflectionAdmissionBuildBuffers = priorBuildBuffers;
+        g_reflectionAdmissionPending =
+            reflectionAdmissionThresholdReached(buffers);
+        if (g_reflectionAdmissionPending)
+            tq::probe::engineCount(
+                tq::probe::CounterEngineReflectionAdmissionDeferred);
+    }
+}
+
+void __fastcall hookReflectionRenderLight(
+    void* self, void* edx, uintptr_t canvas, uintptr_t light,
+    uintptr_t styleName, uintptr_t flags) {
+    const ReflectionLocation location = currentReflectionLocation();
+    const bool admission = g_reflectionAdmissionPending;
+    const bool deferAll = g_reflectionDeferAdmissionAllActive && admission;
+    if (!deferAll && g_gpuChunkTracing && g_reflectionGpuChunkPending
+        && location.cell == ReflectionCellI2P1)
+        armGpuChunks(location, g_reflectionGpuChunkTriggerUs);
+    g_reflectionGpuChunkPending = false;
+    g_reflectionGpuChunkTriggerUs = 0;
+    const bool priorAdmissionRender = g_reflectionAdmissionRenderActive;
+    g_reflectionAdmissionRenderActive =
+        g_reflectionDeferAdmissionMeshActive && admission;
+    g_reflectionAdmissionPending = false;
+    ReflectionChildScope scope(ReflectionChildRenderLight);
+    const bool priorInsideReflection = g_insideReflectionRenderLight;
+    g_insideReflectionRenderLight = true;
+    if (deferAll) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineReflectionAdmissionAllDeferred);
+    } else if (g_reflectionRenderLight) {
+        g_reflectionRenderLight(self, edx, canvas, light, styleName, flags);
+    }
+    g_insideReflectionRenderLight = priorInsideReflection;
+    g_reflectionAdmissionRenderActive = priorAdmissionRender;
+}
+
+struct DeferredOwnerScope {
+    LONG priorInvocation;
+    LONG priorPass;
+    LONG priorSite;
+    bool active;
+
+    DeferredOwnerScope()
+        : priorInvocation(0), priorPass(DeferredPassNone),
+          priorSite(DeferredGeometrySiteNone),
+          active(g_deferredPassTracing && onMainThread()) {
+        if (!active) return;
+        const unsigned frame = tq::probe::currentFrameIndex();
+        if (g_deferredOwnerFrame != frame) {
+            g_deferredOwnerFrame = frame;
+            g_deferredOwnerCallsThisFrame = 0;
+        }
+        const unsigned invocation = ++g_deferredOwnerCallsThisFrame;
+        priorInvocation = InterlockedExchange(
+            &g_deferredOwnerInvocation, (LONG)invocation);
+        priorPass = InterlockedExchange(&g_deferredPass, DeferredPassNone);
+        priorSite = InterlockedExchange(
+            &g_deferredGeometrySite, DeferredGeometrySiteNone);
+        tq::probe::engineCount(tq::probe::CounterEngineDeferredOwner);
+        if (invocation > 2)
+            tq::probe::engineCount(
+                tq::probe::CounterEngineDeferredOwnerOverflow);
+    }
+
+    ~DeferredOwnerScope() {
+        if (!active) return;
+        InterlockedExchange(&g_deferredGeometrySite, priorSite);
+        InterlockedExchange(&g_deferredPass, priorPass);
+        InterlockedExchange(&g_deferredOwnerInvocation, priorInvocation);
+    }
+};
+
+struct DeferredPassScope {
+    DeferredPass pass;
+    LONG prior;
+    LONG priorSite;
+    DeferredGeometryCell cell;
+    int64_t started;
+    ID3D11DeviceContext* context;
+    bool active;
+
+    explicit DeferredPassScope(
+        DeferredPass value,
+        DeferredGeometrySite geometrySite = DeferredGeometrySiteNone)
+        : pass(value), prior(DeferredPassNone),
+          priorSite(DeferredGeometrySiteNone),
+          cell(DeferredGeometryCellNone), started(0), context(nullptr),
+          active(g_deferredPassTracing && onMainThread()
+                 && InterlockedCompareExchange(
+                        &g_deferredOwnerInvocation, 0, 0) > 0) {
+        if (!active) return;
+        prior = InterlockedExchange(&g_deferredPass, pass);
+        priorSite = InterlockedExchange(&g_deferredGeometrySite, geometrySite);
+        const unsigned invocation = (unsigned)InterlockedCompareExchange(
+            &g_deferredOwnerInvocation, 0, 0);
+        cell = deferredGeometryCell(invocation, geometrySite);
+        started = tq::probe::now();
+        if (cell != DeferredGeometryCellNone) {
+            context = tq::probe::currentGpuContext();
+            tq::probe::gpuBegin(context, kDeferredGeometryGpuPhases[cell]);
+        }
+    }
+
+    ~DeferredPassScope() {
+        if (!active) return;
+        if (cell != DeferredGeometryCellNone)
+            tq::probe::gpuEnd(context, kDeferredGeometryGpuPhases[cell]);
+        const unsigned elapsed = tq::probe::microsecondsSince(started);
+        tq::probe::engineCount(kDeferredPassCountCounters[pass]);
+        tq::probe::engineCount(kDeferredPassDurationCounters[pass], elapsed);
+        if (cell != DeferredGeometryCellNone) {
+            tq::probe::engineCount(kDeferredGeometryCountCounters[cell]);
+            tq::probe::engineCount(kDeferredGeometryDurationCounters[cell],
+                                   elapsed);
+        }
+        InterlockedExchange(&g_deferredGeometrySite, priorSite);
+        InterlockedExchange(&g_deferredPass, prior);
+    }
+};
+
+uintptr_t __fastcall hookDeferredRender(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g) {
+    DeferredOwnerScope scope;
+    return g_deferredRender
+        ? g_deferredRender(self, edx, a, b, c, d, e, f, g) : 0;
+}
+
+uintptr_t __fastcall hookDeferredGeometrySetup(
+    void* self, void* edx, uintptr_t a, uintptr_t b) {
+    DeferredPassScope scope(DeferredPassGeometry,
+                            DeferredGeometrySiteSetup);
+    return g_deferredGeometrySetup
+        ? g_deferredGeometrySetup(self, edx, a, b) : 0;
+}
+
+uintptr_t __fastcall hookDeferredGeometryScene(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e) {
+    DeferredPassScope scope(DeferredPassGeometry,
+                            DeferredGeometrySiteScene);
+    return g_deferredGeometryScene
+        ? g_deferredGeometryScene(self, edx, a, b, c, d, e) : 0;
+}
+
+uintptr_t __fastcall hookDeferredShadows(
+    void* self, void* edx, uintptr_t a, uintptr_t b) {
+    DeferredPassScope scope(DeferredPassShadows);
+    return g_deferredShadows ? g_deferredShadows(self, edx, a, b) : 0;
+}
+
+uintptr_t __fastcall hookDeferredLighting(
+    void* self, void* edx, uintptr_t a, uintptr_t b) {
+    DeferredPassScope scope(DeferredPassLighting);
+    return g_deferredLighting ? g_deferredLighting(self, edx, a, b) : 0;
+}
+
+uintptr_t __fastcall hookDeferredResolve(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c) {
+    DeferredPassScope scope(DeferredPassResolve);
+    return g_deferredResolve ? g_deferredResolve(self, edx, a, b, c) : 0;
+}
+
+uintptr_t __fastcall hookDeferredAo(
+    void* self, void* edx, uintptr_t a) {
+    DeferredPassScope scope(DeferredPassResolve);
+    return g_deferredAo ? g_deferredAo(self, edx, a) : 0;
+}
+
+uintptr_t __fastcall hookDeferredLateSceneA(
+    void* self, void* edx, uintptr_t a, uintptr_t b) {
+    DeferredPassScope scope(DeferredPassLateScene);
+    return g_deferredLateSceneA ? g_deferredLateSceneA(self, edx, a, b) : 0;
+}
+
+uintptr_t __fastcall hookDeferredLateSceneB(
+    void* self, void* edx, uintptr_t a) {
+    DeferredPassScope scope(DeferredPassLateScene);
+    return g_deferredLateSceneB ? g_deferredLateSceneB(self, edx, a) : 0;
+}
+
+uintptr_t __fastcall hookDeferredLateSceneList(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e) {
+    DeferredPassScope scope(DeferredPassLateScene);
+    return g_deferredLateSceneList
+        ? g_deferredLateSceneList(self, edx, a, b, c, d, e) : 0;
+}
+
+uintptr_t __fastcall hookDeferredPostHighlight(
+    void* self, void* edx, uintptr_t a) {
+    DeferredPassScope scope(DeferredPassPost);
+    return g_deferredPostHighlight ? g_deferredPostHighlight(self, edx, a) : 0;
+}
+
+uintptr_t __fastcall hookDeferredPostFog(
+    void* self, void* edx, uintptr_t a, uintptr_t b) {
+    DeferredPassScope scope(DeferredPassPost);
+    return g_deferredPostFog ? g_deferredPostFog(self, edx, a, b) : 0;
+}
+
+uintptr_t __fastcall hookDeferredPostMask(
+    void* self, void* edx, uintptr_t a) {
+    DeferredPassScope scope(DeferredPassPost);
+    return g_deferredPostMask ? g_deferredPostMask(self, edx, a) : 0;
+}
+
+uintptr_t __fastcall hookDeferredPostComposite(
+    void* self, void* edx, uintptr_t a, uintptr_t b, uintptr_t c,
+    uintptr_t d, uintptr_t e) {
+    DeferredPassScope scope(DeferredPassPost);
+    return g_deferredPostComposite
+        ? g_deferredPostComposite(self, edx, a, b, c, d, e) : 0;
+}
+
+uintptr_t __fastcall hookDeferredPostDebug(
+    void* self, void* edx, uintptr_t a) {
+    DeferredPassScope scope(DeferredPassPost);
+    return g_deferredPostDebug ? g_deferredPostDebug(self, edx, a) : 0;
+}
 
 enum ShadowContextMatch {
     ShadowContextExact,
@@ -2725,6 +5402,11 @@ struct OutsideDirResourceReport {
     TerrainParameterPath terrainPath;
     int terrainMaterialIndex;
     TerrainPreloadSnapshot terrainPreload;
+    unsigned deferredInvocation;
+    DeferredPass deferredPass;
+    DeferredGeometrySite deferredSite;
+    unsigned reflectionManager;
+    unsigned reflectionPlane;
     char resource[kOutsideDirResourceNameChars + 1];
 };
 
@@ -2754,7 +5436,9 @@ void rememberOutsideDirResource(const void* caller, const void* stack,
                                 const void* terrainType,
                                 TerrainParameterPath terrainPath,
                                 int terrainMaterialIndex,
-                                TerrainPreloadSnapshot terrainPreload) {
+                                TerrainPreloadSnapshot terrainPreload,
+                                DeferredLocation deferredLocation,
+                                ReflectionLocation reflectionLocation) {
     const LONG sequence = InterlockedIncrement(&g_outsideDirResourceSequence)
         - 1;
     if (sequence < 0) return;
@@ -2775,6 +5459,11 @@ void rememberOutsideDirResource(const void* caller, const void* stack,
     report.terrainPath = terrainPath;
     report.terrainMaterialIndex = terrainMaterialIndex;
     report.terrainPreload = terrainPreload;
+    report.deferredInvocation = deferredLocation.invocation;
+    report.deferredPass = deferredLocation.pass;
+    report.deferredSite = deferredLocation.site;
+    report.reflectionManager = reflectionLocation.manager;
+    report.reflectionPlane = reflectionLocation.plane;
     if (caller) {
         const BYTE* const address = (const BYTE*)caller;
         const ChainModule* const module = moduleOf(address);
@@ -2890,10 +5579,15 @@ void reportOutsideDirResourcesAtMarker() {
         state[sizeof(state) - 1] = 0;
         if (report.callerVerified) {
             tq::hdr::log("Engine trace: outside-dir Resource %ld, frame %u,"
-                         " %u us, phase %s, state %s, type %s,"
+                         " %u us, phase %s, owner i%u/%s/%s,"
+                         " reflection i%u/p%u, state %s, type %s,"
                          " caller %c+%#lx, resource %.*s\r\n",
                          sequence, report.frame, report.us,
                          outsideDirResourcePhaseName(report.phase),
+                         report.deferredInvocation,
+                         deferredPassName(report.deferredPass),
+                         deferredSiteName(report.deferredSite),
+                         report.reflectionManager, report.reflectionPlane,
                          state,
                          outsideDirResourceTypeName(report.type),
                          report.callerTag, (unsigned long)report.callerRva,
@@ -2901,10 +5595,15 @@ void reportOutsideDirResourcesAtMarker() {
                          report.resource[0] ? report.resource : "(unknown)");
         } else {
             tq::hdr::log("Engine trace: outside-dir Resource %ld, frame %u,"
-                         " %u us, phase %s, state %s, type %s,"
+                         " %u us, phase %s, owner i%u/%s/%s,"
+                         " reflection i%u/p%u, state %s, type %s,"
                          " caller unverified, resource %.*s\r\n",
                          sequence, report.frame, report.us,
                          outsideDirResourcePhaseName(report.phase),
+                         report.deferredInvocation,
+                         deferredPassName(report.deferredPass),
+                         deferredSiteName(report.deferredSite),
+                         report.reflectionManager, report.reflectionPlane,
                          state,
                          outsideDirResourceTypeName(report.type),
                          (int)kOutsideDirResourceNameChars,
@@ -3971,22 +6670,58 @@ void __fastcall hookTerrainPlugRender(
     void* self, void* edx, const void* a, const void* b, const void* c,
     const void* d) {
     if (!g_terrainPlugRender) return;
+    countAdmissionRenderable(GpuChunkTerrainPlug, self);
+    SecondaryAdmissionDrawScope secondaryAdmission(
+        GpuChunkTerrainPlug, self);
+    GpuChunkRenderableCallScope terrainCall(GpuChunkTerrainPlug, self);
     const int64_t started = tq::probe::now();
     g_terrainPlugRender(self, edx, a, b, c, d);
+    const unsigned elapsed = tq::probe::microsecondsSince(started);
+    terrainCall.finish(elapsed);
     tq::probe::engineCount(tq::probe::CounterEngineTerrainPlug);
     tq::probe::engineCount(tq::probe::CounterEngineTerrainPlugUs,
-                           tq::probe::microsecondsSince(started));
+                           elapsed);
 }
 
 void __fastcall hookTerrainBlockRender(
     void* self, void* edx, const void* a, const void* b, const void* c,
     const void* d) {
     if (!g_terrainBlockRender) return;
+    countAdmissionRenderable(GpuChunkTerrainBlock, self);
+    SecondaryAdmissionDrawScope secondaryAdmission(
+        GpuChunkTerrainBlock, self);
+    GpuChunkRenderableCallScope terrainCall(GpuChunkTerrainBlock, self);
     const int64_t started = tq::probe::now();
     g_terrainBlockRender(self, edx, a, b, c, d);
+    const unsigned elapsed = tq::probe::microsecondsSince(started);
+    terrainCall.finish(elapsed);
     tq::probe::engineCount(tq::probe::CounterEngineTerrainBlock);
     tq::probe::engineCount(tq::probe::CounterEngineTerrainBlockUs,
-                           tq::probe::microsecondsSince(started));
+                           elapsed);
+}
+
+void __fastcall hookGraphicsMeshInstanceRenderPass(
+    void* self, void* edx, const void* pass, const void* name, void* canvas,
+    const void* sceneRenderer) {
+    if (!g_graphicsMeshInstanceRenderPass) return;
+    countAdmissionRenderable(GpuChunkMeshInstance, self);
+    if (g_reflectionAdmissionRenderActive && onMainThread()) {
+        tq::probe::engineCount(
+            tq::probe::CounterEngineReflectionAdmissionMeshDeferred);
+        return;
+    }
+    SecondaryAdmissionDrawScope secondaryAdmission(
+        GpuChunkMeshInstance, self);
+    GpuChunkRenderableCallScope renderableCall(GpuChunkMeshInstance, self);
+    if (!renderableCall.call) {
+        g_graphicsMeshInstanceRenderPass(
+            self, edx, pass, name, canvas, sceneRenderer);
+        return;
+    }
+    const int64_t started = tq::probe::now();
+    g_graphicsMeshInstanceRenderPass(
+        self, edx, pass, name, canvas, sceneRenderer);
+    renderableCall.finish(tq::probe::microsecondsSince(started));
 }
 
 void __fastcall hookTerrainPreload(void* self, void* edx,
@@ -4099,6 +6834,10 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
         ? __builtin_return_address(0) : nullptr;
     const OutsideDirResourcePhase outsidePhase = outsideDir
         ? outsideDirResourcePhase() : OutsideDirResourceOther;
+    const DeferredLocation deferredLocation = main
+        ? currentDeferredLocation() : DeferredLocation();
+    const ReflectionLocation reflectionLocation = main
+        ? currentReflectionLocation() : ReflectionLocation();
     const unsigned frame = outsideDir || shadowMeshReport
         ? tq::probe::currentFrameIndex() : 0;
     const bool terrainContext = outsideDir && g_activeTerrainType
@@ -4117,9 +6856,14 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     const int64_t started = tq::probe::now();
     g_loadResource(self, edx, resource);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    if (main)
+        noteGpuChunkRenderableResource(elapsed, terrainType,
+                                       terrainMaterialIndex);
     tq::probe::engineCount(tq::probe::CounterEngineResLoad);
     tq::probe::engineCount(tq::probe::CounterEngineResLoadUs, elapsed);
     if (main) {
+        countReflectionResource(elapsed);
+        countDeferredOwnerResource(elapsed);
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMain);
         tq::probe::engineCount(tq::probe::CounterEngineResLoadMainUs, elapsed);
         if (outsideDir) {
@@ -4127,7 +6871,8 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
             rememberOutsideDirResource(
                 caller, &resource, resourceNameCopy, classify, state, resourceType,
                 outsidePhase, frame, elapsed, terrainType, terrainPath,
-                terrainMaterialIndex, terrainPreload);
+                terrainMaterialIndex, terrainPreload, deferredLocation,
+                reflectionLocation);
         }
         if (inShadow) {
             tq::probe::engineCount(tq::probe::CounterEngineShadowResLoad);
@@ -4187,7 +6932,9 @@ int __fastcall hookRenderDirectional(
         return g_cachedShadowResult;
 
     const int64_t started = g_shadowTracing ? tq::probe::now() : 0;
-    const bool bracketDirectional = g_shadowTracing || g_shadowDeferActive;
+    const bool bracketDirectional = g_shadowTracing || g_shadowDeferActive
+                                 || g_crossPassTracing
+                                 || g_secondaryPassAdmissionActive;
     if (bracketDirectional) {
         if (g_shadowTracing) {
             countShadowMeshContextPatchStatus();
@@ -4755,6 +7502,10 @@ BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
         && (message->lParam & (LPARAM(1) << 30)) == 0) {
         reportOutsideDirResourcesAtMarker();
         reportShadowMeshResourcesAtMarker();
+        reportDeferredSlowDrawsAtMarker();
+        reportCrossPassBuffersAtMarker();
+        reportOffMainTexturesAtMarker();
+        reportGpuChunksAtMarker();
         tq::probe::markStutter();
     }
     if (!timePeek) return result;
@@ -5681,7 +8432,344 @@ bool installFrame(HMODULE engine) {
     return true;
 }
 
-bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
+bool installDeferredPasses(HMODULE engine) {
+    BYTE* const base = (BYTE*)engine;
+    void* const owner = resolve(engine, kDeferredRenderName,
+                                kDeferredRenderRva);
+    bool verified = owner && tq::detour::matches(
+        engine, owner,
+        signature(kDeferredRenderBytes, sizeof(kDeferredRenderBytes),
+                  kDeferredRenderRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kDeferredOwnerCallWindowRva,
+            signature(kDeferredOwnerCallWindowBytes,
+                      sizeof(kDeferredOwnerCallWindowBytes)))
+        && tq::detour::matches(
+            engine, base + kDeferredRenderTailRva,
+            signature(kDeferredRenderTailBytes,
+                      sizeof(kDeferredRenderTailBytes)))
+        && kDeferredRenderTailBytes[17] == 0xc2
+        && kDeferredRenderTailBytes[18] == 7 * sizeof(uintptr_t)
+        && kDeferredRenderTailBytes[19] == 0;
+
+    // Validate every overlapping original window and every callee-cleaned
+    // epilogue before changing the first displacement.
+    for (unsigned i = 0; i < kDeferredCallSiteCount && verified; ++i) {
+        const DeferredCallSite& site = kDeferredCallSites[i];
+        verified = tq::detour::matches(
+            engine, base + site.callRva,
+            signature(site.bytes, 16, site.relocations,
+                      site.relocationCount));
+        const DeferredTargetAbi* abi = nullptr;
+        for (unsigned j = 0; j < kDeferredTargetAbiCount; ++j)
+            if (kDeferredTargetAbis[j].targetRva == site.targetRva) {
+                abi = &kDeferredTargetAbis[j];
+                break;
+            }
+        verified = verified && abi && abi->arguments == site.arguments
+            && abi->bytes[13] == 0xc2
+            && abi->bytes[14] == site.arguments * sizeof(uintptr_t)
+            && abi->bytes[15] == 0
+            && tq::detour::matches(
+                engine, base + abi->tailRva,
+                signature(abi->bytes, 16));
+    }
+    if (!verified) {
+        note("GraphicsDeferredRendererX direct-pass windows", false);
+        return false;
+    }
+
+    void** const originals[] = {
+        (void**)&g_deferredGeometrySetup,
+        (void**)&g_deferredGeometryScene,
+        (void**)&g_deferredShadows,
+        (void**)&g_deferredLighting,
+        (void**)&g_deferredResolve,
+        (void**)&g_deferredAo,
+        (void**)&g_deferredLateSceneA,
+        (void**)&g_deferredLateSceneB,
+        (void**)&g_deferredLateSceneList,
+        (void**)&g_deferredPostHighlight,
+        (void**)&g_deferredPostFog,
+        (void**)&g_deferredPostMask,
+        (void**)&g_deferredPostComposite,
+        (void**)&g_deferredPostDebug,
+    };
+    const void* const replacements[] = {
+        (const void*)&hookDeferredGeometrySetup,
+        (const void*)&hookDeferredGeometryScene,
+        (const void*)&hookDeferredShadows,
+        (const void*)&hookDeferredLighting,
+        (const void*)&hookDeferredResolve,
+        (const void*)&hookDeferredAo,
+        (const void*)&hookDeferredLateSceneA,
+        (const void*)&hookDeferredLateSceneB,
+        (const void*)&hookDeferredLateSceneList,
+        (const void*)&hookDeferredPostHighlight,
+        (const void*)&hookDeferredPostFog,
+        (const void*)&hookDeferredPostMask,
+        (const void*)&hookDeferredPostComposite,
+        (const void*)&hookDeferredPostDebug,
+    };
+    static_assert(sizeof(originals) / sizeof(originals[0])
+                      == kDeferredCallSiteCount,
+                  "every deferred call needs an original slot");
+    static_assert(sizeof(replacements) / sizeof(replacements[0])
+                      == kDeferredCallSiteCount,
+                  "every deferred call needs a wrapper");
+
+    for (unsigned i = 0; i < kDeferredCallSiteCount; ++i)
+        *originals[i] = base + kDeferredCallSites[i].targetRva;
+
+    g_deferredRender = (DeferredRenderFn)owner;
+    if (!tq::detour::patchCall(
+            g_deferredOwnerPatch, engine,
+            base + kDeferredOwnerCallWindowRva,
+            signature(kDeferredOwnerCallWindowBytes,
+                      sizeof(kDeferredOwnerCallWindowBytes)),
+            kDeferredOwnerCallOffset, owner,
+            (const void*)&hookDeferredRender)) {
+        g_deferredRender = nullptr;
+        for (unsigned i = 0; i < kDeferredCallSiteCount; ++i)
+            *originals[i] = nullptr;
+        note("GraphicsDeferredRendererX owner call", false);
+        return false;
+    }
+
+    unsigned installed = 0;
+    for (; installed < kDeferredCallSiteCount; ++installed) {
+        const DeferredCallSite& site = kDeferredCallSites[installed];
+        // All 16-byte windows were checked above while still original.  The
+        // five-byte signature is now safe even where a neighbouring call has
+        // already changed, and patchCall additionally resolves its target.
+        if (!tq::detour::patchCall(
+                g_deferredCallPatches[installed], engine,
+                base + site.callRva, signature(site.bytes, 5), 0,
+                base + site.targetRva, replacements[installed]))
+            break;
+    }
+    if (installed != kDeferredCallSiteCount) {
+        while (installed)
+            tq::detour::restoreCall(g_deferredCallPatches[--installed]);
+        tq::detour::restoreCall(g_deferredOwnerPatch);
+        g_deferredRender = nullptr;
+        for (unsigned i = 0; i < kDeferredCallSiteCount; ++i)
+            *originals[i] = nullptr;
+        note("GraphicsDeferredRendererX direct-pass windows", false);
+        return false;
+    }
+
+    InterlockedExchange(&g_deferredPass, DeferredPassNone);
+    InterlockedExchange(&g_deferredGeometrySite, DeferredGeometrySiteNone);
+    InterlockedExchange(&g_deferredOwnerInvocation, 0);
+    g_deferredOwnerFrame = UINT_MAX;
+    g_deferredOwnerCallsThisFrame = 0;
+    memset(g_deferredCreations, 0, sizeof(g_deferredCreations));
+    g_deferredCreationSequence = 0;
+    memset(g_offMainTextures, 0, sizeof(g_offMainTextures));
+    InterlockedExchange(&g_offMainTextureSequence, 0);
+    memset(g_deferredSlowFrames, 0, sizeof(g_deferredSlowFrames));
+    g_deferredPassTracing = true;
+    ++g_installedHooks;
+    note("GraphicsDeferredRendererX owner call", true);
+    note("GraphicsDeferredRendererX direct-pass windows", true);
+    return true;
+}
+
+bool installReflections(HMODULE engine, bool trace, bool deferAdmissionMesh,
+                        bool deferAdmissionAll,
+                        bool secondaryPassAdmission) {
+    BYTE* const base = (BYTE*)engine;
+    void* const manager = resolve(
+        engine, kReflectionManagerName, kReflectionManagerRva);
+    void* const buildScene = resolve(
+        engine, kReflectionBuildSceneName, kReflectionBuildSceneRva);
+    void* const renderLight = resolve(
+        engine, kReflectionRenderLightName, kReflectionRenderLightRva);
+    void* const meshRenderPass = resolve(
+        engine, kGraphicsMeshInstanceRenderPassName,
+        kGraphicsMeshInstanceRenderPassRva);
+    const bool needMesh = trace || deferAdmissionMesh
+                       || secondaryPassAdmission;
+    const bool verified = manager && buildScene && renderLight
+        && (!needMesh || meshRenderPass)
+        && tq::detour::matches(
+            engine, manager,
+            signature(kReflectionManagerBytes,
+                      sizeof(kReflectionManagerBytes)))
+        && tq::detour::matches(
+            engine, base + kReflectionManagerCallWindowRva,
+            signature(kReflectionManagerCallWindowBytes,
+                      sizeof(kReflectionManagerCallWindowBytes)))
+        && tq::detour::matches(
+            engine, base + kReflectionManagerTailRva,
+            signature(kReflectionManagerTailBytes,
+                      sizeof(kReflectionManagerTailBytes)))
+        && tq::detour::matches(
+            engine, base + kReflectionPlaneRva,
+            signature(kReflectionPlaneBytes, sizeof(kReflectionPlaneBytes),
+                      kReflectionPlaneRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kReflectionPlaneCallWindowRva,
+            signature(kReflectionPlaneCallWindowBytes,
+                      sizeof(kReflectionPlaneCallWindowBytes)))
+        && tq::detour::matches(
+            engine, base + kReflectionPlaneTailRva,
+            signature(kReflectionPlaneTailBytes,
+                      sizeof(kReflectionPlaneTailBytes)))
+        && tq::detour::matches(
+            engine, buildScene,
+            signature(kReflectionBuildSceneBytes,
+                      sizeof(kReflectionBuildSceneBytes),
+                      kReflectionBuildSceneRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kReflectionBuildSceneCallWindowRva,
+            signature(kReflectionBuildSceneCallWindowBytes,
+                      sizeof(kReflectionBuildSceneCallWindowBytes)))
+        && tq::detour::matches(
+            engine, base + kReflectionBuildSceneTailRva,
+            signature(kReflectionBuildSceneTailBytes,
+                      sizeof(kReflectionBuildSceneTailBytes)))
+        && tq::detour::matches(
+            engine, renderLight,
+            signature(kReflectionRenderLightBytes,
+                      sizeof(kReflectionRenderLightBytes),
+                      kReflectionRenderLightRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kReflectionRenderLightCallWindowRva,
+            signature(kReflectionRenderLightCallWindowBytes,
+                      sizeof(kReflectionRenderLightCallWindowBytes),
+                      kReflectionRenderLightCallRelocs, 1))
+        && tq::detour::matches(
+            engine, base + kReflectionRenderLightTailRva,
+            signature(kReflectionRenderLightTailBytes,
+                      sizeof(kReflectionRenderLightTailBytes)))
+        && (!needMesh || tq::detour::matches(
+            engine, meshRenderPass,
+            signature(kGraphicsMeshInstanceRenderPassBytes,
+                      sizeof(kGraphicsMeshInstanceRenderPassBytes),
+                      kGraphicsMeshInstanceRenderPassRelocs, 1)))
+        && (!needMesh || tq::detour::matches(
+            engine, base + kGraphicsMeshInstanceRenderPassTailRva,
+            signature(kGraphicsMeshInstanceRenderPassTailBytes,
+                      sizeof(kGraphicsMeshInstanceRenderPassTailBytes))))
+        && kReflectionManagerCallWindowBytes[kReflectionManagerCallOffset]
+            == 0xe8
+        && kReflectionPlaneCallWindowBytes[kReflectionPlaneCallOffset]
+            == 0xe8
+        && kReflectionBuildSceneCallWindowBytes[
+               kReflectionBuildSceneCallOffset] == 0xe8
+        && kReflectionRenderLightCallWindowBytes[
+               kReflectionRenderLightCallOffset] == 0xe8
+        && kReflectionManagerTailBytes[13] == 0xc2
+        && kReflectionManagerTailBytes[14] == 2 * sizeof(uintptr_t)
+        && kReflectionManagerTailBytes[15] == 0
+        && kReflectionPlaneTailBytes[20] == 0xc2
+        && kReflectionPlaneTailBytes[21] == 3 * sizeof(uintptr_t)
+        && kReflectionPlaneTailBytes[22] == 0
+        && kReflectionBuildSceneTailBytes[14] == 0xc2
+        && kReflectionBuildSceneTailBytes[15] == sizeof(uintptr_t)
+        && kReflectionBuildSceneTailBytes[16] == 0
+        && kReflectionRenderLightTailBytes[19] == 0xc2
+        && kReflectionRenderLightTailBytes[20] == 4 * sizeof(uintptr_t)
+        && kReflectionRenderLightTailBytes[21] == 0
+        && kGraphicsMeshInstanceRenderPassTailBytes[20] == 0xc2
+        && kGraphicsMeshInstanceRenderPassTailBytes[21]
+            == 4 * sizeof(uintptr_t)
+        && kGraphicsMeshInstanceRenderPassTailBytes[22] == 0;
+    if (!verified) {
+        note("DX11 branch reflection windows", false);
+        return false;
+    }
+
+    g_reflectionManager = (ReflectionManagerFn)manager;
+    g_reflectionPlane = (ReflectionPlaneFn)(base + kReflectionPlaneRva);
+    g_reflectionBuildScene = (ReflectionBuildSceneFn)buildScene;
+    g_reflectionRenderLight = (ReflectionRenderLightFn)renderLight;
+    const bool managerOk = !trace || tq::detour::patchCall(
+        g_reflectionManagerPatch, engine,
+        base + kReflectionManagerCallWindowRva,
+        signature(kReflectionManagerCallWindowBytes,
+                  sizeof(kReflectionManagerCallWindowBytes)),
+        kReflectionManagerCallOffset, manager,
+        (const void*)&hookReflectionManager);
+    const bool planeOk = managerOk && (!trace || tq::detour::patchCall(
+        g_reflectionPlanePatch, engine,
+        base + kReflectionPlaneCallWindowRva,
+        signature(kReflectionPlaneCallWindowBytes,
+                  sizeof(kReflectionPlaneCallWindowBytes)),
+        kReflectionPlaneCallOffset, base + kReflectionPlaneRva,
+        (const void*)&hookReflectionPlane));
+    const bool buildOk = planeOk && tq::detour::patchCall(
+        g_reflectionBuildScenePatch, engine,
+        base + kReflectionBuildSceneCallWindowRva,
+        signature(kReflectionBuildSceneCallWindowBytes,
+                  sizeof(kReflectionBuildSceneCallWindowBytes)),
+        kReflectionBuildSceneCallOffset, buildScene,
+        (const void*)&hookReflectionBuildScene);
+    const bool lightOk = buildOk && tq::detour::patchCall(
+        g_reflectionRenderLightPatch, engine,
+        base + kReflectionRenderLightCallWindowRva,
+        signature(kReflectionRenderLightCallWindowBytes,
+                  sizeof(kReflectionRenderLightCallWindowBytes),
+                  kReflectionRenderLightCallRelocs, 1),
+        kReflectionRenderLightCallOffset, renderLight,
+        (const void*)&hookReflectionRenderLight);
+    const bool meshOk = lightOk && (!needMesh || tq::detour::attach(
+        g_graphicsMeshInstanceRenderPassDetour, engine, meshRenderPass,
+        signature(kGraphicsMeshInstanceRenderPassBytes,
+                  sizeof(kGraphicsMeshInstanceRenderPassBytes),
+                  kGraphicsMeshInstanceRenderPassRelocs, 1),
+        6, (const void*)&hookGraphicsMeshInstanceRenderPass,
+        (void**)&g_graphicsMeshInstanceRenderPass));
+    if (!meshOk) {
+        tq::detour::detach(g_graphicsMeshInstanceRenderPassDetour);
+        tq::detour::restoreCall(g_reflectionRenderLightPatch);
+        tq::detour::restoreCall(g_reflectionBuildScenePatch);
+        tq::detour::restoreCall(g_reflectionPlanePatch);
+        tq::detour::restoreCall(g_reflectionManagerPatch);
+        g_reflectionManager = nullptr;
+        g_reflectionPlane = nullptr;
+        g_reflectionBuildScene = nullptr;
+        g_reflectionRenderLight = nullptr;
+        g_graphicsMeshInstanceRenderPass = nullptr;
+        note("DX11 branch reflection windows", false);
+        return false;
+    }
+
+    InterlockedExchange(&g_reflectionManagerInvocation, 0);
+    InterlockedExchange(&g_reflectionPlaneInvocation, 0);
+    g_reflectionManagerFrame = UINT_MAX;
+    g_reflectionManagerCallsThisFrame = 0;
+    g_reflectionPlaneCallsThisManager = 0;
+    g_reflectionChildTracing = trace;
+    g_reflectionTracing = trace;
+    g_reflectionDeferAdmissionMeshActive = deferAdmissionMesh;
+    g_reflectionDeferAdmissionAllActive = deferAdmissionAll;
+    g_secondaryPassAdmissionActive = secondaryPassAdmission;
+    ++g_installedHooks;
+    if (trace) {
+        note("DX11 branch reflection windows", true);
+        note("reflection BuildScene/RenderLightStyle child calls", true);
+        note("GraphicsMeshInstance reflection RenderPass", true);
+    }
+    tq::hdr::log(
+        "Reflection admission mesh defer: %s (buffer threshold %u)\r\n",
+        deferAdmissionMesh ? "active" : "off",
+        kReflectionAdmissionBufferThreshold);
+    tq::hdr::log(
+        "Reflection admission whole-pass defer: %s (buffer threshold %u)\r\n",
+        deferAdmissionAll ? "active" : "off",
+        kReflectionAdmissionBufferThreshold);
+    tq::hdr::log(
+        "Secondary-pass progressive admission: %s (budget %u objects/frame)\r\n",
+        secondaryPassAdmission ? "active" : "off",
+        g_secondaryPassAdmissionBudget);
+    return true;
+}
+
+bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers,
+                    bool secondaryPassAdmission) {
     BYTE* const base = (BYTE*)engine;
     const BYTE* const vtable = base + kTerrainRtVtableRva;
     const bool vtableReadable = tq::detour::readable(
@@ -5759,10 +8847,13 @@ bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
             engine, preloadTarget,
             signature(kTerrainPreloadBytes, sizeof(kTerrainPreloadBytes),
                       kTerrainPreloadRelocs, 1));
-    g_terrainPreloadEntry = preloadVerified
+    const bool needLoadTextures = traceTerrain || preloadLayers;
+    g_terrainPreloadEntry = needLoadTextures && preloadVerified
         ? (TerrainPreloadFn)preloadTarget : nullptr;
-    g_terrainRtLoadTextures = (TerrainTypeLoadTexturesFn)loadTextures;
-    const bool loadTexturesPatched = loadTextures && preloadVerified
+    g_terrainRtLoadTextures = needLoadTextures
+        ? (TerrainTypeLoadTexturesFn)loadTextures : nullptr;
+    const bool loadTexturesPatched = !needLoadTextures
+        || (loadTextures && preloadVerified
         && (!traceTerrain || runtimeBytes)
         && tq::detour::patchCall(
             g_terrainRtLoadTexturesPatch, engine,
@@ -5770,9 +8861,9 @@ bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
             signature(kTerrainRtLoadTexturesWindowBytes,
                       sizeof(kTerrainRtLoadTexturesWindowBytes)),
             kTerrainRtLoadTexturesCallOffset, loadTextures,
-            (const void*)&hookTerrainRtLoadTextures);
+            (const void*)&hookTerrainRtLoadTextures));
 
-    if (traceTerrain && runtimeBytes)
+    if ((traceTerrain || secondaryPassAdmission) && runtimeBytes)
         tq::detour::attach(
             g_terrainPlugRenderDetour, engine,
             base + kTerrainPlugRenderRva,
@@ -5782,7 +8873,7 @@ bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
             6, (const void*)&hookTerrainPlugRender,
             (void**)&g_terrainPlugRender);
 
-    if (traceTerrain && runtimeBytes)
+    if ((traceTerrain || secondaryPassAdmission) && runtimeBytes)
         tq::detour::attach(
             g_terrainBlockRenderDetour, engine,
             base + kTerrainBlockRenderRva,
@@ -5846,7 +8937,9 @@ bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
         && g_terrainSetGrassShaderParams && g_terrainRenderGround);
     const bool preloadOk = !preloadLayers
         || (loadTexturesPatched && preloadVerified);
-    const bool ok = traceOk && preloadOk;
+    const bool secondaryOk = !secondaryPassAdmission
+        || (runtimeBytes && g_terrainPlugRender && g_terrainBlockRender);
+    const bool ok = traceOk && preloadOk && secondaryOk;
     if (!ok) {
         tq::detour::detach(g_terrainRenderGroundDetour);
         tq::detour::detach(g_terrainSetGrassShaderParamsDetour);
@@ -5887,6 +8980,8 @@ bool installTerrain(HMODULE engine, bool traceTerrain, bool preloadLayers) {
         note("TerrainRenderInterfaceRT::RenderGround", ok);
     } else {
         note("Terrain layer semantic preload", ok);
+        if (secondaryPassAdmission)
+            note("Terrain secondary-pass progressive admission", ok);
     }
     return ok;
 }
@@ -5922,7 +9017,7 @@ bool installShadow(HMODULE engine, bool trace) {
     }
 
     g_renderDirectional = (RenderDirectionalFn)target;
-    const bool ok = tq::detour::patchCall(
+    bool ok = tq::detour::patchCall(
         g_shadowDirectionalPatch, engine,
         (BYTE*)engine + kShadowCallWindowRva,
         signature(kShadowCallWindowBytes, sizeof(kShadowCallWindowBytes)),
@@ -6283,6 +9378,96 @@ bool installWait(HMODULE engine) {
 
 }  // namespace
 
+void noteSecondaryAdmissionDrawSkipped() {
+    tq::probe::engineCount(
+        tq::probe::CounterEngineSecondaryAdmissionDrawSkipped);
+}
+
+void secondaryAdmissionFrameBoundary() {
+    if (!g_secondaryPassAdmissionActive) return;
+    ++g_secondaryAdmissionFrameSerial;
+}
+
+bool deferredDrawTraceRequested() {
+    return tq::probe::drawTimingEnabled() && g_traceMask != 0
+        && ((g_traceMask & kGroupAll) != 0
+            || (g_traceMask & kGroupDeferredPasses) != 0
+            || (g_traceMask & kGroupReflections) != 0);
+}
+
+void beginGpuChunkDraw(ID3D11DeviceContext* context) {
+    beginGpuChunkDrawInternal(context);
+}
+
+void finishGpuChunkDraw(
+    bool indexed, unsigned count, const DeferredDrawBindings* bindings) {
+    finishGpuChunkDrawInternal(indexed, count, bindings);
+}
+
+void countDeferredDraw(unsigned elapsedUs, bool indexed, unsigned count,
+                       unsigned start, int base,
+                       const DeferredDrawBindings* bindings) {
+    countDeferredDrawInternal(elapsedUs, indexed, count, start, base,
+                              bindings);
+}
+
+void noteDeferredTextureCreated(
+    const void* texture, unsigned elapsedUs, unsigned width, unsigned height,
+    unsigned mipLevels, unsigned format, unsigned bindFlags,
+    unsigned miscFlags) {
+    noteDeferredCreationInternal(
+        DeferredCreationTexture, texture, elapsedUs, width, height, mipLevels,
+        format, bindFlags, miscFlags);
+}
+
+void noteOffMainTextureCreated(
+    unsigned startFrame, unsigned finishFrame, unsigned elapsedUs,
+    unsigned threadId, unsigned width, unsigned height, unsigned mipLevels,
+    unsigned format, unsigned bindFlags, unsigned miscFlags,
+    bool hasInitialData) {
+    if (!g_deferredPassTracing) return;
+    const LONG sequence = InterlockedIncrement(&g_offMainTextureSequence);
+    OffMainTextureRecord& record =
+        g_offMainTextures[(sequence - 1) % kOffMainTextureSlots];
+    InterlockedExchange(&record.publishedSequence, 0);
+    record.startFrame = startFrame;
+    record.finishFrame = finishFrame;
+    record.elapsedUs = elapsedUs;
+    record.threadId = threadId;
+    record.width = width;
+    record.height = height;
+    record.mipLevels = mipLevels;
+    record.format = format;
+    record.bindFlags = bindFlags;
+    record.miscFlags = miscFlags;
+    record.hasInitialData = hasInitialData;
+    MemoryBarrier();
+    InterlockedExchange(&record.publishedSequence, sequence);
+}
+
+void noteDeferredBufferCreated(
+    const void* buffer, unsigned elapsedUs, unsigned byteWidth,
+    unsigned bindFlags, unsigned usage, unsigned cpuAccessFlags,
+    unsigned miscFlags) {
+    if (buffer && g_reflectionAdmissionBuildActive && onMainThread())
+        ++g_reflectionAdmissionBuildBuffers;
+    noteDeferredCreationInternal(
+        DeferredCreationBuffer, buffer, elapsedUs, byteWidth, bindFlags,
+        usage, cpuAccessFlags, miscFlags, 0);
+}
+
+bool reflectionAdmissionBufferTrackingRequested() {
+    return g_reflectionDeferAdmissionMesh || g_reflectionDeferAdmissionAll;
+}
+
+bool secondaryPassAdmissionRequested() {
+    return g_secondaryPassAdmissionBudget != 0;
+}
+
+void setSecondaryAdmissionDrawHooksReady(bool ready) {
+    g_secondaryAdmissionDrawHooksReady = ready;
+}
+
 void readOptions(const wchar_t* iniPath) {
     // No INI is the shipping configuration, and the shipping configuration has
     // the probe off, so the default here only decides what a trace run gets.
@@ -6345,6 +9530,34 @@ void readOptions(const wchar_t* iniPath) {
     g_terrainPreloadLayers = iniPath && iniPath[0]
         && GetPrivateProfileIntW(L"performance", L"terrain_preload_layers", 0,
                                  iniPath) != 0;
+    // A transition-sized reflection scene is identified by an exact count of
+    // successful D3D buffer creations during BuildScene, not by elapsed time.
+    // The immediately following mesh-instance reflection calls are omitted;
+    // normal color later in the same branch and the next reflection are stock.
+    g_reflectionDeferAdmissionMesh = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance",
+                                 L"reflection_defer_admission_mesh", 0,
+                                 iniPath) != 0;
+    // Run 81 proved that omitting all 87 GraphicsMeshInstance calls left the
+    // marked burst and its terrain-only reflection GPU interval intact.  This
+    // stronger A/B skips that one whole RenderLightStyle call, so terrain and
+    // mesh reflection both return together on the following frame.
+    g_reflectionDeferAdmissionAll = iniPath && iniPath[0]
+        && GetPrivateProfileIntW(L"performance",
+                                 L"reflection_defer_admission_all", 0,
+                                 iniPath) != 0;
+    // Zero is stock. A positive value is an object-identity budget, not a
+    // millisecond target, so the same recorded population is treated the same
+    // on native Windows and Wine. Values above the audited bound are refused
+    // rather than silently turning this into effectively unbounded admission.
+    const int secondaryBudget = iniPath && iniPath[0]
+        ? GetPrivateProfileIntW(L"performance",
+                                L"secondary_pass_admission_budget", 0,
+                                iniPath)
+        : 0;
+    g_secondaryPassAdmissionBudget = secondaryBudget > 0
+        && secondaryBudget <= (int)kSecondaryPassAdmissionBudgetMax
+        ? (unsigned)secondaryBudget : 0u;
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -6358,8 +9571,9 @@ bool install(HMODULE engine) {
     // the trace still needs the probe on and a non-zero mask, and stays
     // byte-identical to a build without this file otherwise. What
     // archive_cache_mb, async_level_load, shadow_transition_reuse,
-    // shadow_defer_cold_alpha, shadow_defer_cold_actor_pose and
-    // terrain_preload_layers add
+    // shadow_defer_cold_alpha, shadow_defer_cold_actor_pose,
+    // terrain_preload_layers, reflection_defer_admission_mesh,
+    // reflection_defer_admission_all, and secondary_pass_admission_budget add
     // independent ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
@@ -6375,10 +9589,18 @@ bool install(HMODULE engine) {
     // requesting it therefore installs the same complete accepted patch set.
     const bool shadowDefer = g_shadowDeferColdAlpha || shadowActorPose;
     const bool terrainPreload = g_terrainPreloadLayers;
+    const bool secondaryAdmission = g_secondaryPassAdmissionBudget != 0;
+    const bool reflectionDefer = g_reflectionDeferAdmissionMesh
+                              || g_reflectionDeferAdmissionAll
+                              || secondaryAdmission;
     const bool marker = tq::probe::stutterMarkerEnabled();
     decideTracing();
+    const bool crossPass = wants(kGroupReflections)
+                        && tq::probe::drawTimingEnabled();
+    const bool gpuChunks = wants(kGroupReflections) && wants(kGroupTerrain)
+                        && tq::probe::drawTimingEnabled();
     if (!g_tracing && !cache && !async && !pumpFilter && !shadowReuse
-        && !shadowDefer && !terrainPreload
+        && !shadowDefer && !terrainPreload && !reflectionDefer
         && !marker)
         return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
@@ -6422,6 +9644,55 @@ bool install(HMODULE engine) {
     g_activeTerrainMaterialIndex = -1;
     g_terrainTracing = false;
     g_terrainPreloadLayersActive = false;
+    g_deferredPassTracing = false;
+    InterlockedExchange(&g_deferredPass, DeferredPassNone);
+    InterlockedExchange(&g_deferredGeometrySite, DeferredGeometrySiteNone);
+    InterlockedExchange(&g_deferredOwnerInvocation, 0);
+    g_deferredOwnerFrame = UINT_MAX;
+    g_deferredOwnerCallsThisFrame = 0;
+    g_reflectionTracing = false;
+    g_reflectionChildTracing = false;
+    g_reflectionDeferAdmissionMeshActive = false;
+    g_reflectionDeferAdmissionAllActive = false;
+    g_secondaryPassAdmissionActive = false;
+    g_secondaryAdmissionArmed = false;
+    g_insideReflectionRenderLight = false;
+    g_secondaryAdmissionFrameSerial = 0;
+    g_secondaryAdmissionBudgetFrame = UINT_MAX;
+    g_secondaryAdmissionUsedThisFrame = 0;
+    InterlockedExchange(&detail::secondaryAdmissionDrawSuppressDepth, 0);
+    g_reflectionAdmissionBuildActive = false;
+    g_reflectionAdmissionBuildBuffers = 0;
+    g_reflectionAdmissionPending = false;
+    g_reflectionAdmissionRenderActive = false;
+    memset(g_admissionRenderableIdentities, 0,
+           sizeof(g_admissionRenderableIdentities));
+    g_crossPassTracing = false;
+    g_gpuChunkTracing = false;
+    InterlockedExchange(&detail::gpuChunkDrawActive, 0);
+    InterlockedExchange(&g_reflectionManagerInvocation, 0);
+    InterlockedExchange(&g_reflectionPlaneInvocation, 0);
+    InterlockedExchange(&g_reflectionChild, 0);
+    g_reflectionGpuChunkPending = false;
+    g_reflectionGpuChunkTriggerUs = 0;
+    g_activeGpuChunkRenderableCall = nullptr;
+    g_reflectionManagerFrame = UINT_MAX;
+    g_reflectionManagerCallsThisFrame = 0;
+    g_reflectionPlaneCallsThisManager = 0;
+    memset(g_deferredCreations, 0, sizeof(g_deferredCreations));
+    g_deferredCreationSequence = 0;
+    memset(g_offMainTextures, 0, sizeof(g_offMainTextures));
+    InterlockedExchange(&g_offMainTextureSequence, 0);
+    memset(g_deferredSlowFrames, 0, sizeof(g_deferredSlowFrames));
+    memset(g_crossPassBuffers, 0, sizeof(g_crossPassBuffers));
+    memset(g_crossPassIndex, 0, sizeof(g_crossPassIndex));
+    g_crossPassBufferSequence = 0;
+    g_crossPassIndexOverflows = 0;
+    g_crossPassRecentEvictions = 0;
+    memset(g_gpuChunkEvents, 0, sizeof(g_gpuChunkEvents));
+    memset(g_activeGpuChunks, 0, sizeof(g_activeGpuChunks));
+    memset(g_gpuChunkLastFrame, 0, sizeof(g_gpuChunkLastFrame));
+    g_gpuChunkEventSequence = 0;
     g_shadowActorPoseDeferActive = false;
     g_actorUpdateMeshInstance = nullptr;
     const bool shadowDeferReady = shadowDefer
@@ -6442,12 +9713,40 @@ bool install(HMODULE engine) {
     if (wants(kGroupArcIo)) installArchiveIo(engine);
     if (wants(kGroupBlocking)) installBlocking(engine);
     const bool traceTerrain = wants(kGroupTerrain);
-    if (traceTerrain || terrainPreload)
-        installTerrain(engine, traceTerrain, terrainPreload);
+    bool terrainReady = !secondaryAdmission;
+    if (traceTerrain || terrainPreload || secondaryAdmission)
+        terrainReady = installTerrain(engine, traceTerrain, terrainPreload,
+                                      secondaryAdmission);
     const bool traceShadow = wants(kGroupShadow);
-    if (traceShadow || shadowReuse || shadowDeferReady)
-        installShadow(engine, traceShadow);
+    bool shadowReady = !secondaryAdmission;
+    if (traceShadow || shadowReuse || shadowDeferReady || crossPass
+        || secondaryAdmission)
+        shadowReady = installShadow(engine, traceShadow);
+    if (wants(kGroupDeferredPasses) || crossPass)
+        installDeferredPasses(engine);
+    const bool traceReflections = wants(kGroupReflections);
+    bool reflectionReady = !secondaryAdmission;
+    if (traceReflections || reflectionDefer)
+        reflectionReady = installReflections(
+            engine, traceReflections, g_reflectionDeferAdmissionMesh,
+            g_reflectionDeferAdmissionAll, secondaryAdmission);
+    g_secondaryPassAdmissionActive = secondaryAdmission
+        && g_secondaryAdmissionDrawHooksReady && terrainReady
+        && shadowReady && reflectionReady;
+    if (secondaryAdmission && !g_secondaryPassAdmissionActive)
+        tq::hdr::log("Secondary-pass progressive admission unavailable --"
+                     " leaving all draws stock\r\n");
     if (async) installAsyncLoad(engine);
+    g_crossPassTracing = crossPass && g_renderDirectional
+        && g_deferredPassTracing && g_reflectionTracing
+        && g_reflectionChildTracing;
+    tq::hdr::log("Engine trace: cross-pass first-use identity %s\r\n",
+                 g_crossPassTracing ? "active" : "unavailable");
+    g_gpuChunkTracing = gpuChunks && g_reflectionTracing
+        && g_reflectionChildTracing && g_terrainPlugRender
+        && g_terrainBlockRender && g_graphicsMeshInstanceRenderPass;
+    tq::hdr::log("Engine trace: complete reflection GPU chunks %s\r\n",
+                 g_gpuChunkTracing ? "active" : "unavailable");
 
     // These columns and marker records mean exactly "main-thread
     // LoadResource outside RenderDirectional, partitioned by Engine phase."
@@ -6467,7 +9766,9 @@ bool install(HMODULE engine) {
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s, async load %s,"
                  " pump timer floor %u ms, shadow transition reuse %s,"
                  " cold alpha-shadow defer %s, cold actor-pose defer %s,"
-                 " terrain layer preload %s,"
+                 " terrain layer preload %s, reflection admission mesh defer %s,"
+                 " reflection admission whole-pass defer %s,"
+                 " secondary-pass admission budget %u,"
                  " hooks=%u, main thread id at %p\r\n",
                  g_tracing ? "on" : "off", g_traceMask,
                  cache ? "requested" : "off", async ? "requested" : "off",
@@ -6475,6 +9776,9 @@ bool install(HMODULE engine) {
                  shadowDefer ? "requested" : "off",
                  shadowActorPose ? "requested" : "off",
                  terrainPreload ? "requested" : "off",
+                 g_reflectionDeferAdmissionMesh ? "requested" : "off",
+                 g_reflectionDeferAdmissionAll ? "requested" : "off",
+                 g_secondaryPassAdmissionBudget,
                  g_installedHooks,
                  (const void*)g_mainThreadId);
     if (g_installedHooks) return true;
@@ -6488,6 +9792,30 @@ void shutdown() {
     // must never turn a missing hook into an "outside directional" sample.
     g_outsideDirResourceTracing = false;
     g_shadowMeshResourceTracing = false;
+    g_deferredPassTracing = false;
+    g_reflectionTracing = false;
+    g_reflectionChildTracing = false;
+    g_reflectionDeferAdmissionMeshActive = false;
+    g_reflectionDeferAdmissionAllActive = false;
+    g_secondaryPassAdmissionActive = false;
+    g_secondaryAdmissionArmed = false;
+    g_secondaryAdmissionDrawHooksReady = false;
+    g_insideReflectionRenderLight = false;
+    InterlockedExchange(&detail::secondaryAdmissionDrawSuppressDepth, 0);
+    g_reflectionAdmissionBuildActive = false;
+    g_reflectionAdmissionBuildBuffers = 0;
+    g_reflectionAdmissionPending = false;
+    g_reflectionAdmissionRenderActive = false;
+    g_crossPassTracing = false;
+    g_gpuChunkTracing = false;
+    InterlockedExchange(&detail::gpuChunkDrawActive, 0);
+    g_activeGpuChunkRenderableCall = nullptr;
+    InterlockedExchange(&g_deferredPass, DeferredPassNone);
+    InterlockedExchange(&g_deferredGeometrySite, DeferredGeometrySiteNone);
+    InterlockedExchange(&g_deferredOwnerInvocation, 0);
+    InterlockedExchange(&g_reflectionManagerInvocation, 0);
+    InterlockedExchange(&g_reflectionPlaneInvocation, 0);
+    InterlockedExchange(&g_reflectionChild, 0);
     reportMessages();
     reportSlowLoads();
     // Safe to run before the block hook is unpatched: stop() clears the slab
@@ -6502,6 +9830,49 @@ void shutdown() {
     // are cleared only after the sites that reach them are restored.
     for (int i = (int)kForceLoadSiteCount - 1; i >= 0; --i)
         tq::detour::restoreCall(g_forceLoadPatches[i]);
+    tq::detour::detach(g_graphicsMeshInstanceRenderPassDetour);
+    tq::detour::restoreCall(g_reflectionRenderLightPatch);
+    tq::detour::restoreCall(g_reflectionBuildScenePatch);
+    tq::detour::restoreCall(g_reflectionPlanePatch);
+    tq::detour::restoreCall(g_reflectionManagerPatch);
+    g_reflectionPlane = nullptr;
+    g_reflectionManager = nullptr;
+    g_reflectionBuildScene = nullptr;
+    g_reflectionRenderLight = nullptr;
+    g_graphicsMeshInstanceRenderPass = nullptr;
+    g_reflectionManagerFrame = UINT_MAX;
+    g_reflectionManagerCallsThisFrame = 0;
+    g_reflectionPlaneCallsThisManager = 0;
+    for (int i = (int)kDeferredCallSiteCount - 1; i >= 0; --i)
+        tq::detour::restoreCall(g_deferredCallPatches[i]);
+    tq::detour::restoreCall(g_deferredOwnerPatch);
+    g_deferredRender = nullptr;
+    g_deferredGeometrySetup = nullptr;
+    g_deferredGeometryScene = nullptr;
+    g_deferredShadows = nullptr;
+    g_deferredLighting = nullptr;
+    g_deferredResolve = nullptr;
+    g_deferredAo = nullptr;
+    g_deferredLateSceneA = nullptr;
+    g_deferredLateSceneB = nullptr;
+    g_deferredLateSceneList = nullptr;
+    g_deferredPostHighlight = nullptr;
+    g_deferredPostFog = nullptr;
+    g_deferredPostMask = nullptr;
+    g_deferredPostComposite = nullptr;
+    g_deferredPostDebug = nullptr;
+    g_deferredOwnerFrame = UINT_MAX;
+    g_deferredOwnerCallsThisFrame = 0;
+    memset(g_deferredCreations, 0, sizeof(g_deferredCreations));
+    g_deferredCreationSequence = 0;
+    memset(g_offMainTextures, 0, sizeof(g_offMainTextures));
+    InterlockedExchange(&g_offMainTextureSequence, 0);
+    memset(g_deferredSlowFrames, 0, sizeof(g_deferredSlowFrames));
+    memset(g_crossPassBuffers, 0, sizeof(g_crossPassBuffers));
+    memset(g_crossPassIndex, 0, sizeof(g_crossPassIndex));
+    g_crossPassBufferSequence = 0;
+    g_crossPassIndexOverflows = 0;
+    g_crossPassRecentEvictions = 0;
     g_backgroundLoadLevel = nullptr;
     g_regionLoadLevel = nullptr;
     tq::detour::restoreCall(g_shadowActorUpdateMeshPatch);
@@ -6690,6 +10061,223 @@ bool shadowDeferColdActorPoseForTest() {
     return g_shadowDeferColdActorPose;
 }
 bool terrainPreloadLayersForTest() { return g_terrainPreloadLayers; }
+bool reflectionDeferAdmissionMeshForTest() {
+    return g_reflectionDeferAdmissionMesh;
+}
+bool reflectionDeferAdmissionAllForTest() {
+    return g_reflectionDeferAdmissionAll;
+}
+unsigned secondaryPassAdmissionBudgetForTest() {
+    return g_secondaryPassAdmissionBudget;
+}
+bool reflectionAdmissionTriggeredForTest(unsigned buffers) {
+    return (g_reflectionDeferAdmissionMesh || g_reflectionDeferAdmissionAll)
+        && reflectionAdmissionThresholdReached(buffers);
+}
+void resetAdmissionRenderableIdentitiesForTest() {
+    memset(g_admissionRenderableIdentities, 0,
+           sizeof(g_admissionRenderableIdentities));
+}
+bool admissionRenderableFirstForTest(const void* object, unsigned kind,
+                                     unsigned consumer) {
+    return admissionRenderableFirst(
+        object, (GpuChunkRenderableKind)kind, (AdmissionConsumer)consumer);
+}
+void resetSecondaryAdmissionForTest(unsigned budget, bool armed) {
+    static DWORD testMainThread;
+    testMainThread = GetCurrentThreadId();
+    g_mainThreadId = &testMainThread;
+    memset(g_admissionRenderableIdentities, 0,
+           sizeof(g_admissionRenderableIdentities));
+    g_secondaryPassAdmissionBudget = budget;
+    g_secondaryPassAdmissionActive = budget != 0;
+    g_secondaryAdmissionArmed = armed;
+    g_secondaryAdmissionDrawHooksReady = budget != 0;
+    g_insideReflectionRenderLight = false;
+    InterlockedExchange(&g_insideDirectional, 0);
+    g_secondaryAdmissionFrameSerial = 1;
+    g_secondaryAdmissionBudgetFrame = UINT_MAX;
+    g_secondaryAdmissionUsedThisFrame = 0;
+    InterlockedExchange(&detail::secondaryAdmissionDrawSuppressDepth, 0);
+}
+bool secondaryAdmissionArmedForTest() {
+    return g_secondaryAdmissionArmed;
+}
+bool secondaryAdmissionRenderableDeferredForTest(
+    const void* object, unsigned kind, bool reflection, bool directional) {
+    g_insideReflectionRenderLight = reflection;
+    InterlockedExchange(&g_insideDirectional, directional ? 1 : 0);
+    const bool deferred = shouldDeferSecondaryAdmission(
+        (GpuChunkRenderableKind)kind, object);
+    g_insideReflectionRenderLight = false;
+    InterlockedExchange(&g_insideDirectional, 0);
+    return deferred;
+}
+void setDeferredPassForTest(unsigned pass) {
+    g_deferredPassTracing = pass > DeferredPassNone
+        && pass < DeferredPassCount;
+    InterlockedExchange(
+        &g_deferredPass,
+        g_deferredPassTracing ? (LONG)pass : (LONG)DeferredPassNone);
+}
+void setDeferredOwnerContextForTest(unsigned invocation, unsigned site) {
+    static DWORD testMainThread;
+    testMainThread = GetCurrentThreadId();
+    g_mainThreadId = &testMainThread;
+    g_deferredPassTracing = true;
+    InterlockedExchange(&g_deferredOwnerInvocation, (LONG)invocation);
+    InterlockedExchange(
+        &g_deferredGeometrySite,
+        site < DeferredGeometrySiteCount ? (LONG)site
+                                         : (LONG)DeferredGeometrySiteNone);
+}
+void setReflectionContextForTest(unsigned manager, unsigned plane) {
+    static DWORD testMainThread;
+    testMainThread = GetCurrentThreadId();
+    g_mainThreadId = &testMainThread;
+    g_reflectionTracing = manager != 0;
+    InterlockedExchange(&g_reflectionManagerInvocation, (LONG)manager);
+    InterlockedExchange(&g_reflectionPlaneInvocation, (LONG)plane);
+}
+void setCrossPassTracingForTest(bool enabled) {
+    static DWORD testMainThread;
+    testMainThread = GetCurrentThreadId();
+    g_mainThreadId = &testMainThread;
+    g_crossPassTracing = enabled;
+    memset(g_crossPassBuffers, 0, sizeof(g_crossPassBuffers));
+    memset(g_crossPassIndex, 0, sizeof(g_crossPassIndex));
+    g_crossPassBufferSequence = 0;
+    g_crossPassIndexOverflows = 0;
+    g_crossPassRecentEvictions = 0;
+}
+void setGpuChunkTracingForTest(bool enabled) {
+    static DWORD testMainThread;
+    testMainThread = GetCurrentThreadId();
+    g_mainThreadId = &testMainThread;
+    g_gpuChunkTracing = enabled;
+    InterlockedExchange(&detail::gpuChunkDrawActive, 0);
+    memset(g_gpuChunkEvents, 0, sizeof(g_gpuChunkEvents));
+    memset(g_activeGpuChunks, 0, sizeof(g_activeGpuChunks));
+    memset(g_gpuChunkLastFrame, 0, sizeof(g_gpuChunkLastFrame));
+    g_gpuChunkEventSequence = 0;
+    g_activeGpuChunkRenderableCall = nullptr;
+}
+void armGpuChunksForTest() {
+    ReflectionLocation location = {};
+    location.manager = 2;
+    location.plane = 1;
+    armGpuChunks(location, 2000);
+}
+void closeGpuChunksForTest() {
+    closeGpuChunks();
+}
+unsigned gpuChunkBinDrawsForTest(unsigned bin) {
+    if (!g_gpuChunkEventSequence || bin >= kGpuChunkCount) return 0;
+    for (unsigned back = 0; back < g_gpuChunkEventSequence
+                            && back < kGpuChunkEventSlots; ++back) {
+        const GpuChunkEvent& event = g_gpuChunkEvents[
+            (g_gpuChunkEventSequence - 1 - back) % kGpuChunkEventSlots];
+        if (event.kind == GpuChunkReflection) return event.bins[bin].draws;
+    }
+    return 0;
+}
+void recordGpuChunkTerrainCallForTest(bool block, const void* object,
+                                      unsigned cpuUs, unsigned resourceUs,
+                                      unsigned textureUs) {
+    GpuChunkRenderableCallScope call(
+        block ? GpuChunkTerrainBlock : GpuChunkTerrainPlug, object);
+    noteGpuChunkRenderableResource(resourceUs, (const void*)2, 3);
+    noteGpuChunkRenderableCreation(true, textureUs);
+    for (unsigned i = 0; i < 2; ++i) {
+        beginGpuChunkDrawInternal(nullptr);
+        finishGpuChunkDrawInternal(true, 3, nullptr);
+    }
+    call.finish(cpuUs);
+}
+void recordGpuChunkMeshCallForTest(const void* object, unsigned cpuUs) {
+    GpuChunkRenderableCallScope call(GpuChunkMeshInstance, object);
+    for (unsigned i = 0; i < 2; ++i) {
+        beginGpuChunkDrawInternal(nullptr);
+        finishGpuChunkDrawInternal(true, 3, nullptr);
+    }
+    call.finish(cpuUs);
+}
+unsigned gpuChunkRenderableKindForTest(unsigned index) {
+    if (!g_gpuChunkEventSequence) return 0;
+    const GpuChunkEvent& event = g_gpuChunkEvents[
+        (g_gpuChunkEventSequence - 1) % kGpuChunkEventSlots];
+    return index < event.renderableCalls
+        ? (unsigned)event.renderables[index].kind : 0;
+}
+bool gpuChunkTerrainCallForTest(unsigned index, bool* block,
+                               unsigned* firstDraw, unsigned* lastDraw,
+                               unsigned* cpuUs, unsigned* resourceCount,
+                               unsigned* resourceUs,
+                               unsigned* textureCount,
+                               unsigned* textureUs) {
+    if (!g_gpuChunkEventSequence) return false;
+    const GpuChunkEvent& event = g_gpuChunkEvents[
+        (g_gpuChunkEventSequence - 1) % kGpuChunkEventSlots];
+    if (index >= event.renderableCalls) return false;
+    const GpuChunkRenderableCall& call = event.renderables[index];
+    if (block) *block = call.kind == GpuChunkTerrainBlock;
+    if (firstDraw) *firstDraw = call.firstDraw;
+    if (lastDraw) *lastDraw = call.lastDraw;
+    if (cpuUs) *cpuUs = call.cpuUs;
+    if (resourceCount) *resourceCount = call.resourceCount;
+    if (resourceUs) *resourceUs = call.resourceUs;
+    if (textureCount) *textureCount = call.textureCount;
+    if (textureUs) *textureUs = call.textureUs;
+    return true;
+}
+void setDirectionalContextForTest(bool enabled) {
+    InterlockedExchange(&g_insideDirectional, enabled ? 1 : 0);
+}
+void noteCrossPassBufferForTest(const void* buffer, unsigned bytes) {
+    noteCrossPassBufferCreated(buffer, bytes, D3D11_BIND_VERTEX_BUFFER);
+}
+void countCrossPassDrawForTest(const void* buffer) {
+    DeferredDrawBindings bindings = {};
+    bindings.vertexBuffers[0] = buffer;
+    countCrossPassDraw(&bindings);
+}
+void countDeferredDrawForTest(unsigned elapsedUs, bool indexed,
+                              unsigned count) {
+    DeferredDrawBindings bindings = {};
+    countDeferredDrawInternal(elapsedUs, indexed, count, 0, 0, &bindings);
+}
+void noteDeferredCreationForTest(bool texture, unsigned elapsedUs) {
+    noteDeferredCreationInternal(
+        texture ? DeferredCreationTexture : DeferredCreationBuffer,
+        (const void*)1, elapsedUs, 1, 2, 3, 4, 5, 6);
+}
+void resetOffMainTexturesForTest() {
+    memset(g_offMainTextures, 0, sizeof(g_offMainTextures));
+    InterlockedExchange(&g_offMainTextureSequence, 0);
+}
+bool latestOffMainTextureForTest(
+    unsigned* startFrame, unsigned* finishFrame, unsigned* elapsedUs,
+    unsigned* threadId, unsigned* width, unsigned* height,
+    unsigned* mipLevels, bool* hasInitialData) {
+    const LONG sequence = InterlockedCompareExchange(
+        &g_offMainTextureSequence, 0, 0);
+    if (sequence <= 0) return false;
+    const OffMainTextureRecord& record =
+        g_offMainTextures[(sequence - 1) % kOffMainTextureSlots];
+    if (InterlockedCompareExchange(
+            const_cast<volatile LONG*>(&record.publishedSequence), 0, 0)
+            != sequence)
+        return false;
+    if (startFrame) *startFrame = record.startFrame;
+    if (finishFrame) *finishFrame = record.finishFrame;
+    if (elapsedUs) *elapsedUs = record.elapsedUs;
+    if (threadId) *threadId = record.threadId;
+    if (width) *width = record.width;
+    if (height) *height = record.height;
+    if (mipLevels) *mipLevels = record.mipLevels;
+    if (hasInitialData) *hasInitialData = record.hasInitialData;
+    return true;
+}
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state) {
     return shouldDeferShadowAlpha(style, state);
 }
@@ -6756,7 +10344,8 @@ void outsideDirResourceRememberForTest(unsigned frame) {
     rememberOutsideDirResource(nullptr, nullptr, "test.msh", true, 0,
                                ShadowResourceMesh, OutsideDirResourceRender,
                                frame, 1000, nullptr, TerrainParameterNone, -1,
-                               TerrainPreloadSnapshot());
+                               TerrainPreloadSnapshot(), DeferredLocation(),
+                               ReflectionLocation());
 }
 unsigned outsideDirResourceWindowForTest(unsigned markerFrame,
                                          bool* truncated) {

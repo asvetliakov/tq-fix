@@ -81,6 +81,9 @@ shadow_transition_reuse=0
 shadow_defer_cold_alpha=0
 shadow_defer_cold_actor_pose=0
 terrain_preload_layers=0
+reflection_defer_admission_mesh=0
+reflection_defer_admission_all=0
+secondary_pass_admission_budget=0
 
 [debug]
 frame_overlay=0
@@ -267,6 +270,37 @@ It does not omit colour or shadows, change culling, or replace resource
 loading; it moves the texture queue request from first colour use to the point
 where those Resources first exist.
 
+`reflection_defer_admission_mesh=1` stages one exact first-use reflection
+class. When a water-reflection `BuildScene` creates at least 32 D3D buffers,
+resident `GraphicsMeshInstance` draws are omitted only from its immediately
+following `RenderLightStyle`. The normal colour pass later in the same
+recursive branch remains stock, and mesh reflection returns automatically on
+the next frame. Terrain reflection, ordinary reflection frames, shadows,
+culling, and resource loading are unchanged. The switch defaults to `0`,
+works with the performance probe off, and installs no trace group by itself.
+
+`reflection_defer_admission_all=1` uses the same transition boundary but
+omits the entire immediately following reflection `RenderLightStyle` once.
+The reflection target can retain its preceding contents for that frame;
+terrain and mesh reflection both return on the next frame. Directional
+shadows, the main colour pass, culling, and loading are unchanged. This switch
+also defaults to `0`, works with the performance probe off, and installs no
+trace group by itself.
+
+`secondary_pass_admission_budget=N` progressively admits first-use objects to
+reflection and directional-shadow drawing. The two secondary consumers share
+one budget: an object admitted by reflection does not spend a second slot when
+directional shadow sees it. The first `N` previously unseen identities in a
+presented frame render normally; identity `N+1` proves an actual backlog and
+self-arms deferral without requiring a reflection-buffer or shadow-region
+signal. Deferred renderables still run their ordinary Resource and material
+preparation, but their `Draw`/`DrawIndexed` calls wait for a later frame's
+slot, so postponed GPU first use does not return as one lump on the next
+consumer. Normal colour rendering remains unchanged. `0` is stock/off;
+accepted positive values are `1` through `64`. The switch works with the
+performance probe off, requests only its two required D3D draw hooks, and
+installs no trace group by itself.
+
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and
 `shadows=original`, which restores every shadow path at once. The in-game AA
@@ -392,7 +426,8 @@ resource creation, the grass rewrite and crossing draw, SMAA, bloom, and the
 overlay itself), what the frame was asked to do (draw calls, maps, grass fills
 and rotations, adoptions and staged readbacks, uploaded kilobytes, shadow binds
 and shadow-fit steps), and what the GPU spent on the directional shadow pass,
-the point shadow passes, grass, SMAA and bloom. GPU regions are timed with
+the point shadow passes, grass, SMAA, bloom, and six coarse children of the
+DX11 deferred renderer. GPU regions are timed with
 timestamp queries read back several frames later without ever flushing, so
 nothing waits on the GPU.
 
@@ -406,7 +441,7 @@ frames slower than 20 ms are written, each carrying a final `unusual` column
 naming how far every field sat from its own median over the preceding sixty
 frames -- which is the part that names the cause; the file grows by a few
 hundred bytes per hitch, so this mode is cheap enough to leave on.
-`performance_trace=full` writes every frame instead, about 50 KB a second with
+`performance_trace=full` writes every frame instead, tens of KB a second with
 the current columns, for a measurement session. At `0`, the default, nothing
 is measured, allocated, or written; what remains compiled in is one branch per
 instrumented call site.
@@ -508,6 +543,27 @@ runtime-owner preload for that same `TerrainType*`. The static identities and
 the wider shadow/resource chain are indexed in
 `research/streaming/disassembly-targets.md`.
 
+The deferred-render diagnostic adds six ordered `engine_deferred_*` CPU/draw classes:
+`geometry`, `shadows`, `lighting`, `resolve`, `late_scene`, and `post`. Each
+has a whole-child-call count and `_us` duration, an overlapping `*_draw_us`
+total for the game's `Draw` / `DrawIndexed` calls inside that class, and a
+matching invocation/site detail. The CPU and draw durations end in `_us`
+because they are engine time. `engine_deferred_i1_*` and `_i2_*` split the two
+`GraphicsDeferredRendererX::Render` invocations; setup and scene each expose
+call, CPU, draw, Resource-load, texture-creation, and buffer-creation fields,
+while `other` carries creation/load work elsewhere in that owner. The four
+`gpu_deferred_i{1,2}_geometry_{setup,scene}_ms` columns use one non-blocking
+pair around each exact geometry child. They are game time and are not charged
+to the mod. The earlier six group-wide GPU spans were removed after Run 70
+showed that each overlapped both owner invocations.
+
+On F12, this group also reports a bounded identity sample for geometry-heavy
+frames in the preceding 120 frames: at most eight frames, twelve slow draws
+per frame, and 32 same-frame texture creations. Draw records include their
+owner/site, arguments, bound vertex/index buffers, shaders, and first eight
+pixel resources. The bindings are maintained by D3D setter hooks; no state
+getter, per-draw GPU query, or extra draw clock read is issued.
+
 `engine_shadow_mesh_cold` / `_us` is narrower and overlapping: a state-0 mesh at
 `GraphicsMeshInstance::GetNumShadowRenderPasses`, before that caster enters the
 directional draw list. `engine_shadow_material_tex` / `_us` is another
@@ -605,7 +661,39 @@ that misbehaves can be narrowed without a rebuild. `16384` brackets the direct
 directional-shadow build; combine it with `2` to populate both the nested-load
 totals and their loaded-state/queue lifecycle split. `32768` enables the
 atomic `TerrainType`, runtime `TerrainRT`, both color-terrain render classes,
-and DX11 ground diagnostic group.
+and DX11 ground diagnostic group. `65536` partitions the direct children of
+`GraphicsDeferredRendererX::Render` into the six coarse CPU/draw classes and
+the owner-exact geometry/resource/D3D identity trace above. `131072` brackets
+the unique reflection-manager call in each recursive DX11 portal/region
+branch and the first two water-plane forward renders inside each of the first
+two manager invocations. It also splits each plane's unique `BuildScene` and
+`RenderLightStyle` children and correlates newly created main-thread vertex
+and index buffers across exact reflection-plane, directional-shadow, and
+deferred-owner scopes for 120 frames. It reuses the existing Resource,
+game-draw, D3D-creation clock, and IA setter snapshot; it adds no per-draw
+clock, query, or state getter. Non-blocking GPU intervals cover the manager,
+plane, and two children. Explicit overflow/eviction counters and the bounded
+F12 report prevent a third branch, plane, or lost recent identity from being
+silently folded into the named classes. Selecting `131072` therefore installs
+the directional and deferred scope brackets as dependencies, while still
+changing no rendering choice.
+
+When the terrain (`32768`) and reflection (`131072`) groups are selected with
+`draw_timing=1`—as they are under `engine_trace=1`—the trace can arm one sparse
+reflection-only GPU subdivision. An exact second-manager/first-plane
+`BuildScene` lasting at least 2 ms selects the following whole
+`RenderLightStyle`. `gpu_chunk_reflection_00` through `_15` continuously cover
+draws 1--320 in 20-draw intervals, including work issued between adjacent
+renderables. F12 logs each
+interval's draw/index/element totals and first/last tracked shader, SRV0, VB0,
+and IB identities. It also logs a bounded list of exact `TerrainPlug`,
+`TerrainBlock`, and `GraphicsMeshInstance::RenderPass` calls overlapping that
+draw window, with their class, object, draw range, CPU duration, and nested
+Resource/texture/buffer creation totals. The first two are existing exact
+unexported terrain hooks; the mesh call is its exact exported virtual override.
+Directional shadow opens no chunk query and receives no executor patch.
+Ordinary frames open none of these queries; collision, draw overflow, and
+renderable-call overflow are explicit.
 
 `timer_period_ms` is an experiment attached to that trace rather than a
 setting to leave on. Three quarters of the slow message retrievals measured on

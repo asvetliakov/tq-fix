@@ -30,11 +30,23 @@ PROBE_CPP = os.environ.get("TQ_VERIFY_PROBE_CPP") or os.path.join(
     HERE, "..", "..", "..", "src", "probe.cpp")
 PROBE_H = os.environ.get("TQ_VERIFY_PROBE_H") or os.path.join(
     HERE, "..", "..", "..", "src", "probe.h")
+ENGINE_PROBE_H = os.environ.get("TQ_VERIFY_ENGINE_PROBE_H") or os.path.join(
+    HERE, "..", "..", "..", "src", "engine_probe.h")
+VISUAL_CPP = os.environ.get("TQ_VERIFY_VISUAL_CPP") or os.path.join(
+    HERE, "..", "..", "..", "src", "visual.cpp")
+SELFTEST_CPP = os.environ.get("TQ_VERIFY_SELFTEST_CPP") or os.path.join(
+    HERE, "..", "..", "..", "test", "selftest.cpp")
+FLOW_DOC = os.environ.get("TQ_VERIFY_FLOW_DOC") or os.path.join(
+    HERE, "..", "disassembly-targets.md")
 
 src = open(SRC).read()
 cache_src = open(CACHE_H).read()
 probe_src = open(PROBE_CPP).read()
 probe_h = open(PROBE_H).read()
+engine_h = open(ENGINE_PROBE_H).read()
+visual_src = open(VISUAL_CPP).read()
+selftest_src = open(SELFTEST_CPP).read()
+flow_doc = open(FLOW_DOC).read()
 flat = re.sub(r'"\s*\n\s*"', '', src)          # joined string literals
 failures = []
 
@@ -500,7 +512,7 @@ def check_terrain_diagnostics(engine):
 
     install_begin = src.find(
         "bool installTerrain(HMODULE engine, bool traceTerrain,"
-        " bool preloadLayers)")
+        " bool preloadLayers,\n                    bool secondaryPassAdmission)")
     install_end = src.find("\n}\n\n// Brackets the renderer", install_begin)
     install = src[install_begin:install_end]
     ok(install_begin >= 0 and install_end > install_begin
@@ -521,6 +533,7 @@ def check_terrain_diagnostics(engine):
        and install.count("tq::detour::patchCall(") == 1
        and "const bool traceOk = !traceTerrain" in install
        and "const bool preloadOk = !preloadLayers" in install
+       and "const bool secondaryOk = !secondaryPassAdmission" in install
        and "&& loadTexturesPatched && g_terrainPlugRender"
            " && g_terrainBlockRender" in install
        and install.count("tq::detour::detach(") == 9
@@ -528,7 +541,8 @@ def check_terrain_diagnostics(engine):
        "nine detours and one exact call patch install and roll back atomically")
     ok(const("kGroupTerrain") == 0x8000
        and "const bool traceTerrain = wants(kGroupTerrain);" in src
-       and "installTerrain(engine, traceTerrain, terrainPreload);" in src
+       and "installTerrain(engine, traceTerrain, terrainPreload,\n"
+           "                                      secondaryAdmission);" in src
        and "bool wants(unsigned group)" in src
        and "if (!g_tracing) return false;" in src,
        "terrain diagnostics occupy only trace-mask group 32768")
@@ -565,7 +579,7 @@ def check_terrain_diagnostics(engine):
        and load_textures_dest == const("kTerrainLoadTexturesRva"),
        "runtime LoadRenderData's exact call reaches"
        " TerrainType::LoadTextures")
-    ok("patchCall(\n            g_terrainRtLoadTexturesPatch" in install
+    ok("tq::detour::patchCall(\n            g_terrainRtLoadTexturesPatch" in install
        and "kTerrainRtLoadTexturesCallOffset, loadTextures" in install,
        "the existing LoadTextures call is patched instead of its code entry")
 
@@ -796,7 +810,7 @@ def check_terrain_diagnostics(engine):
        and "traceTerrain || terrainPreload" in public_install,
        "terrain_preload_layers defaults off and independently reaches"
        " install()")
-    ok("g_terrainPreloadEntry = preloadVerified" in install
+    ok("g_terrainPreloadEntry = needLoadTextures && preloadVerified" in install
        and "kTerrainPreloadRelocs, 1" in install
        and "g_terrainPreloadLayersActive = ok && preloadLayers;" in install,
        "behavior requires the verified exported TerrainType::PreLoad entry"
@@ -893,10 +907,10 @@ def check_terrain_diagnostics(engine):
        "engine CPU durations use _us and no duplicate _ms field")
     csv_line = re.search(r"const unsigned kCsvLineBytes\s*=\s*(\d+);",
                          probe_src)
-    ok(csv_line and int(csv_line.group(1)) == 16384
+    ok(csv_line and int(csv_line.group(1)) == 32768
        and probe_src.count("char line[kCsvLineBytes];") == 2
        and "char line[8192];" not in probe_src,
-       "the terrain-trace CSV header and rows share a 16 KiB audited bound")
+       "the trace CSV header and rows share a 32 KiB audited bound")
 
 
 def check_outside_directional_resources():
@@ -1904,6 +1918,1744 @@ def check_shadow_alpha_defer(engine):
        "global call patch exposes context only on the main directional path")
 
 
+def check_play_render_flow(engine):
+    """Static authority for the interpreted DX11 play-render flow.
+
+    These are documentation targets, not patch sites.  Keeping independent
+    16--24-byte windows here prevents a stale decompiler name or prose address
+    from silently becoming the authority for the next trace.
+    """
+    print("\nComplete DX11 play-render flow documentation targets")
+    sites = [
+        (0x133240, "Display::Render",
+         "56578bf933f68b0f8b47042bc1c1f80285c07428538b5c24"),
+        (0x1584c0, "GraphicsEngine::Update",
+         "558bec83e4c06aff689988291064a1000000005083ec6853"),
+        (0x182230, "GraphicsPortalRenderer::Render",
+         "558bec83e4f8f30f101548962f1083ec0c0f57c9568bf18b"),
+        (0x17e2c0, "portal recursion",
+         "558bec83e4f86aff68fb9c291064a1000000005081ec7c04"),
+        (0x17e579, "DX11 branch call",
+         "8b4c2428f30f110424565750e8460500008bf089742414"),
+        (0x17ead0, "DX11 region branch",
+         "558bec83e4f06aff683f9d291064a1000000005051b8581d"),
+        (0x17f2c6, "reflection-manager call",
+         "8d4c2458660fd6842444010000e8987f00000186f8000000"),
+        (0x187270, "GraphicsReflectionManager::RenderReflections",
+         "558bec83e4f883ec0c535657ff750c8bf189742414e876f7"),
+        (0x1872b0, "per-reflection-plane call",
+         "ff750c8b0bff750803ce51e810efffff83c6484f"),
+        (0x1861d0, "reflection forward-render helper",
+         "6aff68cb9d291064a1000000005081ec480f0000a100f036"),
+        (0x1864f0, "reflection BuildScene call",
+         "66c78424200e00000000898424e00d0000e8ca74ffff"),
+        (0x18693b, "reflection RenderLightStyle call",
+         "6a0068c8b34110ff70188d8c24d004000056e8ee30ffff"),
+        (0x179a40, "GraphicsForwardRenderer::RenderLightStyle",
+         "558bec83e4f881eca0000000a100f0361033c48984249c00"),
+        (0x179b8f, "forward scene-list wrapper call",
+         "6a0068204e00006affff742444ff74241857e8fa0e0000"),
+        (0x17aaa0, "forward scene-list wrapper",
+         "6aff68329b291064a1000000005083ec1057a100f0361033"),
+        (0x17ab04, "sorted scene-list executor call",
+         "516a00ff7424348d44241850ff7424388bcfe8d5d80000"),
+        (0x1883f0, "sorted scene-list executor",
+         "6aff683f9f291064a1000000005083ec3053555657a100f0"),
+        (0x1885a2, "renderable virtual dispatch",
+         "8b02ff7424588b08ff7424648b1150ff52288b44"),
+        (0x18ce70, "GraphicsShadowMapRenderer::Render",
+         "558bec83e4f86aff68e9a3291064a1000000005083ec2853"),
+        (0x18d04f, "DX11 shadow-record builder call",
+         "e81cf8ffff518d44241450578bcee8bef4ffffc6"),
+        (0x18c870, "DX11 shadow-record builder loop",
+         "81eca8000000a100f0361033c4898424a4000000538b9c24"),
+        (0x18d05d, "DX11 shadow-record executor call",
+         "e8bef4ffffc6442440008b44241085c0740a50ff"),
+        (0x18c520, "DX11 shadow-record executor",
+         "83ec10538b5c241c558b5304894c24108b0b5657c644241c"),
+        (0x18c613, "shadow renderable virtual dispatch",
+         "ff56288b4c241ceb048b5c242881c58800000049"),
+    ]
+    for rva, label, expected_hex in sites:
+        expected = bytes.fromhex(expected_hex)
+        actual = engine.read(engine.base + rva, len(expected))
+        ok(16 <= len(expected) <= 24 and actual == expected,
+           "%s @ Engine+%#x verifies %d bytes"
+           % (label, rva, len(expected)))
+        row_key = "| `0x%x` |" % rva
+        ok(row_key in flow_doc and label in flow_doc,
+           "%s RVA is present in disassembly-targets.md" % label)
+
+    calls = [
+        (0x17e585, 0x17ead0, "portal recursion -> DX11 region branch"),
+        (0x17f2d3, 0x187270, "DX11 branch -> reflection manager"),
+        (0x1872bb, 0x1861d0, "reflection manager -> per-plane renderer"),
+        (0x186501, 0x17d9d0, "reflection renderer -> BuildScene"),
+        (0x18694d, 0x179a40, "reflection renderer -> RenderLightStyle"),
+        (0x179ba1, 0x17aaa0, "RenderLightStyle -> scene-list wrapper"),
+        (0x17ab16, 0x1883f0, "wrapper -> sorted scene-list executor"),
+        (0x17fc9b, 0x166130, "DX11 branch -> deferred renderer"),
+        (0x18d04f, 0x18c870,
+         "DX11 shadow renderer -> shadow-record builder"),
+        (0x18d05d, 0x18c520,
+         "DX11 shadow renderer -> shadow-record executor"),
+    ]
+    for call_rva, target_rva, label in calls:
+        body = engine.read(engine.base + call_rva, 5)
+        target = call_rva + 5 + struct.unpack_from("<i", body, 1)[0]
+        ok(body[0] == 0xe8 and target == target_rva,
+           "%s exact E8 resolves to Engine+%#x" % (label, target_rva))
+
+    dispatch = engine.read(engine.base + 0x1885b1, 3)
+    ok(dispatch == b"\xff\x52\x28",
+       "sorted scene-list executor dispatches renderable vtable slot +0x28")
+    shadow_dispatch = engine.read(engine.base + 0x18c613, 3)
+    ok(shadow_dispatch == b"\xff\x56\x28",
+       "DX11 shadow-record executor dispatches renderable vtable slot +0x28")
+
+
+def check_reflections(engine):
+    """Run 73's exact recursive-branch reflection attribution."""
+    print("\nDX11 recursive-branch reflection attribution")
+    window(engine, "kReflectionManagerBytes", "kReflectionManagerBytes",
+           const("kReflectionManagerRva"), None)
+    manager = table("kReflectionManagerBytes")
+    ok(16 <= len(manager) <= 24,
+       "reflection manager entry verifies 16-24 bytes")
+    ok(engine.exports().get(cstr("kReflectionManagerName"))
+       == const("kReflectionManagerRva"),
+       "GraphicsReflectionManager::RenderReflections export resolves")
+
+    window(engine, "kReflectionManagerCallWindowBytes",
+           "kReflectionManagerCallWindowBytes",
+           const("kReflectionManagerCallWindowRva"), None)
+    manager_call = table("kReflectionManagerCallWindowBytes")
+    manager_offset = const("kReflectionManagerCallOffset")
+    manager_site = const("kReflectionManagerCallWindowRva") + manager_offset
+    manager_target = manager_site + 5 + struct.unpack_from(
+        "<i", bytes(manager_call), manager_offset + 1)[0]
+    ok(16 <= len(manager_call) <= 24
+       and manager_call[manager_offset] == 0xe8
+       and manager_target == const("kReflectionManagerRva"),
+       "DX11 branch reflection E8 resolves to the exported manager")
+
+    window(engine, "kReflectionManagerTailBytes",
+           "kReflectionManagerTailBytes",
+           const("kReflectionManagerTailRva"), None)
+    manager_tail = table("kReflectionManagerTailBytes")
+    ok(len(manager_tail) == 16
+       and manager_tail[-3:] == [0xc2, 0x08, 0x00],
+       "reflection manager tail proves two explicit arguments")
+
+    window(engine, "kReflectionPlaneBytes", "kReflectionPlaneBytes",
+           const("kReflectionPlaneRva"), "kReflectionPlaneRelocs")
+    plane = table("kReflectionPlaneBytes")
+    plane_relocs = relocs("kReflectionPlaneRelocs")
+    ok(16 <= len(plane) <= 24 and plane_relocs == [(3, 0x299dcb)]
+       and plane[3:7] == [0, 0, 0, 0],
+       "reflection-plane helper verifies 16-24 bytes and its relocation")
+
+    window(engine, "kReflectionPlaneCallWindowBytes",
+           "kReflectionPlaneCallWindowBytes",
+           const("kReflectionPlaneCallWindowRva"), None)
+    plane_call = table("kReflectionPlaneCallWindowBytes")
+    plane_offset = const("kReflectionPlaneCallOffset")
+    plane_site = const("kReflectionPlaneCallWindowRva") + plane_offset
+    plane_target = plane_site + 5 + struct.unpack_from(
+        "<i", bytes(plane_call), plane_offset + 1)[0]
+    ok(16 <= len(plane_call) <= 24
+       and plane_call[plane_offset] == 0xe8
+       and plane_target == const("kReflectionPlaneRva"),
+       "manager's per-plane E8 resolves to the forward-render helper")
+
+    window(engine, "kReflectionPlaneTailBytes", "kReflectionPlaneTailBytes",
+           const("kReflectionPlaneTailRva"), None)
+    plane_tail = table("kReflectionPlaneTailBytes")
+    ok(len(plane_tail) == 24
+       and plane_tail[20:23] == [0xc2, 0x0c, 0x00],
+       "reflection-plane tail proves three explicit arguments")
+
+    for prefix, label, args, entry_relocs, call_relocs in [
+            ("kReflectionBuildScene", "reflection BuildScene", 1,
+             [(9, 0x299ca0)], []),
+            ("kReflectionRenderLight", "reflection RenderLightStyle", 4,
+             [(13, 0x36f000)], [(3, 0x41b3c8)])]:
+        window(engine, prefix + "Bytes", prefix + "Bytes",
+               const(prefix + "Rva"), prefix + "Relocs")
+        entry = table(prefix + "Bytes")
+        ok(16 <= len(entry) <= 24 and relocs(prefix + "Relocs") == entry_relocs
+           and all(entry[off:off + 4] == [0, 0, 0, 0]
+                   for off, _ in entry_relocs),
+           "%s entry verifies 16-24 bytes and exact relocations" % label)
+        ok(engine.exports().get(cstr(prefix + "Name")) == const(prefix + "Rva"),
+           "%s export resolves to its recorded RVA" % label)
+        ok(("| `0x%x` |" % const(prefix + "Rva")) in flow_doc
+           and ("`0x%x`" % const(prefix + "TailRva")) in flow_doc,
+           "%s target and ABI tail are documented" % label)
+        window(engine, prefix + "CallWindowBytes", prefix + "CallWindowBytes",
+               const(prefix + "CallWindowRva"),
+               prefix + "CallRelocs" if call_relocs else None)
+        call = table(prefix + "CallWindowBytes")
+        offset = const(prefix + "CallOffset")
+        site = const(prefix + "CallWindowRva") + offset
+        target = site + 5 + struct.unpack_from("<i", bytes(call), offset + 1)[0]
+        ok(16 <= len(call) <= 24 and call[offset] == 0xe8
+           and target == const(prefix + "Rva")
+           and (not call_relocs or relocs(prefix + "CallRelocs") == call_relocs)
+           and all(call[off:off + 4] == [0, 0, 0, 0]
+                   for off, _ in call_relocs),
+           "%s exact E8 and call-window relocations verify" % label)
+        window(engine, prefix + "TailBytes", prefix + "TailBytes",
+               const(prefix + "TailRva"), None)
+        tail = table(prefix + "TailBytes")
+        cleanup = bytes([0xc2, args * 4, 0])
+        ok(16 <= len(tail) <= 24 and bytes(tail).endswith(cleanup),
+           "%s tail proves %u explicit argument(s)" % (label, args))
+
+    install_begin = src.find(
+        "bool installReflections(HMODULE engine, bool trace,"
+        " bool deferAdmissionMesh,\n                        bool deferAdmissionAll,\n"
+        "                        bool secondaryPassAdmission)")
+    install_end = src.find("\n}\n\nbool installTerrain", install_begin)
+    install = src[install_begin:install_end]
+    first_patch = install.find("tq::detour::patchCall(")
+    ok(install_begin >= 0 and install_end > install_begin
+       and first_patch > install.find("const bool verified")
+       and all(name in install[:first_patch] for name in [
+           "kReflectionManagerBytes", "kReflectionManagerCallWindowBytes",
+           "kReflectionManagerTailBytes", "kReflectionPlaneBytes",
+           "kReflectionPlaneCallWindowBytes", "kReflectionPlaneTailBytes",
+           "kReflectionBuildSceneBytes",
+           "kReflectionBuildSceneCallWindowBytes",
+           "kReflectionBuildSceneTailBytes",
+           "kReflectionRenderLightBytes",
+           "kReflectionRenderLightCallWindowBytes",
+           "kReflectionRenderLightTailBytes"]),
+       "all reflection entries, call windows, and ABI tails verify before writes")
+    ok("patchCall(\n        g_reflectionManagerPatch" in install
+       and "patchCall(\n        g_reflectionPlanePatch" in install
+       and "patchCall(\n        g_reflectionBuildScenePatch" in install
+       and "patchCall(\n        g_reflectionRenderLightPatch" in install
+       and "kReflectionManagerCallOffset, manager,\n"
+           "        (const void*)&hookReflectionManager" in install
+       and "kReflectionPlaneCallOffset, base + kReflectionPlaneRva,\n"
+           "        (const void*)&hookReflectionPlane" in install
+       and "restoreCall(g_reflectionManagerPatch)" in install
+       and "restoreCall(g_reflectionBuildScenePatch)" in install
+       and "restoreCall(g_reflectionRenderLightPatch)" in install
+       and "g_reflectionChildTracing = trace;" in install
+       and "g_reflectionTracing = trace;" in install
+       and "g_reflectionDeferAdmissionMeshActive = deferAdmissionMesh;"
+           in install
+       and "g_reflectionDeferAdmissionAllActive = deferAdmissionAll;"
+           in install
+       and "g_secondaryPassAdmissionActive = secondaryPassAdmission;"
+           in install,
+       "manager, plane, both children, and mesh use verified atomic patches")
+
+    expected_names = [
+        "engine_reflection_manager", "engine_reflection_manager_us",
+        "engine_reflection_manager_draw_us",
+        "engine_reflection_manager_res_load",
+        "engine_reflection_manager_res_load_us",
+        "engine_reflection_manager_tex_create",
+        "engine_reflection_manager_tex_create_us",
+        "engine_reflection_manager_buf_create",
+        "engine_reflection_manager_buf_create_us",
+        "engine_reflection_manager_overflow",
+        "engine_reflection_i1", "engine_reflection_i1_us",
+        "engine_reflection_i1_draw_us",
+        "engine_reflection_i2", "engine_reflection_i2_us",
+        "engine_reflection_i2_draw_us", "engine_reflection_plane_overflow",
+    ]
+    for prefix in ["i1_p1", "i1_p2", "i2_p1", "i2_p2"]:
+        expected_names.extend([
+            "engine_reflection_" + prefix,
+            "engine_reflection_" + prefix + "_us",
+            "engine_reflection_" + prefix + "_draw_us",
+            "engine_reflection_" + prefix + "_res_load",
+            "engine_reflection_" + prefix + "_res_load_us",
+            "engine_reflection_" + prefix + "_tex_create",
+            "engine_reflection_" + prefix + "_tex_create_us",
+            "engine_reflection_" + prefix + "_buf_create",
+            "engine_reflection_" + prefix + "_buf_create_us",
+            "engine_reflection_" + prefix + "_build_scene",
+            "engine_reflection_" + prefix + "_build_scene_us",
+            "engine_reflection_" + prefix + "_render_light",
+            "engine_reflection_" + prefix + "_render_light_us",
+        ])
+    expected_names.extend([
+        "engine_reflection_admission_deferred",
+        "engine_reflection_admission_mesh_deferred",
+        "engine_reflection_admission_all_deferred",
+    ])
+    actual_names = re.findall(r'"(engine_reflection_[^"]+)"', probe_src)
+    ok(actual_names == expected_names,
+       "all 72 reflection counters have exact ordered CSV columns")
+    manager_header = re.search(
+        r"CounterEngineReflectionManager,(.*?)#define TQ_REFLECTION_CELL_COUNTERS",
+        probe_h, re.S)
+    actual_manager_enums = (["CounterEngineReflectionManager"]
+        + re.findall(r"\b(CounterEngineReflection\w+)\b",
+                     manager_header.group(1))) if manager_header else []
+    expected_manager_enums = [
+        "CounterEngineReflectionManager",
+        "CounterEngineReflectionManagerUs",
+        "CounterEngineReflectionManagerDrawUs",
+        "CounterEngineReflectionManagerResLoad",
+        "CounterEngineReflectionManagerResLoadUs",
+        "CounterEngineReflectionManagerTexCreate",
+        "CounterEngineReflectionManagerTexCreateUs",
+        "CounterEngineReflectionManagerBufCreate",
+        "CounterEngineReflectionManagerBufCreateUs",
+        "CounterEngineReflectionManagerOverflow",
+        "CounterEngineReflectionI1", "CounterEngineReflectionI1Us",
+        "CounterEngineReflectionI1DrawUs",
+        "CounterEngineReflectionI2", "CounterEngineReflectionI2Us",
+        "CounterEngineReflectionI2DrawUs",
+        "CounterEngineReflectionPlaneOverflow"]
+    ok(actual_manager_enums == expected_manager_enums,
+       "reflection manager counter enum order is exact")
+    header_cell_macro = re.search(
+        r"#define TQ_REFLECTION_CELL_COUNTERS\(prefix\)(.*?)\n    TQ_REFLECTION_CELL_COUNTERS\(I1P1\)",
+        probe_h, re.S)
+    actual_header_cell_fields = re.findall(
+        r"CounterEngineReflection##prefix(?:##\w+)*\b",
+        header_cell_macro.group(1)) if header_cell_macro else []
+    expected_header_cell_fields = [
+        "CounterEngineReflection##prefix",
+        "CounterEngineReflection##prefix##Us",
+        "CounterEngineReflection##prefix##DrawUs",
+        "CounterEngineReflection##prefix##ResLoad",
+        "CounterEngineReflection##prefix##ResLoadUs",
+        "CounterEngineReflection##prefix##TexCreate",
+        "CounterEngineReflection##prefix##TexCreateUs",
+        "CounterEngineReflection##prefix##BufCreate",
+        "CounterEngineReflection##prefix##BufCreateUs",
+        "CounterEngineReflection##prefix##BuildScene",
+        "CounterEngineReflection##prefix##BuildSceneUs",
+        "CounterEngineReflection##prefix##RenderLight",
+        "CounterEngineReflection##prefix##RenderLightUs"]
+    ok(actual_header_cell_fields == expected_header_cell_fields
+       and re.findall(r"TQ_REFLECTION_CELL_COUNTERS\((I\dP\d)\)", probe_h)
+           == ["I1P1", "I1P2", "I2P1", "I2P2"],
+       "reflection cell counter enum expansion is exact")
+    reflection_durations = [name for name in actual_names
+                            if name.endswith("_us")]
+    ok(len(reflection_durations) == 37
+       and all(name.endswith("_us") for name in reflection_durations),
+       "all reflection engine durations are integer `_us` counters")
+    expected_gpu_names = [
+        "gpu_reflection_i1", "gpu_reflection_i2",
+        "gpu_reflection_i1_p1", "gpu_reflection_i1_p2",
+        "gpu_reflection_i2_p1", "gpu_reflection_i2_p2"]
+    for prefix in ["i1_p1", "i1_p2", "i2_p1", "i2_p2"]:
+        expected_gpu_names.extend([
+            "gpu_reflection_" + prefix + "_build_scene",
+            "gpu_reflection_" + prefix + "_render_light"])
+    actual_gpu_names = re.findall(r'"(gpu_reflection_[^"]+)"', probe_src)
+    ok(actual_gpu_names == expected_gpu_names,
+       "manager, plane, and child GPU phases all have exact CSV columns")
+    gpu_header = re.search(r"enum GpuPhase \{(.*?)GpuPhaseCount", probe_h,
+                           re.S)
+    actual_gpu_enums = re.findall(r"\b(GpuReflection\w+)\b",
+                                  gpu_header.group(1)) \
+        if gpu_header else []
+    ok(actual_gpu_enums == [
+           "GpuReflectionI1", "GpuReflectionI2",
+           "GpuReflectionI1P1", "GpuReflectionI1P2",
+           "GpuReflectionI2P1", "GpuReflectionI2P2",
+           "GpuReflectionI1P1BuildScene", "GpuReflectionI1P1RenderLight",
+           "GpuReflectionI1P2BuildScene", "GpuReflectionI1P2RenderLight",
+           "GpuReflectionI2P1BuildScene", "GpuReflectionI2P1RenderLight",
+           "GpuReflectionI2P2BuildScene", "GpuReflectionI2P2RenderLight"],
+       "reflection GPU phase enum order is exact")
+    cell_macro = re.search(
+        r"#define TQ_REFLECTION_CELL_ROW\(prefix\)(.*?)\nconst ",
+        src, re.S)
+    expected_cell_fields = [
+        "CounterEngineReflection##prefix",
+        "CounterEngineReflection##prefix##Us",
+        "CounterEngineReflection##prefix##DrawUs",
+        "CounterEngineReflection##prefix##ResLoad",
+        "CounterEngineReflection##prefix##ResLoadUs",
+        "CounterEngineReflection##prefix##TexCreate",
+        "CounterEngineReflection##prefix##TexCreateUs",
+        "CounterEngineReflection##prefix##BufCreate",
+        "CounterEngineReflection##prefix##BufCreateUs",
+        "CounterEngineReflection##prefix##BuildScene",
+        "CounterEngineReflection##prefix##BuildSceneUs",
+        "CounterEngineReflection##prefix##RenderLight",
+        "CounterEngineReflection##prefix##RenderLightUs",
+    ]
+    actual_cell_fields = re.findall(
+        r"CounterEngineReflection##prefix(?:##\w+)*\b",
+        cell_macro.group(1)) if cell_macro else []
+    ok(actual_cell_fields == expected_cell_fields
+       and all(("TQ_REFLECTION_CELL_ROW(%s)" % prefix) in src
+               for prefix in ["I1P1", "I1P2", "I2P1", "I2P2"]),
+       "four reflection cells map all thirteen count/duration classes")
+    for table_name, expected in [
+            ("kReflectionManagerCountCounters",
+             ["CounterCount", "CounterEngineReflectionI1",
+              "CounterEngineReflectionI2"]),
+            ("kReflectionManagerDurationCounters",
+             ["CounterCount", "CounterEngineReflectionI1Us",
+              "CounterEngineReflectionI2Us"]),
+            ("kReflectionManagerDrawCounters",
+             ["CounterCount", "CounterEngineReflectionI1DrawUs",
+              "CounterEngineReflectionI2DrawUs"]),
+            ("kReflectionManagerGpuPhases",
+             ["GpuPhaseCount", "GpuReflectionI1", "GpuReflectionI2"]),
+            ("kReflectionCellGpuPhases",
+             ["GpuPhaseCount", "GpuReflectionI1P1", "GpuReflectionI1P2",
+              "GpuReflectionI2P1", "GpuReflectionI2P2"])]:
+        match = re.search(r"const tq::probe::\w+ %s\[\] = \{(.*?)\};"
+                          % table_name, src, re.S)
+        actual = re.findall(r"tq::probe::(\w+)", match.group(1)) \
+            if match else []
+        ok(actual == expected, "%s preserves exact enum order" % table_name)
+    child_gpu = re.search(
+        r"const tq::probe::GpuPhase kReflectionChildGpuPhases"
+        r"\[\]\[ReflectionChildCount\] = \{(.*?)\n\};", src, re.S)
+    child_gpu_symbols = re.findall(r"tq::probe::(Gpu\w+)",
+                                   child_gpu.group(1)) if child_gpu else []
+    ok(child_gpu_symbols == [
+           "GpuPhaseCount", "GpuPhaseCount",
+           "GpuReflectionI1P1BuildScene", "GpuReflectionI1P1RenderLight",
+           "GpuReflectionI1P2BuildScene", "GpuReflectionI1P2RenderLight",
+           "GpuReflectionI2P1BuildScene", "GpuReflectionI2P1RenderLight",
+           "GpuReflectionI2P2BuildScene", "GpuReflectionI2P2RenderLight"],
+       "reflection child GPU phases preserve exact cell/child order")
+    ok("kGroupReflections = 0x20000" in src
+       and "if (traceReflections || reflectionDefer)" in src
+       and "reflectionReady = installReflections(\n"
+           "            engine, traceReflections, g_reflectionDeferAdmissionMesh,\n"
+           "            g_reflectionDeferAdmissionAll, secondaryAdmission);"
+           in src
+       and "g_traceMask & kGroupReflections" in src
+       and "//131072 the unique reflection-manager call" in engine_h,
+       "reflection trace is group 131072 and shares the existing draw clock")
+
+    build_hook_begin = src.find("void __fastcall hookReflectionBuildScene(")
+    build_hook_end = src.find("\n}\n\nvoid __fastcall hookReflectionRenderLight",
+                              build_hook_begin)
+    build_hook = src[build_hook_begin:build_hook_end]
+    light_hook_begin = build_hook_end
+    light_hook_end = src.find("\n}\n\nstruct DeferredOwnerScope", light_hook_begin)
+    light_hook = src[light_hook_begin:light_hook_end]
+    mesh_hook_begin = src.find(
+        "void __fastcall hookGraphicsMeshInstanceRenderPass(")
+    mesh_hook_end = src.find("\n}\n\nvoid __fastcall hookTerrainPreload",
+                             mesh_hook_begin)
+    mesh_hook = src[mesh_hook_begin:mesh_hook_end]
+    buffer_note_begin = src.find("void noteDeferredBufferCreated(")
+    buffer_note_end = src.find("\n}\n\nbool reflectionAdmissionBufferTrackingRequested",
+                               buffer_note_begin)
+    buffer_note = src[buffer_note_begin:buffer_note_end]
+    ok(const("kReflectionAdmissionBufferThreshold") == 32
+       and "reflectionAdmissionThresholdReached(buffers)" in build_hook
+       and "g_reflectionAdmissionBuildActive = true;" in build_hook
+       and "g_reflectionAdmissionPending" in build_hook
+       and "CounterEngineReflectionAdmissionDeferred" in build_hook
+       and "g_reflectionAdmissionRenderActive" in light_hook
+       and "g_reflectionAdmissionPending = false;" in light_hook
+       and "CounterEngineReflectionAdmissionMeshDeferred" in mesh_hook
+       and "return;" in mesh_hook
+       and "g_reflectionAdmissionBuildActive" in buffer_note
+       and "++g_reflectionAdmissionBuildBuffers;" in buffer_note,
+       "32-buffer BuildScene admission defers only the following mesh pass")
+    ok('L"reflection_defer_admission_mesh", 0' in src
+       and 'L"reflection_defer_admission_all", 0' in src
+       and "reflectionAdmissionBufferTrackingRequested()" in visual_src
+       and "reflection_defer_admission_mesh reaches install()" in selftest_src
+       and "reflection_defer_admission_all reaches install()" in selftest_src
+       and "reflectionAdmissionTriggeredForTest(31)" in selftest_src
+       and "reflectionAdmissionTriggeredForTest(32)" in selftest_src,
+       "reflection admission fix is default-off, trace-independent, and tested")
+    ok("const bool deferAll = g_reflectionDeferAdmissionAllActive"
+           in light_hook
+       and "if (!deferAll && g_gpuChunkTracing" in light_hook
+       and "CounterEngineReflectionAdmissionAllDeferred" in light_hook
+       and "const bool needMesh = trace || deferAdmissionMesh\n"
+           "                       || secondaryPassAdmission;" in install
+       and "(!needMesh || tq::detour::attach(" in install
+       and "reflection_defer_admission_all" in engine_h
+       and "engine_reflection_admission_all_deferred" in probe_src,
+       "whole admission skips one reflection child without requiring the mesh detour")
+    admission_prefixes = [
+        "reflection_i2_p1", "deferred_i2_setup", "deferred_i2_scene",
+        "shadow_directional"]
+    expected_admission_names = []
+    for prefix in admission_prefixes:
+        expected_admission_names.extend([
+            "engine_admission_" + prefix + "_draw",
+            "engine_admission_" + prefix + "_terrain_plug",
+            "engine_admission_" + prefix + "_terrain_plug_first",
+            "engine_admission_" + prefix + "_terrain_block",
+            "engine_admission_" + prefix + "_terrain_block_first",
+            "engine_admission_" + prefix + "_mesh",
+            "engine_admission_" + prefix + "_mesh_first"])
+    expected_admission_names.append("engine_admission_identity_overflow")
+    actual_admission_names = re.findall(r'"(engine_admission_[^"]+)"',
+                                        probe_src)
+    ok(actual_admission_names == expected_admission_names
+       and not any(name.endswith(("_us", "_ms"))
+                   for name in actual_admission_names),
+       "all 29 admission identity columns are exact counts in consumer order")
+    ok(const("kAdmissionRenderableIdentitySlots") == 8192
+       and const("kAdmissionRenderableIdentityProbe") == 16
+       and const("kAdmissionRenderableIdentityHashSalt") == 0x9e3779b1
+       and "g_admissionRenderableIdentities["
+           "kAdmissionRenderableIdentitySlots]" in src
+       and "value ^= value >> 7;" in src
+       and "value ^= value >> 15;" in src
+       and "(uintptr_t)kind * kAdmissionRenderableIdentityHashSalt" in src
+       and "(start + i) & (kAdmissionRenderableIdentitySlots - 1)" in src
+       and "i < kAdmissionRenderableIdentityProbe" in src
+       and "CounterEngineAdmissionIdentityOverflow" in src,
+       "admission renderable identity lookup is bounded, power-of-two, and overflow-visible")
+    admission_consumer_begin = src.find("enum AdmissionConsumer {")
+    admission_consumer_end = src.find("const char* deferredPassName",
+                                      admission_consumer_begin)
+    admission_consumer = src[admission_consumer_begin:admission_consumer_end]
+    ok(admission_consumer_begin >= 0
+       and "reflection.cell == ReflectionCellI2P1" in admission_consumer
+       and "g_insideDirectional" in admission_consumer
+       and "deferred.invocation != 2" in admission_consumer
+       and "deferred.site == DeferredGeometrySiteSetup" in admission_consumer
+       and "deferred.site == DeferredGeometrySiteScene" in admission_consumer
+       and "entry->consumerMask & mask" in admission_consumer,
+       "first-seen identity is distinct for all four exact rendering consumers")
+    ok("countAdmissionRenderable(GpuChunkTerrainPlug, self);" in src
+       and "countAdmissionRenderable(GpuChunkTerrainBlock, self);" in src
+       and "countAdmissionRenderable(GpuChunkMeshInstance, self);" in src
+       and "countAdmissionDraw();" in src
+       and "memset(g_admissionRenderableIdentities, 0," in src
+       and "admission identities are first once per renderable class"
+           in selftest_src,
+       "existing exact wrappers count renderables and draws without a new patch or clock")
+
+    secondary_names = re.findall(
+        r'"(engine_secondary_admission_[^"]+)"', probe_src)
+    ok(secondary_names == [
+           "engine_secondary_admission_trigger",
+           "engine_secondary_admission_reflection_admitted",
+           "engine_secondary_admission_reflection_deferred",
+           "engine_secondary_admission_shadow_admitted",
+           "engine_secondary_admission_shadow_deferred",
+           "engine_secondary_admission_draw_skipped"]
+       and not any(name.endswith(("_us", "_ms"))
+                   for name in secondary_names),
+       "all six progressive secondary-admission columns are exact counts")
+    secondary_begin = src.find("enum SecondaryAdmissionState {")
+    secondary_end = src.find("AdmissionConsumer currentAdmissionConsumer",
+                             secondary_begin)
+    secondary = src[secondary_begin:secondary_end]
+    draw_begin = visual_src.find("void WINAPI hookDraw(")
+    draw_end = visual_src.find("void WINAPI hookDrawIndexed(", draw_begin)
+    draw_hook = visual_src[draw_begin:draw_end]
+    indexed_begin = draw_end
+    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed_hook = visual_src[indexed_begin:indexed_end]
+    ok(const("kSecondaryPassAdmissionBudgetMax") == 64
+       and 'L"secondary_pass_admission_budget", 0' in src
+       and "secondaryBudget <= (int)kSecondaryPassAdmissionBudgetMax"
+           in src
+       and "g_secondaryPassAdmissionBudget = secondaryBudget > 0"
+           in src,
+       "secondary-pass object budget defaults off and is bounded at 64")
+    ok("SecondaryAdmissionUnseen" in secondary
+       and "SecondaryAdmissionAdmitted" in secondary
+       and "SecondaryAdmissionPending" in secondary
+       and "g_secondaryAdmissionUsedThisFrame"
+           " < g_secondaryPassAdmissionBudget" in secondary
+       and "entry->secondaryState = SecondaryAdmissionPending;" in secondary
+       and "entry->secondaryState = SecondaryAdmissionAdmitted;" in secondary
+       and "findAdmissionRenderableIdentity(object, kind, true)" in secondary,
+       "one bounded identity table carries pending/admitted state across both secondary consumers")
+    ok("g_insideReflectionRenderLight" in secondary
+       and "g_insideDirectional" in secondary
+       and "SecondaryAdmissionContextReflection" in secondary
+       and "SecondaryAdmissionContextShadow" in secondary
+       and "currentSecondaryAdmissionContext()" in secondary
+       and "currentDeferredLocation" not in secondary,
+       "progressive behavior applies only to reflection and exact directional shadow, never normal colour")
+    ok("(g_tracing && tq::probe::drawTimingEnabled())" in build_hook
+       and "armSecondaryAdmission();" in secondary
+       and "if (admission) armSecondaryAdmission();" not in light_hook
+       and "g_insideReflectionRenderLight = true;" in light_hook
+       and "g_insideReflectionRenderLight = priorInsideReflection;"
+           in light_hook
+       and "if (regionChanged) armSecondaryAdmission();" not in src
+       and "g_secondaryAdmissionUsedThisFrame"
+           " < g_secondaryPassAdmissionBudget" in secondary
+       and secondary.find("armSecondaryAdmission();")
+           > secondary.find("g_secondaryAdmissionUsedThisFrame"
+                            " < g_secondaryPassAdmissionBudget")
+       and "CounterEngineSecondaryAdmissionTrigger" in secondary,
+       "budget-plus-one unseen identity self-arms one coordinated population")
+    ok("SecondaryAdmissionDrawScope secondaryAdmission(" in src
+       and src.count("SecondaryAdmissionDrawScope secondaryAdmission(") == 3
+       and "g_terrainPlugRender(self, edx, a, b, c, d);" in src
+       and "g_terrainBlockRender(self, edx, a, b, c, d);" in src
+       and "g_graphicsMeshInstanceRenderPass(\n"
+           "        self, edx, pass, name, canvas, sceneRenderer);" in src
+       and "secondaryAdmissionDrawSuppressed()" in draw_hook
+       and "secondaryAdmissionDrawSuppressed()" in indexed_hook
+       and "noteSecondaryAdmissionDrawSkipped();" in draw_hook
+       and "noteSecondaryAdmissionDrawSkipped();" in indexed_hook
+       and "g_draw(context, count, start);" in draw_hook
+       and "g_drawIndexed(context, count, start, base);" in indexed_hook,
+       "deferred renderables keep resource/material setup while only their D3D draws are suppressed")
+    frame_boundary = src.find("void secondaryAdmissionFrameBoundary()")
+    ok(frame_boundary >= 0
+       and "++g_secondaryAdmissionFrameSerial;" in
+           src[frame_boundary:frame_boundary + 220]
+       and "tq::engineprobe::secondaryAdmissionFrameBoundary();"
+           in visual_src
+       and visual_src.find(
+           "tq::engineprobe::secondaryAdmissionFrameBoundary();")
+           < visual_src.find("tq::probe::beginFrame(g_context);")
+       and "currentFrameIndex" not in secondary,
+       "the fix has a frame serial even when performance_trace is off")
+    ok("const bool secondaryAdmission = g_secondaryPassAdmissionBudget != 0;"
+           in src
+       and "|| secondaryAdmission" in src
+       and "terrainReady = installTerrain" in src
+       and "shadowReady = installShadow" in src
+       and "reflectionReady = installReflections" in src
+       and "secondaryAdmission\n"
+           "        && g_secondaryAdmissionDrawHooksReady && terrainReady\n"
+           "        && shadowReady && reflectionReady" in src
+       and "secondaryPassAdmissionRequested()" in visual_src
+       and "setSecondaryAdmissionDrawHooksReady(" in visual_src
+       and "|| secondaryAdmissionDrawHooks" in visual_src
+       and "secondaryAdmissionDrawHooksReady = indexedOk && drawOk;"
+           in visual_src
+       and visual_src.find("setSecondaryAdmissionDrawHooksReady(")
+           < visual_src.find("tq::engineprobe::install(")
+       and "return g_secondaryPassAdmissionBudget != 0;" in src
+       and "return g_reflectionDeferAdmissionMesh"
+           " || g_reflectionDeferAdmissionAll;" in src
+       and "g_secondaryAdmissionDrawHooksReady = false;" in src
+       and "secondary_pass_admission_budget reaches install()"
+           in selftest_src
+       and "a secondary-pass-admission-only boot installs no trace group"
+           in selftest_src
+       and "one frame admits two shared secondary identities without arming"
+           in selftest_src
+       and "identity budget plus one self-arms and remains pending globally"
+           in selftest_src
+       and "secondary-pass admission does not use reflection buffers"
+           in selftest_src
+       and "a pending secondary identity can enter on the next frame's budget"
+           in selftest_src,
+       "secondary-pass admission is default-off, trace-independent, Draw-atomic, and self-tested")
+    ok("countReflectionDraw(elapsedUs);" in src
+       and "countReflectionCreation(kind == DeferredCreationTexture" in src
+       and "countReflectionResource(elapsed);" in src,
+       "existing draw, D3D creation, and Resource samples gain reflection context")
+    ok("reflection i%u/p%u" in src
+       and "report.reflectionManager" in src
+       and "report.reflectionPlane" in src,
+       "F12 Resource identities retain exact reflection manager/plane context")
+    ok("CounterEngineReflectionManagerOverflow" in src
+       and "CounterEngineReflectionPlaneOverflow" in src
+       and "invocation <= 2" in src
+       and "reflectionCell(manager, plane)" in src,
+       "two managers by two planes are bounded and overflow-visible")
+    ok("active(g_reflectionTracing && onMainThread())" in src
+       and "currentReflectionLocation()" in src
+       and "if (!g_reflectionTracing || !onMainThread()) return result;" in src
+       and "TerrainPreloadSnapshot(), DeferredLocation(),\n"
+           "                               ReflectionLocation());" in src,
+       "reflection context is main-thread-only and cannot leak to loader work")
+    ok("setReflectionContextForTest(2, 1);" in selftest_src
+       and "0, tq::probe::CounterEngineReflectionI2P1DrawUs) == 31" in selftest_src
+       and "0, tq::probe::CounterEngineReflectionI1P1DrawUs) == 0" in selftest_src
+       and "0, tq::probe::CounterEngineReflectionI2P1TexCreateUs) == 29" in selftest_src
+       and "0, tq::probe::CounterEngineReflectionI2P1BufCreateUs) == 19" in selftest_src,
+       "self-test requires exact reflection draw and D3D creation partition")
+    ok("g_reflectionTracing = false;" in src
+       and "g_reflectionChildTracing = false;" in src
+       and "restoreCall(g_reflectionRenderLightPatch)" in src
+       and "restoreCall(g_reflectionBuildScenePatch)" in src
+       and "restoreCall(g_reflectionPlanePatch)" in src
+       and "restoreCall(g_reflectionManagerPatch)" in src,
+       "shutdown disables reflection classification before restoring all calls")
+
+
+def check_cross_pass_identity():
+    """Run 74's bounded first-use buffer correlation."""
+    print("\nCross-pass first-use buffer identity")
+    expected_names = [
+        "engine_crosspass_buffer_created",
+        "engine_crosspass_buffer_created_bytes",
+        "engine_crosspass_reflection_draw",
+        "engine_crosspass_shadow_draw",
+        "engine_crosspass_deferred_draw",
+        "engine_crosspass_fresh_reflection_buffer",
+        "engine_crosspass_fresh_shadow_buffer",
+        "engine_crosspass_fresh_deferred_buffer",
+        "engine_crosspass_join_reflection_shadow",
+        "engine_crosspass_join_reflection_deferred",
+        "engine_crosspass_join_shadow_deferred",
+        "engine_crosspass_join_all_three",
+        "engine_crosspass_index_overflow",
+        "engine_crosspass_recent_eviction",
+    ]
+    actual_names = re.findall(r'"(engine_crosspass_[^"]+)"', probe_src)
+    ok(actual_names == expected_names
+       and '"engine_shadow_directional_draw"' in probe_src,
+       "all cross-pass and directional-draw counters have exact CSV columns")
+    ok(all(not name.endswith("_ms") for name in actual_names)
+       and not any("crosspass" in name and name.endswith("_us")
+                   for name in actual_names),
+       "cross-pass identity columns are counts/bytes, never mod durations")
+    ok(const("kCrossPassBufferSlots") == 4096
+       and const("kCrossPassIndexSlots") == 8192
+       and const("kCrossPassIndexProbe") == 16
+       and const("kCrossPassFreshFrames") == 120
+       and const("kCrossPassMarkerReportLimit") == 128
+       and "g_crossPassBuffers[(sequence - 1) % kCrossPassBufferSlots]" in src,
+       "cross-pass creation retention/index has exact fixed bounds and wrapping")
+    family = re.search(r"enum CrossPassFamily \{(.*?)\};", src, re.S)
+    family_values = re.findall(r"(CrossPass\w+)\s*=\s*(\d+)",
+                               family.group(1)) if family else []
+    ok(family_values == [("CrossPassNone", "0"),
+                         ("CrossPassReflection", "1"),
+                         ("CrossPassShadow", "2"),
+                         ("CrossPassDeferred", "4")]
+       and "kCrossPassIndexTombstone = (const void*)(uintptr_t)1" in src
+       and "kCrossPassIndexSlots - 1" in src,
+       "cross-pass family bits, tombstone, and power-of-two index mask are exact")
+    note_begin = src.find("void noteCrossPassBufferCreated(")
+    note_end = src.find("\n}", note_begin)
+    note_body = src[note_begin:note_end]
+    ok("!g_crossPassTracing || !object || !onMainThread()" in note_body
+       and "currentReflectionLocation()" in note_body
+       and "currentDeferredLocation()" in note_body
+       and "CounterEngineCrossPassRecentEviction" in note_body
+       and "CounterEngineCrossPassIndexOverflow" in note_body,
+       "only main-thread creations retain exact creation context and loss")
+    lookup_begin = src.find("CrossPassBufferRecord* findCrossPassBuffer(")
+    lookup_end = src.find("\n}\n\nvoid countCrossPassDraw", lookup_begin)
+    lookup = src[lookup_begin:lookup_end]
+    ok("i < kCrossPassIndexProbe" in lookup
+       and "g_crossPassIndex[(start + i) & (kCrossPassIndexSlots - 1)]"
+           in lookup
+       and "record.sequence != entry.sequence" in lookup
+       and "for (unsigned back" not in lookup,
+       "draw-time identity lookup is bounded hash probing, not a ring scan")
+    draw_begin = src.find("void countCrossPassDraw(")
+    draw_end = src.find("\n}\n\nvoid reportCrossPassBuffersAtMarker", draw_begin)
+    draw = src[draw_begin:draw_end]
+    ok(draw.find("reflection.cell") < draw.find("else if (directional)")
+       < draw.find("else if (deferred.invocation)")
+       and "CounterEngineCrossPassReflectionDraw" in draw
+       and "CounterEngineCrossPassShadowDraw" in draw
+       and "CounterEngineCrossPassDeferredDraw" in draw
+       and "CounterEngineShadowDirectionalDraw" in draw,
+       "draws classify reflection, then exact directional, then deferred owner")
+    ok("DeferredTraceVertexBufferSlots + 1" in draw
+       and "bindings->indexBuffer" in draw
+       and "duplicate |= objects[j] == object" in draw
+       and "duplicate |= objects[j] == bindings->indexBuffer" in draw,
+       "existing four-VB plus index snapshot is deduplicated without getters")
+    ok(draw.count("CounterEngineCrossPassFresh") == 3
+       and draw.count("TQ_COUNT_CROSS_JOIN(") == 5
+       and all(name in draw for name in [
+           "CounterEngineCrossPassJoinReflectionShadow",
+           "CounterEngineCrossPassJoinReflectionDeferred",
+           "CounterEngineCrossPassJoinShadowDeferred",
+           "CounterEngineCrossPassJoinAllThree"]),
+       "first-family and all pair/all-three join milestones are one-shot")
+    ok("now()" not in draw and "gpuBegin" not in draw
+       and "GetVertexBuffers" not in draw and "GetIndexBuffer" not in draw,
+       "cross-pass draw classification adds no clock, GPU query, or state getter")
+    report_begin = src.find("void reportCrossPassBuffersAtMarker()")
+    report_end = src.find("\n}\n\nconst unsigned kDeferredSlowFrameSlots",
+                          report_begin)
+    report = src[report_begin:report_end]
+    ok("marker - record.createdFrame > kCrossPassFreshFrames" in report
+       and "emitted >= kCrossPassMarkerReportLimit" in report
+       and 'ring capacity"' in report and '" %u\\r\\n"' in report
+       and "index overflows %u" in report
+       and "recent ring evictions %u" in report
+       and "omitted" in report,
+       "F12 report bounds its horizon/output and exposes truncation")
+    ok("reportCrossPassBuffersAtMarker();" in src
+       and src.find("reportCrossPassBuffersAtMarker();")
+           < src.find("tq::probe::markStutter();"),
+       "cross-pass identities are written during the session before F12 marks")
+    ok("const bool crossPass = wants(kGroupReflections)" in src
+       and "traceShadow || shadowReuse || shadowDeferReady || crossPass" in src
+       and "wants(kGroupDeferredPasses) || crossPass" in src
+       and "g_deferredPassTracing && g_reflectionTracing" in src
+       and "g_reflectionChildTracing;" in src,
+       "cross-pass activation requires every exact reflection/shadow/deferred bracket")
+    ok("setCrossPassTracingForTest(true);" in selftest_src
+       and "CounterEngineCrossPassJoinAllThree) == 1" in selftest_src
+       and "CounterEngineCrossPassIndexOverflow) == 0" in selftest_src
+       and "CounterEngineCrossPassRecentEviction) == 0" in selftest_src,
+       "self-test requires exact one-shot all-three correlation")
+
+
+def _check_gpu_draw_chunks_run76(engine):
+    """Sparse reflection/shadow GPU draw subdivision, corrected by Run 76."""
+    print("\nSparse reflection/shadow GPU draw chunks")
+    ok(const("kGpuChunkDraws") == 64
+       and const("kGpuChunkCount") == 16
+       and const("kGpuChunkEventSlots") == 32
+       and const("kGpuChunkMarkerFrames") == 120
+       and const("kGpuChunkReflectionBuildSceneTriggerUs") == 2000,
+       "chunk width/count, rings, horizon, and reflection trigger are exact")
+
+    counter_names = re.findall(r'"(engine_gpu_chunk_[^"]+)"', probe_src)
+    ok(counter_names == [
+           "engine_gpu_chunk_reflection_arm",
+           "engine_gpu_chunk_reflection_start_draw",
+           "engine_gpu_chunk_reflection_draw",
+           "engine_gpu_chunk_reflection_overflow",
+           "engine_gpu_chunk_reflection_collision",
+           "engine_gpu_chunk_shadow_arm",
+           "engine_gpu_chunk_shadow_draw",
+           "engine_gpu_chunk_shadow_overflow",
+           "engine_gpu_chunk_shadow_collision"],
+       "all sparse-event counters have exact count-only CSV columns")
+    ok(not any(name.endswith("_us") or name.endswith("_ms")
+               for name in counter_names),
+       "sparse-event metadata is never charged as a mod or engine duration")
+
+    expected_gpu = (["gpu_chunk_reflection_%02d" % i for i in range(16)]
+                    + ["gpu_chunk_shadow_setup"]
+                    + ["gpu_chunk_shadow_%02d" % i for i in range(16)])
+    actual_gpu = re.findall(
+        r'"(gpu_chunk_(?:reflection_\d\d|shadow_(?:setup|\d\d)))"',
+        probe_src)
+    ok(actual_gpu == expected_gpu,
+       "reflection chunks, shadow setup, and shadow chunks are exact")
+    gpu_header = re.search(r"enum GpuPhase \{(.*?)GpuPhaseCount", probe_h,
+                           re.S)
+    gpu_enums = re.findall(
+        r"\b(GpuChunk(?:Reflection\d\d|Shadow(?:Setup|\d\d)))\b",
+                           gpu_header.group(1)) if gpu_header else []
+    expected_enums = (["GpuChunkReflection%02d" % i for i in range(16)]
+                      + ["GpuChunkShadowSetup"]
+                      + ["GpuChunkShadow%02d" % i for i in range(16)])
+    ok(gpu_enums == expected_enums,
+       "the 33 unique sparse query IDs preserve exact enum order")
+
+    arm_begin = src.find("void armGpuChunks(")
+    arm_end = src.find("\n}\n\nvoid closeGpuChunks", arm_begin)
+    arm = src[arm_begin:arm_end]
+    ok("g_gpuChunkEvents[g_gpuChunkEventSequence++"
+           " % kGpuChunkEventSlots]" in arm
+       and "g_gpuChunkLastFrame[kind] == frame + 1" in arm
+       and "gpuChunkCollisionCounter(kind)" in arm
+       and "deferRecording" in arm
+       and "GpuChunkShadowSetup" in arm,
+       "one bounded event either records now or opens separate shadow setup")
+
+    reflection_hook = src[
+        src.find("void __fastcall hookReflectionRenderLight("):
+        src.find("\n}\n\nstruct DeferredOwnerScope")]
+    child_begin = src.find("struct ReflectionChildScope")
+    child_end = src.find("\n};\n\nint __fastcall hookReflectionManager", child_begin)
+    child = src[child_begin:child_end]
+    ok("child == ReflectionChildBuildScene" in child
+       and "cell == ReflectionCellI2P1" in child
+       and "elapsed >= kGpuChunkReflectionBuildSceneTriggerUs" in child
+       and "g_reflectionGpuChunkTriggerUs = elapsed" in child
+       and "armGpuChunks(GpuChunkReflection, 1, &location" in reflection_hook
+       and reflection_hook.find("armGpuChunks(GpuChunkReflection")
+           < reflection_hook.find("ReflectionChildScope scope(")
+           < reflection_hook.find("g_reflectionRenderLight(self"),
+       "slow exact i2/p1 BuildScene sparsely arms the whole following RenderLightStyle")
+
+    shadow_begin = src.find("int __fastcall hookRenderDirectional(")
+    shadow_end = src.find("\n}\n\nvoid __fastcall hookShadowRecordExecutor", shadow_begin)
+    shadow = src[shadow_begin:shadow_end]
+    reuse = shadow.find("reusePreviousShadow(")
+    shadow_arm = shadow.find("armGpuChunks(GpuChunkShadow")
+    original = shadow.find("g_renderDirectional(self")
+    shadow_close = shadow.find("closeGpuChunks(GpuChunkShadow);")
+    ok("g_gpuChunkTracing && regionChanged" in shadow
+       and 0 <= reuse < shadow_arm < original < shadow_close,
+       "region-changing directional opens setup and retains an outer fallback close")
+
+    ok("&g_reflectionChild, (LONG)which + 1" in child
+       and "closeGpuChunks(GpuChunkReflection);" in child
+       and "InterlockedExchange(&g_reflectionChild, priorChild);" in child,
+       "exact reflection child tracks/restores identity and closes whole-child chunks")
+
+    for label, rva, rel in [
+            ("kShadowRecordExecutorCallWindowBytes",
+             "kShadowRecordExecutorCallWindowRva", None),
+            ("kShadowRecordExecutorBytes", "kShadowRecordExecutorRva", None),
+            ("kShadowRecordExecutorTailBytes",
+             "kShadowRecordExecutorTailRva", None)]:
+        window(engine, label, label, const(rva), rel)
+    call = table("kShadowRecordExecutorCallWindowBytes")
+    call_at = const("kShadowRecordExecutorCallWindowRva")
+    call_off = const("kShadowRecordExecutorCallOffset")
+    target = call_at + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    tail = bytes(table("kShadowRecordExecutorTailBytes"))
+    ok(16 <= len(call) <= 24 and call[call_off] == 0xe8
+       and target == const("kShadowRecordExecutorRva")
+       and 16 <= len(tail) <= 24 and tail.endswith(b"\xc2\x0c\x00"),
+       "verified DX11 executor E8 resolves exactly and ABI pops three arguments")
+    executor = src[src.find("void __fastcall hookShadowRecordExecutor("):
+                   src.find("\n}\n\nvoid __fastcall hookUnloadLevel")]
+    ok(executor.find("beginShadowRecordExecutorChunks();")
+           < executor.find("g_shadowRecordExecutor(self")
+           < executor.find("closeGpuChunks(GpuChunkShadow);")
+       and "GpuChunkShadowSetup" in src[
+           src.find("void beginShadowRecordExecutorChunks()"):
+           src.find("\n}\n\nvoid closeGpuChunks")],
+       "DX11 executor ends setup, records only executor draws, and closes there")
+
+    before_begin = src.find("void beginGpuChunkDrawInternal(")
+    before_end = src.find("\n}\n\nvoid finishGpuChunkDrawInternal", before_begin)
+    before = src[before_begin:before_end]
+    finish_begin = before_end + 3
+    finish_end = src.find("\n}\n\nvoid reportGpuChunksAtMarker", finish_begin)
+    finish = src[finish_begin:finish_end]
+    ok("openGpuChunk(active);" in before
+       and "if (bin.draws != kGpuChunkDraws) continue;" in finish
+       and "gpuEnd(" in finish
+       and "++active.chunk;" in finish
+       and "active.event->overflow = true;" in finish,
+       "game draws advance exact 64-draw bins with bounded overflow")
+    ok("GetVertexBuffers" not in before + finish
+       and "GetIndexBuffer" not in before + finish
+       and "GetShader" not in before + finish
+       and "bindings->pixelResources[0]" in finish
+       and "bindings->vertexBuffers[0]" in finish,
+       "chunk identity reuses setter snapshots and adds no D3D state getter")
+
+    draw_begin = visual_src.find("void WINAPI hookDraw(")
+    indexed_begin = visual_src.find("void WINAPI hookDrawIndexed(")
+    draw = visual_src[draw_begin:indexed_begin]
+    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed = visual_src[indexed_begin:indexed_end]
+    ok(draw.find("beginGpuChunkDraw(context)") < draw.find("g_draw(context")
+       < draw.find("finishGpuChunkDraw(")
+       and indexed.find("beginGpuChunkDraw(context)")
+           < indexed.find("g_drawIndexed(context")
+           < indexed.find("drawGrassCross(context")
+           < indexed.find("finishGpuChunkDraw("),
+       "Draw hooks bracket game submission and include an enhanced-grass companion")
+    ok("gpuChunkDrawActive()" in draw
+       and draw.find("gpuChunkDrawActive()")
+           < draw.find("beginGpuChunkDraw(context)")
+       and "gpuChunkDrawActive()" in indexed
+       and "extern volatile LONG gpuChunkDrawActive" in engine_h,
+       "ordinary draws inline-gate both helper calls before crossing modules")
+
+    install_begin = src.find("bool install(HMODULE engine)")
+    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install = src[install_begin:install_end]
+    ok("wants(kGroupShadow) && wants(kGroupReflections)" in install
+       and "&& tq::probe::drawTimingEnabled()" in install
+       and "g_gpuChunkTracing = gpuChunks && g_renderDirectional" in install
+       and "&& g_shadowRecordExecutor" in install
+       and "&& g_shadowTracing && g_reflectionTracing" in install
+       and "&& g_reflectionChildTracing" in install,
+       "activation requires exact shadow executor, reflection, and draw dependencies")
+    shadow_install = src[src.find("bool installShadow("):
+                         src.find("\n}\n\nbool installWait", src.find("bool installShadow("))]
+    first_write = shadow_install.find("tq::detour::patchCall(")
+    ok(first_write > shadow_install.find("kShadowRecordExecutorTailBytes")
+       and "patchCall(\n            g_shadowRecordExecutorPatch" in shadow_install
+       and "if (!executorOk)" in shadow_install
+       and shadow_install.find("restoreCall(g_shadowDirectionalPatch)")
+           < shadow_install.find("if (ok && (g_shadowDeferColdAlpha")
+       and "restoreCall(g_shadowRecordExecutorPatch)" in src[
+           src.find("void shutdown()"):src.find("#ifdef TQ_SELFTEST")],
+       "executor and outer E8 install atomically and restore on shutdown")
+    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
+                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    ok(marker.find("reportGpuChunksAtMarker();")
+           < marker.find("tq::probe::markStutter();"),
+       "F12 writes retained chunk metadata during the session before marking")
+    shutdown = src[src.find("void shutdown()"):
+                   src.find("#ifdef TQ_SELFTEST")]
+    ok("g_gpuChunkTracing = false;" in shutdown
+       and "gpuChunkDrawActive, 0" in shutdown
+       and "InterlockedExchange(&g_reflectionChild, 0);" in shutdown,
+       "shutdown disables sparse classification before restoring hooks")
+    ok("sparse reflection and shadow GPU chunks partition at 64 draws"
+           in selftest_src
+       and "gpuChunkBinDrawsForTest(true, 0) == 64" in selftest_src
+       and "gpuChunkBinDrawsForTest(true, 1) == 1" in selftest_src
+       and "ordinary draws bypass sparse GPU chunk helpers" in selftest_src
+       and "directional setup stays outside draw chunks" in selftest_src,
+       "self-test requires gate transitions and exact 64+1 reflection partition")
+
+
+def check_gpu_draw_chunks(engine):
+    """Run 79's continuous reflection subdivision and class correlation."""
+    print("\nContinuous reflection GPU draw chunks")
+    ok(const("kGpuChunkDraws") == 20
+       and const("kGpuChunkStartDraw") == 1
+       and const("kGpuChunkCount") == 16
+       and const("kGpuChunkEventSlots") == 32
+       and const("kGpuChunkMarkerFrames") == 120
+       and const("kGpuChunkRenderableCallSlots") == 256
+       and const("kGpuChunkRenderableHotCpuUs") == 250
+       and const("kGpuChunkReflectionBuildSceneTriggerUs") == 2000,
+       "20-draw continuous width/start, query/event/call bounds, horizon, and trigger are exact")
+
+    window(engine, "kGraphicsMeshInstanceRenderPassBytes",
+           "kGraphicsMeshInstanceRenderPassBytes",
+           const("kGraphicsMeshInstanceRenderPassRva"),
+           "kGraphicsMeshInstanceRenderPassRelocs")
+    window(engine, "kGraphicsMeshInstanceRenderPassTailBytes",
+           "kGraphicsMeshInstanceRenderPassTailBytes",
+           const("kGraphicsMeshInstanceRenderPassTailRva"), None)
+    mesh_entry = table("kGraphicsMeshInstanceRenderPassBytes")
+    mesh_tail = bytes(table("kGraphicsMeshInstanceRenderPassTailBytes"))
+    ok(len(mesh_entry) == 24
+       and mesh_entry[:6] == [0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8]
+       and mesh_entry[13:17] == [0, 0, 0, 0]
+       and relocs("kGraphicsMeshInstanceRenderPassRelocs")
+           == [(13, 0x36f000)]
+       and len(mesh_tail) == 23 and mesh_tail.endswith(b"\xc2\x10\x00"),
+       "mesh RenderPass verifies 24 shared-prologue bytes, steals six, and proves four arguments")
+    install_reflections = src[
+        src.find("bool installReflections(HMODULE engine, bool trace,"
+                 " bool deferAdmissionMesh,\n"
+                 "                        bool deferAdmissionAll,\n"
+                 "                        bool secondaryPassAdmission)"):
+        src.find("bool installTerrain(HMODULE engine")]
+    ok("resolve(\n        engine, kGraphicsMeshInstanceRenderPassName,"
+           in install_reflections
+       and "const bool meshOk = lightOk && (!needMesh || tq::detour::attach("
+           in install_reflections
+       and "const bool needMesh = trace || deferAdmissionMesh\n"
+           "                       || secondaryPassAdmission;"
+           in install_reflections
+       and "g_graphicsMeshInstanceRenderPassDetour" in install_reflections
+       and "kGraphicsMeshInstanceRenderPassRelocs, 1),\n        6,"
+           in install_reflections
+       and install_reflections.find(
+               "detach(g_graphicsMeshInstanceRenderPassDetour)")
+           < install_reflections.find(
+               "restoreCall(g_reflectionRenderLightPatch)"),
+       "mesh virtual-entry detour is exact, steals six, and rolls back before call patches")
+    kind = re.search(r"enum GpuChunkRenderableKind \{(.*?)\};", src, re.S)
+    kind_names = re.findall(r"\b(GpuChunk(?:RenderableNone|TerrainPlug|"
+                            r"TerrainBlock|MeshInstance))\b",
+                            kind.group(1)) if kind else []
+    ok(kind_names == ["GpuChunkRenderableNone", "GpuChunkTerrainPlug",
+                      "GpuChunkTerrainBlock", "GpuChunkMeshInstance"],
+       "renderable-call kind order keeps explicit terrain and mesh classes")
+
+    counter_names = re.findall(r'"(engine_gpu_chunk_[^"]+)"', probe_src)
+    ok(counter_names == [
+           "engine_gpu_chunk_reflection_arm",
+           "engine_gpu_chunk_reflection_start_draw",
+           "engine_gpu_chunk_reflection_draw",
+           "engine_gpu_chunk_reflection_overflow",
+           "engine_gpu_chunk_reflection_collision"],
+       "only reflection sparse-event counters remain in the CSV")
+    ok(not any(name.endswith("_us") or name.endswith("_ms")
+               for name in counter_names),
+       "reflection sparse metadata is never charged as a duration")
+
+    expected_gpu = ["gpu_chunk_reflection_%02d" % i for i in range(16)]
+    actual_gpu = re.findall(
+        r'"(gpu_chunk_(?:reflection_\d\d|shadow_(?:setup|\d\d)))"',
+        probe_src)
+    ok(actual_gpu == expected_gpu,
+       "only sixteen continuous-reflection query columns remain")
+    gpu_header = re.search(r"enum GpuPhase \{(.*?)GpuPhaseCount", probe_h,
+                           re.S)
+    gpu_enums = re.findall(
+        r"\b(GpuChunk(?:Reflection\d\d|Shadow(?:Setup|\d\d)))\b",
+        gpu_header.group(1)) if gpu_header else []
+    ok(gpu_enums == ["GpuChunkReflection%02d" % i for i in range(16)],
+       "directional setup/chunk query IDs are removed, not merely left idle")
+
+    arm_begin = src.find("void armGpuChunks(")
+    arm_end = src.find("\n}\n\nvoid closeGpuChunks", arm_begin)
+    arm = src[arm_begin:arm_end]
+    ok("event.startDraw = kGpuChunkStartDraw;" in arm
+       and "g_gpuChunkEvents[g_gpuChunkEventSequence++"
+           " % kGpuChunkEventSlots]" in arm
+       and "g_gpuChunkLastFrame[GpuChunkReflection] == frame + 1" in arm
+       and "CounterEngineGpuChunkReflectionCollision" in arm
+       and "gpuBegin" not in arm,
+       "one bounded reflection event starts at draw 1 without arming early")
+
+    reflection_hook = src[
+        src.find("void __fastcall hookReflectionRenderLight("):
+        src.find("\n}\n\nstruct DeferredOwnerScope")]
+    child_begin = src.find("struct ReflectionChildScope")
+    child_end = src.find("\n};\n\nint __fastcall hookReflectionManager",
+                         child_begin)
+    child = src[child_begin:child_end]
+    ok("child == ReflectionChildBuildScene" in child
+       and "cell == ReflectionCellI2P1" in child
+       and "elapsed >= kGpuChunkReflectionBuildSceneTriggerUs" in child
+       and "g_reflectionGpuChunkTriggerUs = elapsed" in child
+       and "armGpuChunks(location, g_reflectionGpuChunkTriggerUs)"
+           in reflection_hook
+       and reflection_hook.find("armGpuChunks(location")
+           < reflection_hook.find("ReflectionChildScope scope(")
+           < reflection_hook.find("g_reflectionRenderLight(self"),
+       "slow exact i2/p1 BuildScene sparsely arms the following RenderLightStyle")
+    ok("closeGpuChunks();" in child
+       and "InterlockedExchange(&g_reflectionChild, priorChild);" in child,
+       "the exact reflection child closes and restores the tail trace")
+
+    # Keep re-reading the recovered Run-76 executor bytes even though Run 77
+    # deliberately writes no call there. They remain durable disassembly
+    # evidence and must not become an unverified stale table.
+    for label, rva, rel in [
+            ("kShadowRecordExecutorCallWindowBytes",
+             "kShadowRecordExecutorCallWindowRva", None),
+            ("kShadowRecordExecutorBytes", "kShadowRecordExecutorRva", None),
+            ("kShadowRecordExecutorTailBytes",
+             "kShadowRecordExecutorTailRva", None)]:
+        window(engine, label, label, const(rva), rel)
+    call = table("kShadowRecordExecutorCallWindowBytes")
+    call_at = const("kShadowRecordExecutorCallWindowRva")
+    call_off = const("kShadowRecordExecutorCallOffset")
+    target = call_at + call_off + 5 + struct.unpack_from(
+        "<i", bytes(call), call_off + 1)[0]
+    tail = bytes(table("kShadowRecordExecutorTailBytes"))
+    ok(16 <= len(call) <= 24 and call[call_off] == 0xe8
+       and target == const("kShadowRecordExecutorRva")
+       and 16 <= len(tail) <= 24 and tail.endswith(b"\xc2\x0c\x00"),
+       "dormant DX11 executor evidence still resolves and proves three arguments")
+
+    shadow_begin = src.find("int __fastcall hookRenderDirectional(")
+    shadow_end = src.find("\n}\n\nvoid __fastcall hookUnloadLevel",
+                          shadow_begin)
+    shadow = src[shadow_begin:shadow_end]
+    ok("armGpuChunks" not in shadow and "closeGpuChunks" not in shadow
+       and "GpuChunkShadow" not in src
+       and "g_shadowRecordExecutorPatch" not in src,
+       "directional shadow issues no sparse query and receives no executor patch")
+
+    before_begin = src.find("void beginGpuChunkDrawInternal(")
+    before_end = src.find("\n}\n\nvoid finishGpuChunkDrawInternal",
+                          before_begin)
+    before = src[before_begin:before_end]
+    finish_begin = before_end + 3
+    finish_end = src.find("\n}\n\nconst char* gpuChunkRenderableName",
+                          finish_begin)
+    finish = src[finish_begin:finish_end]
+    ok("active.drawsSeen + 1 < active.event->startDraw" in src[
+           src.find("void openGpuChunk("):before_begin]
+       and "const unsigned ordinal = ++active.drawsSeen;" in finish
+       and "if (ordinal + 1 == active.event->startDraw) openGpuChunk(active);"
+           in finish
+       and "if (bin.draws != kGpuChunkDraws) return;" in finish
+       and "if (active.chunk < kGpuChunkCount) openGpuChunk(active);" in finish,
+       "queries continuously cover draw 1 and include inter-renderable work in 20-draw bins")
+    ok("GetVertexBuffers" not in before + finish
+       and "GetIndexBuffer" not in before + finish
+       and "GetShader" not in before + finish
+       and "bindings->pixelResources[0]" in finish
+       and "bindings->vertexBuffers[0]" in finish,
+       "continuous identity reuses setter snapshots and adds no D3D getter")
+
+    renderable_struct = src[src.find("struct GpuChunkRenderableCall {"):
+                            src.find("struct ActiveGpuChunkEvent {")]
+    renderable_scope = src[src.find("struct GpuChunkRenderableCallScope {"):
+                           src.find("void reportGpuChunksAtMarker()")]
+    plug = src[src.find("void __fastcall hookTerrainPlugRender("):
+               src.find("void __fastcall hookTerrainBlockRender(")]
+    block = src[src.find("void __fastcall hookTerrainBlockRender("):
+                src.find("void __fastcall hookTerrainPreload(")]
+    mesh = src[src.find("void __fastcall hookGraphicsMeshInstanceRenderPass("):
+               src.find("void __fastcall hookTerrainPreload(")]
+    load = src[src.find("void __fastcall hookLoadResource("):
+               src.find("bool reusePreviousShadow(")]
+    creation = src[src.find("void countReflectionCreation("):
+                   src.find("void countReflectionDraw(")]
+    report = src[src.find("void reportGpuChunksAtMarker()"):
+                 src.find("void countReflectionResource(")]
+    ok("GpuChunkRenderableCall renderables[kGpuChunkRenderableCallSlots]"
+           in renderable_struct
+       and "event.renderableCalls >= kGpuChunkRenderableCallSlots"
+           in renderable_scope
+       and "event.renderableCallOverflow = true" in renderable_scope,
+       "renderable-call identity is embedded in each event with an explicit bound")
+    ok("if (active.drawsSeen + 1 < event.startDraw) return;"
+           in renderable_scope
+       and renderable_scope.find("active.drawsSeen + 1 < event.startDraw")
+           < renderable_scope.find(
+               "event.renderableCalls >= kGpuChunkRenderableCallSlots"),
+       "renderable-call retention begins at draw 1 before consuming a slot")
+    ok("GpuChunkRenderableCallScope terrainCall(GpuChunkTerrainPlug, self);"
+           in plug and "terrainCall.finish(elapsed);" in plug
+       and "GpuChunkRenderableCallScope terrainCall(GpuChunkTerrainBlock, self);"
+           in block and "terrainCall.finish(elapsed);" in block,
+       "exact TerrainPlug and TerrainBlock wrappers retain one-call CPU/draw ranges")
+    ok("GpuChunkRenderableCallScope renderableCall(GpuChunkMeshInstance, self);"
+           in mesh
+       and "g_graphicsMeshInstanceRenderPass(" in mesh
+       and mesh.count("g_graphicsMeshInstanceRenderPass(") == 2
+       and mesh.find("if (!renderableCall.call)")
+           < mesh.find("const int64_t started")
+       and "renderableCall.finish(" in mesh,
+       "exact GraphicsMeshInstance wrapper forwards once and clocks only selected calls")
+    ok("noteGpuChunkRenderableResource(elapsed, terrainType," in load
+       and "noteGpuChunkRenderableCreation(texture, elapsedUs);" in creation,
+       "selected renderable calls receive nested Resource and creation totals")
+    ok("reflection renderable calls frame %u, retained %u" in report
+       and "reflection hot renderable frame %u, call %u" in report
+       and "reflection renderable class frame %u, %s" in report
+       and "cheap calls represented by class totals" in report
+       and "Resource %u/%u" in report
+       and '" us, texture create %u/%u us' in report
+       and "texture create %u/%u us" in report,
+       "F12 writes hot identities and compact complete class totals during the session")
+    ok("g_gpuChunkEventSequence - count + offset" in report
+       and "g_gpuChunkEventSequence - 1 - back" not in report
+       and "GPU chunk classes frame %u, bin %u" in report,
+       "F12 reports older reaction candidates first and maps every bin to classes")
+
+    draw_begin = visual_src.find("void WINAPI hookDraw(")
+    indexed_begin = visual_src.find("void WINAPI hookDrawIndexed(")
+    draw = visual_src[draw_begin:indexed_begin]
+    indexed_end = visual_src.find("\n}\n\n}  // namespace", indexed_begin)
+    indexed = visual_src[indexed_begin:indexed_end]
+    ok(draw.find("beginGpuChunkDraw(context)") < draw.find("g_draw(context")
+       < draw.find("finishGpuChunkDraw(")
+       and indexed.find("beginGpuChunkDraw(context)")
+           < indexed.find("g_drawIndexed(context")
+           < indexed.find("drawGrassCross(context")
+           < indexed.find("finishGpuChunkDraw("),
+       "Draw hooks bracket game submission and the enhanced-grass companion")
+    ok("gpuChunkDrawActive()" in draw
+       and draw.find("gpuChunkDrawActive()")
+           < draw.find("beginGpuChunkDraw(context)")
+       and "gpuChunkDrawActive()" in indexed
+       and "extern volatile LONG gpuChunkDrawActive" in engine_h,
+       "ordinary draws inline-gate the reflection helper calls")
+
+    install_begin = src.find("bool install(HMODULE engine)")
+    install_end = src.find("\n}\n\nvoid shutdown()", install_begin)
+    install = src[install_begin:install_end]
+    ok("wants(kGroupReflections) && wants(kGroupTerrain)" in install
+       and "&& tq::probe::drawTimingEnabled()" in install
+       and "g_gpuChunkTracing = gpuChunks && g_reflectionTracing" in install
+       and "&& g_reflectionChildTracing && g_terrainPlugRender" in install
+       and "&& g_terrainBlockRender" in install
+       and "&& g_graphicsMeshInstanceRenderPass" in install
+       and "installShadow(engine, traceShadow);" in install,
+       "activation requires exact reflection/terrain/mesh/draw dependencies, not shadow chunks")
+    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
+                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    ok(marker.find("reportGpuChunksAtMarker();")
+           < marker.find("tq::probe::markStutter();"),
+       "F12 writes continuous reflection metadata before marking")
+    shutdown = src[src.find("void shutdown()"):
+                   src.find("#ifdef TQ_SELFTEST")]
+    ok("g_gpuChunkTracing = false;" in shutdown
+       and "gpuChunkDrawActive, 0" in shutdown
+       and "g_activeGpuChunkRenderableCall = nullptr;" in shutdown
+       and "detach(g_graphicsMeshInstanceRenderPassDetour)" in shutdown,
+       "shutdown disables reflection classification before detaching the mesh hook")
+    ok("reflection GPU chunks cover draws 1--40 as two 20-draw bins"
+           in selftest_src
+       and "gpuChunkBinDrawsForTest(0) == 20" in selftest_src
+       and "gpuChunkBinDrawsForTest(1) == 20" in selftest_src
+       and "selected TerrainBlock retains draw ordinals and nested work"
+           in selftest_src
+       and "reflection renderable calls distinguish terrain and mesh classes"
+           in selftest_src
+       and "CounterEngineGpuChunkShadow" not in selftest_src,
+       "self-test requires continuous 20-draw bins and both retained classes")
+
+
+def check_off_main_texture_trace():
+    """Run 80's loader-thread texture descriptor retention."""
+    print("\nOff-main texture descriptor retention")
+    ok(const("kOffMainTextureSlots") == 512
+       and const("kOffMainTextureMarkerFrames") == 120
+       and const("kOffMainTextureReportLimit") == 192,
+       "off-main texture ring, reaction horizon, and output bound are exact")
+    record = src[src.find("struct OffMainTextureRecord {"):
+                 src.find("void reportOffMainTexturesAtMarker()")]
+    note = src[src.find("void noteOffMainTextureCreated("):
+               src.find("void noteDeferredBufferCreated(")]
+    report = src[src.find("void reportOffMainTexturesAtMarker()"):
+                 src.find("void noteDeferredCreationInternal(")]
+    hook = visual_src[visual_src.find("HRESULT WINAPI hookCreateTexture2D("):
+                      visual_src.find("HRESULT WINAPI hookCreatePixelShader(")]
+    ok("volatile LONG publishedSequence" in record
+       and "unsigned startFrame;" in record
+       and "unsigned finishFrame;" in record
+       and "unsigned threadId;" in record
+       and "bool hasInitialData;" in record,
+       "retained descriptors carry publication, frame extent, thread, and initial-data state")
+    ok(note.find("InterlockedExchange(&record.publishedSequence, 0)")
+           < note.find("record.startFrame = startFrame")
+           < note.find("MemoryBarrier();")
+           < note.find("InterlockedExchange(&record.publishedSequence, sequence)"),
+       "loader-thread records publish only after every field is written")
+    ok("if (!g_deferredPassTracing) return;" in note
+       and "currentDeferredLocation" not in note
+       and "countReflectionCreation" not in note,
+       "off-main texture metadata is passive and never inherits a main-thread owner")
+    ok("const unsigned startFrame = started ?" in hook
+       and "if (!renderThread && SUCCEEDED(hr)" in hook
+       and "noteOffMainTextureCreated(" in hook
+       and "initial != nullptr" in hook,
+       "CreateTexture2D records only successful off-main calls with exact descriptors")
+    ok("for (LONG sequence = first; sequence <= snapshot; ++sequence)" in report
+       and "emitted >= kOffMainTextureReportLimit" in report
+       and "omitted %u" in report,
+       "F12 emits loader records oldest-first with an explicit bounded omission count")
+    marker = src[src.find("BOOL __stdcall hookPeekMessage("):
+                 src.find("LRESULT __stdcall hookDispatchMessage")]
+    ok(0 <= marker.find("reportOffMainTexturesAtMarker();")
+           < marker.find("reportGpuChunksAtMarker();")
+           < marker.find("tq::probe::markStutter();"),
+       "F12 writes texture and reflection evidence during the session before marking")
+    ok("off-main texture trace publishes exact descriptor and frame extent"
+           in selftest_src
+       and "latestOffMainTextureForTest(" in selftest_src,
+       "self-test exercises the lock-free texture record payload")
+
+
+def check_deferred_passes(engine):
+    """Run 71's owner-exact DX11 geometry and draw-identity trace."""
+    print("\nGraphicsDeferredRendererX top-level pass partition")
+    window(engine, "kDeferredRenderBytes", "kDeferredRenderBytes",
+           const("kDeferredRenderRva"), "kDeferredRenderRelocs")
+    owner_body = table("kDeferredRenderBytes")
+    owner_relocs = relocs("kDeferredRenderRelocs")
+    ok(len(owner_body) == 24
+       and all(owner_body[offset:offset + 4] == [0, 0, 0, 0]
+               for offset, _ in owner_relocs),
+       "deferred-renderer owner verifies 24 bytes with zero relocation slots")
+    ok(engine.exports().get(cstr("kDeferredRenderName"))
+       == const("kDeferredRenderRva"),
+       "GraphicsDeferredRendererX::Render export resolves to its recorded RVA")
+
+    window(engine, "kDeferredOwnerCallWindowBytes",
+           "kDeferredOwnerCallWindowBytes",
+           const("kDeferredOwnerCallWindowRva"), None)
+    owner_call = table("kDeferredOwnerCallWindowBytes")
+    owner_offset = const("kDeferredOwnerCallOffset")
+    owner_call_rva = const("kDeferredOwnerCallWindowRva") + owner_offset
+    owner_dest = owner_call_rva + 5 + struct.unpack_from(
+        "<i", bytes(owner_call), owner_offset + 1)[0]
+    ok(len(owner_call) == 24 and owner_offset == 16
+       and owner_call[owner_offset] == 0xe8
+       and owner_dest == const("kDeferredRenderRva"),
+       "sole owner caller verifies 24 bytes and its E8 resolves to the renderer")
+    window(engine, "kDeferredRenderTailBytes", "kDeferredRenderTailBytes",
+           const("kDeferredRenderTailRva"), None)
+    owner_tail = table("kDeferredRenderTailBytes")
+    ok(len(owner_tail) == 20 and owner_tail[-3:] == [0xc2, 0x1c, 0x00],
+       "renderer tail verifies 20 bytes and proves seven explicit arguments")
+
+    calls = [
+        ("kDeferredGeometrySetupCallBytes", 0x1663a8, 0x1653a0,
+         "kDeferredGeometrySetupCallRelocs", 1, "DeferredPassGeometry", 2),
+        ("kDeferredGeometrySceneCallBytes", 0x166412, 0x1883f0,
+         None, 0, "DeferredPassGeometry", 5),
+        ("kDeferredShadowsCallBytes", 0x166454, 0x164050,
+         None, 0, "DeferredPassShadows", 2),
+        ("kDeferredLightingCallBytes", 0x166461, 0x164640,
+         None, 0, "DeferredPassLighting", 2),
+        ("kDeferredResolveCallBytes", 0x16647d, 0x166800,
+         None, 0, "DeferredPassResolve", 3),
+        ("kDeferredAoCallBytes", 0x16648f, 0x15c8e0,
+         None, 0, "DeferredPassResolve", 1),
+        ("kDeferredLateSceneACallBytes", 0x1664a6, 0x161c80,
+         None, 0, "DeferredPassLateScene", 2),
+        ("kDeferredLateSceneBCallBytes", 0x1664ae, 0x161a00,
+         "kDeferredLateSceneBCallRelocs", 1, "DeferredPassLateScene", 1),
+        ("kDeferredLateSceneListCallBytes", 0x166502, 0x1883f0,
+         None, 0, "DeferredPassLateScene", 5),
+        ("kDeferredPostHighlightCallBytes", 0x16650a, 0x161a70,
+         None, 0, "DeferredPassPost", 1),
+        ("kDeferredPostFogCallBytes", 0x166515, 0x165aa0,
+         None, 0, "DeferredPassPost", 2),
+        ("kDeferredPostMaskCallBytes", 0x166525, 0x162200,
+         None, 0, "DeferredPassPost", 1),
+        ("kDeferredPostCompositeCallBytes", 0x166588, 0x1657b0,
+         "kDeferredPostCompositeCallRelocs", 1, "DeferredPassPost", 5),
+        ("kDeferredPostDebugCallBytes", 0x1665a4, 0x161720,
+         None, 0, "DeferredPassPost", 1),
+    ]
+    call_table = re.search(
+        r"const DeferredCallSite kDeferredCallSites\[\] = \{(.*?)\n\};",
+        src, re.S)
+    call_table_flat = re.sub(r"\s+", "", call_table.group(1)) \
+        if call_table else ""
+    for name, call_rva, target_rva, reloc, reloc_count, pass_name, arguments in calls:
+        body = table(name)
+        window(engine, name, name, call_rva, reloc)
+        dest = call_rva + 5 + struct.unpack_from("<i", bytes(body), 1)[0]
+        ok(len(body) == 16 and body[0] == 0xe8 and dest == target_rva,
+           "%s verifies 16 bytes and resolves to Engine+%#x"
+           % (name, target_rva))
+        ok(not reloc or all(body[offset:offset + 4] == [0, 0, 0, 0]
+                            for offset, _ in relocs(reloc)),
+           "%s uses zero placeholders for every relocation" % name)
+        # Bind every field in the runtime table, not merely the byte array.
+        # In particular, a wrong pass or relocation pointer would otherwise
+        # still leave the independently checked on-disk bytes looking valid.
+        reloc_name = reloc if reloc else "nullptr"
+        row = ("{%s,%s,%s,%s,%s,%s,%s}" %
+               (hex(call_rva), hex(target_rva), name, reloc_name,
+                reloc_count, pass_name, arguments))
+        ok(row in call_table_flat,
+           "%s source row binds RVA, target, relocation, pass, and ABI"
+           % name)
+
+    tails = [
+        ("kDeferredGeometrySetupTailBytes", 0x16557f, 2),
+        ("kDeferredSceneListTailBytes", 0x1885ec, 5),
+        ("kDeferredShadowsTailBytes", 0x16458b, 2),
+        ("kDeferredLightingTailBytes", 0x16532a, 2),
+        ("kDeferredResolveTailBytes", 0x166bd2, 3),
+        ("kDeferredAoTailBytes", 0x15c9c6, 1),
+        ("kDeferredLateSceneATailBytes", 0x16212d, 2),
+        ("kDeferredLateSceneBTailBytes", 0x161a5d, 1),
+        ("kDeferredPostHighlightTailBytes", 0x161c6b, 1),
+        ("kDeferredPostFogTailBytes", 0x166120, 2),
+        ("kDeferredPostMaskTailBytes", 0x1625b0, 1),
+        ("kDeferredPostCompositeTailBytes", 0x165a89, 5),
+        ("kDeferredPostDebugTailBytes", 0x16193f, 1),
+    ]
+    abi_table = re.search(
+        r"const DeferredTargetAbi kDeferredTargetAbis\[\] = \{(.*?)\n\};",
+        src, re.S)
+    abi_table_flat = re.sub(r"\s+", "", abi_table.group(1)) \
+        if abi_table else ""
+    target_for_tail = {
+        0x16557f: 0x1653a0, 0x1885ec: 0x1883f0,
+        0x16458b: 0x164050, 0x16532a: 0x164640,
+        0x166bd2: 0x166800, 0x15c9c6: 0x15c8e0,
+        0x16212d: 0x161c80, 0x161a5d: 0x161a00,
+        0x161c6b: 0x161a70, 0x166120: 0x165aa0,
+        0x1625b0: 0x162200, 0x165a89: 0x1657b0,
+        0x16193f: 0x161720,
+    }
+    for name, tail_rva, arguments in tails:
+        body = table(name)
+        window(engine, name, name, tail_rva, None)
+        ok(len(body) == 16
+           and body[-3:] == [0xc2, arguments * 4, 0],
+           "%s proves callee cleanup for %d explicit argument(s)"
+           % (name, arguments))
+        row = ("{%s,%s,%s,%s}" %
+               (hex(target_for_tail[tail_rva]), hex(tail_rva), name,
+                arguments))
+        ok(row in abi_table_flat,
+           "%s source ABI row binds target, tail, bytes, and count" % name)
+
+    install_begin = src.find("bool installDeferredPasses(HMODULE engine)")
+    install_end = src.find("\n}\n\nbool installTerrain", install_begin)
+    install = src[install_begin:install_end]
+    owner_check = install.find("bool verified = owner")
+    wide_check = install.find("Validate every overlapping original window")
+    first_patch = install.find("tq::detour::patchCall(")
+    ok(install_begin >= 0 and install_end > install_begin
+       and owner_check >= 0 and wide_check > owner_check
+       and first_patch > wide_check
+       and "kDeferredOwnerCallWindowBytes" in install[owner_check:wide_check]
+       and "kDeferredRenderTailBytes" in install[owner_check:wide_check]
+       and "kDeferredRenderTailBytes[18] == 7 * sizeof(uintptr_t)"
+           in install[owner_check:wide_check]
+       and "signature(site.bytes, 16" in install
+       and "signature(abi->bytes, 16)" in install,
+       "owner, all wide call windows, and ABI tails verify before the first write")
+    ok("installed != kDeferredCallSiteCount" in install
+       and "restoreCall(g_deferredCallPatches[--installed])" in install
+       and "restoreCall(g_deferredOwnerPatch)" in install
+       and "kDeferredOwnerCallOffset, owner," in install
+       and "(const void*)&hookDeferredRender))" in install
+       and "signature(site.bytes, 5), 0," in install
+       and "g_deferredPassTracing = true;" in install,
+       "owner plus fourteen child calls install atomically before tracing activates")
+    ok("InterlockedExchange(&g_deferredOwnerInvocation, 0);" in install
+       and "g_deferredOwnerFrame = UINT_MAX;" in install
+       and "g_deferredOwnerCallsThisFrame = 0;" in install
+       and "memset(g_deferredCreations, 0, sizeof(g_deferredCreations));"
+           in install
+       and "memset(g_deferredSlowFrames, 0, sizeof(g_deferredSlowFrames));"
+           in install,
+       "installation resets owner numbering and both bounded identity rings")
+    ok(const("kGroupDeferredPasses") == 0x10000
+       and "if (wants(kGroupDeferredPasses) || crossPass)\n"
+           "        installDeferredPasses(engine);" in src,
+       "deferred-pass trace is group 65536 plus the reflection cross-pass dependency")
+
+    counter_names = [
+        "engine_deferred_geometry_us", "engine_deferred_geometry_draw_us",
+        "engine_deferred_shadows_us", "engine_deferred_shadows_draw_us",
+        "engine_deferred_lighting_us", "engine_deferred_lighting_draw_us",
+        "engine_deferred_resolve_us", "engine_deferred_resolve_draw_us",
+        "engine_deferred_late_scene_us",
+        "engine_deferred_late_scene_draw_us",
+        "engine_deferred_post_us", "engine_deferred_post_draw_us",
+    ]
+    ok(all(('"%s"' % name) in probe_src and name.endswith("_us")
+           for name in counter_names),
+       "all engine pass and draw durations use `_us`, never `_ms`")
+    exact_gpu_names = [
+        "gpu_deferred_i1_geometry_setup",
+        "gpu_deferred_i1_geometry_scene",
+        "gpu_deferred_i2_geometry_setup",
+        "gpu_deferred_i2_geometry_scene",
+    ]
+    ok(all(('"%s"' % name) in probe_src for name in exact_gpu_names)
+       and '"gpu_deferred_geometry"' not in probe_src
+       and '"gpu_deferred_shadows"' not in probe_src,
+       "four owner-exact geometry GPU columns replace overlapping group spans")
+    exact_counter_names = [
+        "engine_deferred_owner", "engine_deferred_owner_overflow",
+    ]
+    for invocation in ("i1", "i2"):
+        for site in ("geometry_setup", "geometry_scene"):
+            exact_counter_names.extend([
+                "engine_deferred_%s_%s" % (invocation, site),
+                "engine_deferred_%s_%s_us" % (invocation, site),
+                "engine_deferred_%s_%s_draw_us" % (invocation, site),
+            ])
+        for site in ("other", "geometry_setup", "geometry_scene"):
+            for kind in ("res_load", "tex_create", "buf_create"):
+                exact_counter_names.extend([
+                    "engine_deferred_%s_%s_%s" %
+                        (invocation, site, kind),
+                    "engine_deferred_%s_%s_%s_us" %
+                        (invocation, site, kind),
+                ])
+    ok(all(('"%s"' % name) in probe_src for name in exact_counter_names)
+       and all(name.endswith("_us")
+               for name in exact_counter_names
+               if name.endswith(("_draw_us", "_load_us", "_create_us"))
+                  or name.rsplit("_", 1)[-1] == "us"),
+       "all owner/site game durations have exact CSV names ending in `_us`")
+    draw_hooks = []
+    for hook, next_hook in [("hookDraw(", "hookDrawIndexed("),
+                            ("hookDrawIndexed(", "hookClearDepthStencilView(")]:
+        begin = visual_src.find(hook)
+        end = visual_src.find(next_hook, begin + 1)
+        draw_hooks.append(visual_src[begin:end])
+    ok(all(body.count("tq::probe::finishPhase(") == 1
+           and body.count("tq::engineprobe::countDeferredDraw(") == 1
+           and "&g_deferredBindings" in body for body in draw_hooks),
+       "Draw and DrawIndexed reuse one clock sample and snapshot tracked bindings")
+    mappings = [
+        ("kDeferredPassCountCounters",
+         ["CounterCount", "CounterEngineDeferredGeometry",
+          "CounterEngineDeferredShadows", "CounterEngineDeferredLighting",
+          "CounterEngineDeferredResolve", "CounterEngineDeferredLateScene",
+          "CounterEngineDeferredPost"]),
+        ("kDeferredPassDurationCounters",
+         ["CounterCount", "CounterEngineDeferredGeometryUs",
+          "CounterEngineDeferredShadowsUs",
+          "CounterEngineDeferredLightingUs",
+          "CounterEngineDeferredResolveUs",
+          "CounterEngineDeferredLateSceneUs", "CounterEngineDeferredPostUs"]),
+        ("kDeferredPassDrawCounters",
+         ["CounterCount", "CounterEngineDeferredGeometryDrawUs",
+          "CounterEngineDeferredShadowsDrawUs",
+          "CounterEngineDeferredLightingDrawUs",
+          "CounterEngineDeferredResolveDrawUs",
+          "CounterEngineDeferredLateSceneDrawUs",
+          "CounterEngineDeferredPostDrawUs"]),
+    ]
+    for table_name, expected in mappings:
+        m = re.search(r"const tq::probe::(?:Counter|GpuPhase) %s\[\] = \{"
+                      r"(.*?)\};" % table_name, src, re.S)
+        got = re.findall(r"tq::probe::(\w+)", m.group(1)) if m else []
+        ok(got == expected, "%s follows the six-pass enum exactly" % table_name)
+    exact_mappings = [
+        ("kDeferredGeometryCountCounters",
+         ["CounterCount", "CounterEngineDeferredI1GeometrySetup",
+          "CounterEngineDeferredI1GeometryScene",
+          "CounterEngineDeferredI2GeometrySetup",
+          "CounterEngineDeferredI2GeometryScene"]),
+        ("kDeferredGeometryDurationCounters",
+         ["CounterCount", "CounterEngineDeferredI1GeometrySetupUs",
+          "CounterEngineDeferredI1GeometrySceneUs",
+          "CounterEngineDeferredI2GeometrySetupUs",
+          "CounterEngineDeferredI2GeometrySceneUs"]),
+        ("kDeferredGeometryDrawCounters",
+         ["CounterCount", "CounterEngineDeferredI1GeometrySetupDrawUs",
+          "CounterEngineDeferredI1GeometrySceneDrawUs",
+          "CounterEngineDeferredI2GeometrySetupDrawUs",
+          "CounterEngineDeferredI2GeometrySceneDrawUs"]),
+        ("kDeferredGeometryGpuPhases",
+         ["GpuPhaseCount", "GpuDeferredI1GeometrySetup",
+          "GpuDeferredI1GeometryScene", "GpuDeferredI2GeometrySetup",
+          "GpuDeferredI2GeometryScene"]),
+    ]
+    for table_name, expected in exact_mappings:
+        m = re.search(r"const tq::probe::(?:Counter|GpuPhase) %s\[\] = \{"
+                      r"(.*?)\};" % table_name, src, re.S)
+        got = re.findall(r"tq::probe::(\w+)", m.group(1)) if m else []
+        ok(got == expected,
+           "%s follows the four owner/site cells exactly" % table_name)
+    owner_bins = re.search(
+        r"const DeferredOwnerBinCounters kDeferredOwnerBinCounters\[\] = \{"
+        r"(.*?)\n\};", src, re.S)
+    owner_symbols = re.findall(r"tq::probe::(Counter\w+)",
+                               owner_bins.group(1)) if owner_bins else []
+    expected_owner = ["CounterCount"] * 6
+    for invocation in ("I1", "I2"):
+        for site in ("Other", "GeometrySetup", "GeometryScene"):
+            for kind in ("ResLoad", "TexCreate", "BufCreate"):
+                expected_owner.extend([
+                    "CounterEngineDeferred%s%s%s" % (invocation, site, kind),
+                    "CounterEngineDeferred%s%s%sUs" % (invocation, site, kind)])
+    ok(owner_symbols == expected_owner,
+       "six owner/site bins map Resource, texture, and buffer count/us exactly")
+    scope_begin = src.find("struct DeferredPassScope")
+    scope_end = src.find("\n};", scope_begin)
+    scope = src[scope_begin:scope_end]
+    ok("g_deferredPassTracing && onMainThread()" in scope
+       and "&g_deferredOwnerInvocation, 0, 0) > 0" in scope
+       and "gpuBegin(context, kDeferredGeometryGpuPhases[cell]);" in scope
+       and "gpuEnd(context, kDeferredGeometryGpuPhases[cell]);" in scope
+       and "kDeferredPassCountCounters[pass]" in scope
+       and "kDeferredPassDurationCounters[pass]" in scope
+       and "kDeferredGeometryCountCounters[cell]" in scope
+       and "kDeferredGeometryDurationCounters[cell]" in scope
+       and "InterlockedExchange(&g_deferredPass, prior);" in scope,
+       "pass scopes require an owner and keep exact geometry GPU pairs nested")
+    draw_begin = src.find("void countDeferredDrawInternal(")
+    draw_end = src.find("\n}", draw_begin)
+    draw = src[draw_begin:draw_end]
+    ok("!g_deferredPassTracing || !elapsedUs" in draw
+       and "kDeferredPassDrawCounters[pass]" in draw
+       and "kDeferredGeometryDrawCounters[cell]" in draw
+       and "rememberDeferredDraw(" in draw,
+       "draw attribution records both pass and exact owner/site buckets")
+    wrapper_map = [
+        ("hookDeferredGeometrySetup", "DeferredPassGeometry",
+         "g_deferredGeometrySetup"),
+        ("hookDeferredGeometryScene", "DeferredPassGeometry",
+         "g_deferredGeometryScene"),
+        ("hookDeferredShadows", "DeferredPassShadows", "g_deferredShadows"),
+        ("hookDeferredLighting", "DeferredPassLighting", "g_deferredLighting"),
+        ("hookDeferredResolve", "DeferredPassResolve", "g_deferredResolve"),
+        ("hookDeferredAo", "DeferredPassResolve", "g_deferredAo"),
+        ("hookDeferredLateSceneA", "DeferredPassLateScene",
+         "g_deferredLateSceneA"),
+        ("hookDeferredLateSceneB", "DeferredPassLateScene",
+         "g_deferredLateSceneB"),
+        ("hookDeferredLateSceneList", "DeferredPassLateScene",
+         "g_deferredLateSceneList"),
+        ("hookDeferredPostHighlight", "DeferredPassPost",
+         "g_deferredPostHighlight"),
+        ("hookDeferredPostFog", "DeferredPassPost", "g_deferredPostFog"),
+        ("hookDeferredPostMask", "DeferredPassPost", "g_deferredPostMask"),
+        ("hookDeferredPostComposite", "DeferredPassPost",
+         "g_deferredPostComposite"),
+        ("hookDeferredPostDebug", "DeferredPassPost", "g_deferredPostDebug"),
+    ]
+    for wrapper, pass_name, original in wrapper_map:
+        begin = src.find(" __fastcall %s(" % wrapper)
+        end = src.find("\n}", begin)
+        body = src[begin:end]
+        expected_scope = "DeferredPassScope scope(%s" % pass_name
+        ok(begin >= 0 and expected_scope in body
+           and original in body,
+           "%s preserves its original and exact pass class" % wrapper)
+    owner_begin = src.find(" __fastcall hookDeferredRender(")
+    owner_end = src.find("\n}", owner_begin)
+    owner_wrapper = src[owner_begin:owner_end]
+    ok(owner_begin >= 0 and "DeferredOwnerScope scope;" in owner_wrapper
+       and "g_deferredRender(self, edx, a, b, c, d, e, f, g)" in owner_wrapper,
+       "sole owner wrapper preserves the verified seven-argument ABI")
+    owner_scope_begin = src.find("struct DeferredOwnerScope")
+    owner_scope_end = src.find("\n};", owner_scope_begin)
+    owner_scope = src[owner_scope_begin:owner_scope_end]
+    ok("active(g_deferredPassTracing && onMainThread())" in owner_scope
+       and "++g_deferredOwnerCallsThisFrame" in owner_scope
+       and "if (invocation > 2)" in owner_scope
+       and "InterlockedExchange(&g_deferredOwnerInvocation, priorInvocation)"
+           in owner_scope,
+       "owner invocation numbering is main-thread-only, overflow-visible, and restored")
+
+    ok(const("kDeferredCreationSlots") == 4096
+       and const("kDeferredSlowFrameSlots") == 128
+       and const("kDeferredTopDrawsPerFrame") == 12
+       and const("kDeferredSlowMarkerFrames") == 120
+       and const("kDeferredSlowReportFrames") == 8
+       and const("kDeferredSlowFrameMinUs") == 15000,
+       "creation and slow-draw retention is statically bounded")
+    ok("g_deferredCreations[g_deferredCreationSequence++\n"
+       "                            % kDeferredCreationSlots]" in src
+       and "DeferredSlowFrame& slot =\n"
+           "        g_deferredSlowFrames[frame % kDeferredSlowFrameSlots]"
+           in src,
+       "creation and slow-draw writes wrap within their verified rings")
+    marker_begin = src.find("void reportDeferredSlowDrawsAtMarker()")
+    marker_end = src.find("\n}\n\nstruct DeferredOwnerScope", marker_begin)
+    marker = src[marker_begin:marker_end]
+    ok(marker_begin >= 0 and marker_end > marker_begin
+       and "back <= kDeferredSlowMarkerFrames" in marker
+       and "insert < kDeferredSlowReportFrames" in marker
+       and "j < frame.recordCount" in marker
+       and "textures < 32" in marker,
+       "F12 report remains bounded by horizon, frames, top draws, and textures")
+    ok("reportDeferredSlowDrawsAtMarker();" in src
+       and src.find("reportDeferredSlowDrawsAtMarker();")
+           < src.find("tq::probe::markStutter();"),
+       "F12 writes retained geometry identity before recording its marker")
+    binding_hooks = visual_src[
+        visual_src.find("void WINAPI hookPSSetShaderResources("):
+        visual_src.find("const ShadowTexture* dsvShadowTexture(")]
+    ok(all(name in visual_src for name in [
+           "hookVSSetShader", "hookIASetVertexBuffers", "hookIASetIndexBuffer",
+           "hookPSSetShaderResources", "hookPSSetShader"])
+       and all(slot in visual_src for slot in
+               ["&cv[11]", "&cv[18]", "&cv[19]", "&cv[8]", "&cv[9]"])
+       and "GetShader" not in binding_hooks
+       and "GetVertexBuffers" not in binding_hooks
+       and "GetIndexBuffer" not in binding_hooks,
+       "binding identity uses setter hooks without per-draw state getters")
+    slot_decl = re.search(
+        r"enum \{\s*DeferredTraceVertexBufferSlots = (\d+),\s*"
+        r"DeferredTracePixelResourceSlots = (\d+)\s*\};", engine_h, re.S)
+    ok(slot_decl and slot_decl.groups() == ("4", "8"),
+       "binding snapshots retain exactly four vertex buffers and eight SRVs")
+    texture_hook = visual_src[
+        visual_src.find("HRESULT WINAPI hookCreateTexture2D("):
+        visual_src.find("HRESULT WINAPI hookCreatePixelShader(")]
+    buffer_hook = visual_src[
+        visual_src.find("HRESULT WINAPI hookCreateBuffer("):
+        visual_src.find("HRESULT WINAPI hookMap(")]
+    ok(texture_hook.count("finishPhase(") == 1
+       and "noteDeferredTextureCreated(" in texture_hook
+       and buffer_hook.count("finishPhase(") == 1
+       and "noteDeferredBufferCreated(" in buffer_hook,
+       "D3D creation attribution reuses each existing timing sample")
+    finish_begin = probe_src.find(
+        "uint32_t finishPhaseInternal(Phase phase, int64_t startTicks)")
+    finish_end = probe_src.find("\n}", finish_begin)
+    finish = probe_src[finish_begin:finish_end]
+    ok(finish_begin >= 0 and finish.count("now()") == 1
+       and "g_current.phaseMs[phase] +=" in finish
+       and "1000000.0" in finish,
+       "finishPhase records precise phase time and returns microseconds from one clock read")
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n}\n\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok("g_deferredPassTracing = false;" in shutdown
+       and "restoreCall(g_deferredCallPatches[i]);" in shutdown
+       and "restoreCall(g_deferredOwnerPatch);" in shutdown,
+       "shutdown disables classification before restoring child and owner calls")
+
+
 def main():
     engine = PE(os.path.join(GAME, "Engine.dll"))
     game = PE(os.path.join(GAME, "Game.dll"))
@@ -2071,6 +3823,7 @@ def main():
              "kGuaranteedGetLevelRva"),
             (engine, "Engine", "kEngineUpdateName", "kEngineUpdateRva"),
             (engine, "Engine", "kEngineRenderName", "kEngineRenderRva"),
+            (engine, "Engine", "kDeferredRenderName", "kDeferredRenderRva"),
             (engine, "Engine", "kSweepTargetName", "kSweepTargetRva"),
             (engine, "Engine", "kRenderDirectionalName",
              "kRenderDirectionalRva"),
@@ -2095,6 +3848,8 @@ def main():
              "kShaderHasParameterRva"),
             (engine, "Engine", "kGraphicsMeshInstanceSetShaderParametersName",
              "kGraphicsMeshInstanceSetShaderParametersRva"),
+            (engine, "Engine", "kGraphicsMeshInstanceRenderPassName",
+             "kGraphicsMeshInstanceRenderPassRva"),
             (engine, "Engine", "kMeshShadowStyleName",
              "kMeshShadowStyleRva"),
             (engine, "Engine", "kMeshGetTextureName",
@@ -2145,6 +3900,12 @@ def main():
     check_shadow_material_textures(engine)
     check_shadow_alpha_defer(engine)
     check_shadow_texture_attribution(engine)
+    check_play_render_flow(engine)
+    check_reflections(engine)
+    check_cross_pass_identity()
+    check_gpu_draw_chunks(engine)
+    check_off_main_texture_trace()
+    check_deferred_passes(engine)
 
     print("\nImport-table targets exist in TQ.exe and Engine.dll")
     exe_imports = {n for _, (_, n) in exe.imports().items()}

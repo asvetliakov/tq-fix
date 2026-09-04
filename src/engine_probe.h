@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+struct ID3D11DeviceContext;
+
 namespace tq {
 namespace engineprobe {
 
@@ -78,6 +80,21 @@ namespace engineprobe {
 //      TerrainRenderInterfaceRT::RenderGround. The first three associate each
 //      retained terrain load with that exact TerrainType's preload history;
 //      the last adds whole-call CPU and GPU spans.
+//65536 the verified direct children of GraphicsDeferredRendererX::Render,
+//      grouped into geometry, shadow-map construction, light accumulation,
+//      deferred resolve/AO, later scene lists, and post/fog/composite. Run 71
+//      also patches the owner's sole direct caller, splitting its two dynamic
+//      invocations and the two geometry call sites. CPU and Draw timing are
+//      exact per-site sums; four non-blocking GPU pairs cover only one site in
+//      one invocation. Slow Draw records retain the already tracked D3D state,
+//      never per-draw queries. Resource and D3D creation work is split between
+//      those four cells and the non-geometry remainder of each invocation.
+//131072 the unique reflection-manager call in each recursive DX11 portal /
+//      region branch, plus that manager's per-water-plane forward renderer.
+//      The first two managers and first two planes in each manager receive
+//      exact CPU, game-draw, Resource, D3D-creation, and non-blocking GPU
+//      fields; explicit overflow counters expose any wider frame. The hooks
+//      patch only the two verified E8 sites and do not change render choices.
 // With groups 2, 128, and 16384 all installed, the same verified load hook
 // also measures the main-thread complement outside RenderDirectional. Phase
 // (Engine::Render/Update/other) and engine filename type independently
@@ -194,10 +211,138 @@ void readOptions(const wchar_t* iniPath);
 // It reaches install() with the performance probe off and brings no trace
 // group. Group 32768 observes the same stock calls when enabled.
 
+// [performance] reflection_defer_admission_mesh, a fix and defaulting to 0.
+//
+// A transition-sized reflection BuildScene creates at least 32 D3D buffers.
+// For only its immediately following RenderLightStyle, resident
+// GraphicsMeshInstance render passes are omitted. The normal color pass later
+// in the same recursive branch consumes the new scene, and reflection returns
+// on the next frame. Terrain reflection and all non-transition reflections
+// are unchanged.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 131072 reports the deferred event and mesh-call counts.
+
+// [performance] reflection_defer_admission_all, a fix and defaulting to 0.
+//
+// Uses the same measured >=32-buffer boundary, but skips the one immediately
+// following reflection RenderLightStyle call in full.  The reflection target
+// is stale for one frame; terrain and mesh reflection both return on the next
+// frame. Directional shadows and the later normal colour pass are untouched.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Group 131072 reports the trigger and whole-call omission counts.
+
+// [performance] secondary_pass_admission_budget, a fix and defaulting to 0.
+//
+// Run 83 found that the felt play transition introduces 134 previously unseen
+// reflection renderables and 15 directional-shadow renderables at once, while
+// Runs 81--82 showed that omitting one consumer merely moves GPU first use to
+// the next consumer/frame.  After the existing >=32-buffer reflection signal
+// or a directional region change, this option admits at most N previously
+// unseen object identities per frame across reflection and directional shadow
+// together.  A deferred RenderPass still executes resource/material setup,
+// but its D3D Draw/DrawIndexed calls are suppressed until that identity wins a
+// later frame's budget. Normal colour rendering and already admitted objects
+// are unchanged.
+//
+// It reaches install() with the performance probe off and brings no trace
+// group. Count-only columns report triggers, admitted/deferred identities, and
+// omitted secondary-pass draws when tracing is independently enabled.
+
 // Installs whatever the mask selects and the build supports. Returns true if
 // at least one hook went in. Safe to call when the probe is disabled, when
 // `engine` is null, or twice.
 bool install(HMODULE engine);
+
+enum {
+    DeferredTraceVertexBufferSlots = 4,
+    DeferredTracePixelResourceSlots = 8
+};
+
+// Updated only by the already-needed D3D state-setting hooks. The slow-draw
+// recorder copies it only when a draw enters that frame's bounded top set; no
+// Get-state call is made from Draw/DrawIndexed.
+struct DeferredDrawBindings {
+    const void* vertexBuffers[DeferredTraceVertexBufferSlots];
+    unsigned vertexStrides[DeferredTraceVertexBufferSlots];
+    unsigned vertexOffsets[DeferredTraceVertexBufferSlots];
+    const void* indexBuffer;
+    unsigned indexFormat;
+    unsigned indexOffset;
+    const void* vertexShader;
+    const void* pixelShader;
+    const void* pixelResources[DeferredTracePixelResourceSlots];
+};
+
+// True after options have been read when group 65536 or reflection group
+// 131072 and draw_timing request the D3D binding hooks. It does not mean the
+// verified Engine sites installed. Group 131072 uses the same setter snapshot
+// to correlate fresh buffer identities across reflection/shadow/color passes.
+bool deferredDrawTraceRequested();
+
+// Sparse GPU subdivision inside an armed exact engine class. The inline gate
+// is the ordinary-draw path: when neither class is recording, visual.cpp does
+// not call either helper at all.
+namespace detail {
+extern volatile LONG gpuChunkDrawActive;
+extern volatile LONG secondaryAdmissionDrawSuppressDepth;
+}
+inline bool gpuChunkDrawActive() {
+    return detail::gpuChunkDrawActive != 0;
+}
+inline bool secondaryAdmissionDrawSuppressed() {
+    return detail::secondaryAdmissionDrawSuppressDepth != 0;
+}
+// Visual owns the D3D vtable hook, so it reports an actually suppressed call
+// here rather than making the Engine-side RenderPass wrapper guess its count.
+void noteSecondaryAdmissionDrawSkipped();
+// An independent serial is required because probe::currentFrameIndex() is
+// deliberately zero when performance_trace=0, while this behavior must work
+// in the normal shipping configuration.
+void secondaryAdmissionFrameBoundary();
+// The begin call precedes the game's draw; the finish call follows any
+// enhanced-grass companion draw.
+void beginGpuChunkDraw(ID3D11DeviceContext* context);
+void finishGpuChunkDraw(bool indexed, unsigned count,
+                        const DeferredDrawBindings* bindings);
+
+// Called by the D3D11 Draw/DrawIndexed hooks after their one timing sample.
+// A non-zero pass exists only while one verified direct child is active.
+void countDeferredDraw(unsigned elapsedUs, bool indexed, unsigned count,
+                       unsigned start, int base,
+                       const DeferredDrawBindings* bindings);
+
+// Successful game-owned D3D creations. These partition their existing timing
+// sample by active owner invocation/site and retain only fixed-size identity
+// metadata for correlation with the slow draws emitted at F12.
+void noteDeferredTextureCreated(const void* texture, unsigned elapsedUs,
+                                unsigned width, unsigned height,
+                                unsigned mipLevels, unsigned format,
+                                unsigned bindFlags, unsigned miscFlags);
+// Passive Run-80 detail for successful asset texture creations that execute
+// on a loader thread. Kept separate from the owner-scoped creation ring: an
+// off-main call cannot truthfully inherit the render thread's active owner.
+void noteOffMainTextureCreated(unsigned startFrame, unsigned finishFrame,
+                               unsigned elapsedUs, unsigned threadId,
+                               unsigned width, unsigned height,
+                               unsigned mipLevels, unsigned format,
+                               unsigned bindFlags, unsigned miscFlags,
+                               bool hasInitialData);
+void noteDeferredBufferCreated(const void* buffer, unsigned elapsedUs,
+                               unsigned byteWidth, unsigned bindFlags,
+                               unsigned usage, unsigned cpuAccessFlags,
+                               unsigned miscFlags);
+
+// The two rejected reflection-omission experiments need the existing device
+// CreateBuffer slot even when draw timing and every trace group are off.
+bool reflectionAdmissionBufferTrackingRequested();
+
+// Progressive secondary admission needs both Draw slots independently of
+// every visual enhancement and trace group. Visual publishes their atomic
+// readiness before Engine-side behavior is allowed to activate.
+bool secondaryPassAdmissionRequested();
+void setSecondaryAdmissionDrawHooksReady(bool ready);
 
 // Restores every patched site. Safe when nothing was installed.
 void shutdown();
@@ -220,6 +365,49 @@ bool shadowTransitionReuseForTest();
 bool shadowDeferColdAlphaForTest();
 bool shadowDeferColdActorPoseForTest();
 bool terrainPreloadLayersForTest();
+bool reflectionDeferAdmissionMeshForTest();
+bool reflectionDeferAdmissionAllForTest();
+unsigned secondaryPassAdmissionBudgetForTest();
+bool reflectionAdmissionTriggeredForTest(unsigned buffers);
+void resetAdmissionRenderableIdentitiesForTest();
+bool admissionRenderableFirstForTest(const void* object, unsigned kind,
+                                     unsigned consumer);
+void resetSecondaryAdmissionForTest(unsigned budget, bool armed);
+bool secondaryAdmissionArmedForTest();
+bool secondaryAdmissionRenderableDeferredForTest(const void* object,
+                                                  unsigned kind,
+                                                  bool reflection,
+                                                  bool directional);
+void setDeferredPassForTest(unsigned pass);
+void setDeferredOwnerContextForTest(unsigned invocation, unsigned site);
+void setReflectionContextForTest(unsigned manager, unsigned plane);
+void setCrossPassTracingForTest(bool enabled);
+void setGpuChunkTracingForTest(bool enabled);
+void armGpuChunksForTest();
+void closeGpuChunksForTest();
+unsigned gpuChunkBinDrawsForTest(unsigned bin);
+void recordGpuChunkTerrainCallForTest(bool block, const void* object,
+                                      unsigned cpuUs, unsigned resourceUs,
+                                      unsigned textureUs);
+void recordGpuChunkMeshCallForTest(const void* object, unsigned cpuUs);
+unsigned gpuChunkRenderableKindForTest(unsigned index);
+bool gpuChunkTerrainCallForTest(unsigned index, bool* block,
+                               unsigned* firstDraw, unsigned* lastDraw,
+                               unsigned* cpuUs, unsigned* resourceCount,
+                               unsigned* resourceUs,
+                               unsigned* textureCount,
+                               unsigned* textureUs);
+void setDirectionalContextForTest(bool enabled);
+void noteCrossPassBufferForTest(const void* buffer, unsigned bytes = 64);
+void countCrossPassDrawForTest(const void* buffer);
+void countDeferredDrawForTest(unsigned elapsedUs, bool indexed = true,
+                              unsigned count = 3);
+void noteDeferredCreationForTest(bool texture, unsigned elapsedUs);
+void resetOffMainTexturesForTest();
+bool latestOffMainTextureForTest(unsigned* startFrame, unsigned* finishFrame,
+                                 unsigned* elapsedUs, unsigned* threadId,
+                                 unsigned* width, unsigned* height,
+                                 unsigned* mipLevels, bool* hasInitialData);
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state);
 bool shouldDeferShadowMeshForTest(unsigned state);
 bool shadowActorPoseQueueConfirmedForTest(unsigned state, bool inQueue);
