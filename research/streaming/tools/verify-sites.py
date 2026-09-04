@@ -3953,12 +3953,23 @@ def check_deferred_passes(engine):
 
 
 def main():
-    engine = PE(os.path.join(GAME, "Engine.dll"))
+    engine = PE(os.environ.get("TQ_VERIFY_ENGINE_DLL")
+                or os.path.join(GAME, "Engine.dll"))
     game = PE(os.environ.get("TQ_VERIFY_GAME_DLL") or os.path.join(GAME, "Game.dll"))
     exe = PE(os.path.join(GAME, "TQ.exe"))
 
     print("Image identity")
     ok(engine.imagesize == const("kEngineImageSize"), "Engine.dll SizeOfImage %#x" % engine.imagesize)
+    grass_src = open(os.path.join(os.path.dirname(SRC), "grass.cpp")).read()
+    grass_flat = re.sub(r'"\s*\n\s*"', '', grass_src)
+    grass_prologue = re.search(r'kRenderPrologue\[\]\s*=\s*\{([^}]+)\}', grass_src)
+    grass_bytes = bytes(int(value.strip(), 0)
+                        for value in grass_prologue.group(1).split(','))
+    for symbol in ("kRenderGrassName", "kRenderGrassRtName"):
+        name = re.search(symbol + r'\[\]\s*=\s*"([^"]+)"', grass_flat).group(1)
+        rva = engine.exports().get(name)
+        ok(rva is not None and engine.read(rva, len(grass_bytes)) == grass_bytes,
+           "grass render export/prologue matches: %s" % symbol)
     check_legacy_scalar_contract(engine)
     hek = game.imagesize == const("kGameHekImageSize")
     ok(game.imagesize in (const("kGameImageSize"), const("kGameHekImageSize")),

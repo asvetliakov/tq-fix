@@ -2879,7 +2879,9 @@ HRESULT WINAPI hookMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
         tq::probe::drawTimingEnabled() ? tq::probe::now() : 0;
     HRESULT result = g_map(context, resource, subresource, type, flags, mapped);
     if (mapStart) tq::probe::addPhase(tq::probe::PhaseMapResource, mapStart);
-    if (SUCCEEDED(result) && mapped)
+    // Grass has one scratch buffer and upload queue. Other contexts must not
+    // publish mapped pointers into that immediate-context state.
+    if (context == g_context && SUCCEEDED(result) && mapped)
         tq::grass::noteMap(resource, subresource, mapped);
     return result;
 }
@@ -2892,11 +2894,11 @@ void WINAPI hookUnmap(ID3D11DeviceContext* context, ID3D11Resource* resource,
     // timed inside grass.cpp, on the rare path that actually does the work.
     // Before the commit, so the driver receives the edited vertices rather
     // than a second write to memory it has already taken.
-    tq::grass::noteUnmap(resource, subresource);
+    if (context == g_context) tq::grass::noteUnmap(resource, subresource);
     g_unmap(context, resource, subresource);
     // And after it, so the rotated copy is uploaded by an ordinary device call
     // of ours instead of from inside the driver's own unmap.
-    tq::grass::afterUnmap(context);
+    if (context == g_context) tq::grass::afterUnmap(context);
 }
 
 // The crossing card. Same index range, same everything, over a stream holding
@@ -2978,7 +2980,8 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
-    const bool grassDraw = !g_inside && g_grassEnhanced && tq::grass::rendering();
+    const bool grassDraw = !g_inside && context == g_context
+        && g_grassEnhanced && tq::grass::rendering();
     // Opened before the game's own grass draw and closed after ours, so the
     // region covers the blades and the crossing together.
     if (grassDraw) {
@@ -3153,8 +3156,11 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         g_iaSetIndexBuffer = (IASetIndexBufferFn)cv[19];
     }
     bool secondaryAdmissionDrawHooksReady = false;
+    // Enhanced grass needs the indexed-draw companion even when every other
+    // visual feature, secondary admission and performance tracing are off.
     if (g_options.smaa || toneEnabled || nativeBloomControl
-        || g_deferredBindingTracing || secondaryAdmissionDrawHooks) {
+        || g_deferredBindingTracing || secondaryAdmissionDrawHooks
+        || grassBufferHooks) {
         const bool indexedOk = patchSlot(
             &cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
         const bool drawOk = patchSlot(

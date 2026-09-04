@@ -256,6 +256,39 @@ A stream is also adopted at the draw itself, which is authoritative, with the
 twin then seeded from a staging copy. That path is the fallback for streams
 filled before the hooks existed.
 
+Enhanced grass requests the Draw hooks itself, including when SMAA, tone
+mapping, native bloom control, secondary admission and tracing are all off.
+Buffer tracking alone cannot render the extra cards.
+
+### Buffer lifetime and pending copies
+
+Tracking tables own their source buffers. A raw COM address alone is not a
+resource identity: after the game releases a buffer, the driver can reuse its
+address for a smaller buffer or a texture. Previously a stale grass record
+could accept that resource's mapped pointer and read 44,800 bytes from it.
+Keeping a reference prevents address reuse while the record is indexed and
+makes the descriptor checked at admission valid for that record's lifetime.
+
+Candidate and stream caches each retain at most 256 sources; promotion removes
+the candidate record. The maximum retained source payload is 21.875 MiB, plus
+driver allocation overhead. The existing twin cache is separate. Eviction,
+failed index insertion, and shutdown release references. There are no new
+descriptor queries or reference operations in the ordinary Map/Unmap path;
+known streams also skip the candidate lookup.
+
+Evicting a stream cancels its pending upload and staging seed before the slot
+can be reassigned. Refilling a stream cancels a seed of its previous contents.
+Promotion removes the candidate's mapped pointer, so it cannot survive an
+Unmap through the stream record. Grass Map/Unmap processing and crossing draws
+are restricted to the game's immediate context, which owns the shared scratch
+buffer. Staging readback still waits for a Present and uses `DO_NOT_WAIT`.
+
+The off-game self-test covers reference ownership and bounded eviction,
+protected memory after Unmap, reuse of an evicted address by a smaller buffer,
+seed cancellation on eviction/refill, and successful nonblocking seeding.
+These checks address concrete lifetime defects; the reported fountain crash
+still needs confirmation with the updated DLL on the affected machine.
+
 ### Four failures worth not repeating
 
 Each of these cost a run, and all four were plumbing rather than geometry.

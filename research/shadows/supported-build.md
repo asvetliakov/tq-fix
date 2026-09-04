@@ -14,6 +14,33 @@ Engine.dll is PE32/i386, preferred image base `0x10000000`, with a
 `0x0044b000` image size.  Runtime addresses must be rebased for ASLR; the
 audit uses preferred virtual addresses and RVAs.
 
+## User Engine.dll with UI patches (2026-09-05)
+
+The supplied `Engine (1).dll` has SHA-256
+`42bd9c2bbfd669cc8eb9b8f57d3f9bb9a494c616f352a3ebf8917b4805546c49`.
+Its file size (3,781,632 bytes), PE timestamp, image size, section layout and
+all 5,599 export names/RVAs match the Engine above. Only 58 file bytes differ:
+
+- `Engine::SetUIScale` branches at RVA `0x140cdc` to a stub at `0x2ab69c`.
+- `StyleManager::LoadStyle` branches at `0x225825` to a stub at `0x234499`.
+  The stub preserves the original `fontSize` lookup, adds two to its result,
+  and returns to `0x22582a`.
+
+Both grass render exports (`0x2390b0`, `0x23afc0`) and their verified
+prologues are unchanged. The full site verifier passes with the supplied
+Engine and Game DLLs together; no new runtime Engine profile is needed:
+
+```sh
+TQ_VERIFY_ENGINE_DLL='Engine (1).dll' TQ_VERIFY_GAME_DLL='Game (1).dll' \
+  python3 research/streaming/tools/verify-sites.py
+```
+
+This establishes Engine hook compatibility. It does not establish that the
+separate Direct3D11 renderer reaches our device-context Draw hooks on that
+machine. The user's older crash capture recorded grass fills/twin creation
+but no indexed or crossing draws; a post-fix capture and their Direct3D11.dll
+are needed to investigate the reported missing enhancement.
+
 The device implementation is not part of `Engine.dll`. `Direct3D11.dll` is a
 PE32/i386 plugin exported through `CreateRenderDevice`; it has its own preferred
 image base of `0x10000000` and must be treated as a separate address space. Its

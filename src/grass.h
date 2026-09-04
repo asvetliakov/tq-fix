@@ -119,6 +119,9 @@ bool rotatePlane(float* plane);
 // Grass streams are identified when created -- 44800 bytes, dynamic, vertex,
 // CPU-writable -- and then confirmed plane by plane before anything is
 // written, so a same-sized buffer from elsewhere is left alone.
+// Both tables own bounded references, preventing address reuse until eviction.
+// Map/Unmap and drawing are called only for the game's immediate context;
+// creation notifications may arrive from loader threads.
 void noteBufferCreated(ID3D11Buffer* buffer, const D3D11_BUFFER_DESC* desc);
 void noteMap(ID3D11Resource* resource, UINT subresource,
              const D3D11_MAPPED_SUBRESOURCE* mapped);

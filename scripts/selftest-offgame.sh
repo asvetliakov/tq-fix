@@ -51,3 +51,23 @@ done
 [ -s "$WORK/report.txt" ] || { echo "FAIL: self-test produced no report" >&2; exit 1; }
 cat "$WORK/report.txt"
 grep -q '^RESULT: 0 failure' "$WORK/report.txt"
+
+# Production hook activation with grass as the sole Draw-hook consumer.
+# Separate processes/directories keep the one-time INI state isolated.
+for grass_mode in enhanced original; do
+  grass_case="$WORK/grass-$grass_mode"
+  mkdir -p "$grass_case"
+  cp build/winmm.dll build/selftest.exe build/Direct3D11.dll "$grass_case/"
+  "$CX/bin/cxstart" --bottle "$(basename "$BOTTLE")" --no-convert \
+    --no-gui --no-wait \
+    --workdir "C:\\tqflicker-selftest\\grass-$grass_mode" \
+    -- "C:\\tqflicker-selftest\\grass-$grass_mode\\selftest.exe" \
+       --grass-hooks "$grass_mode" >/dev/null 2>&1 || true
+  for _ in $(seq 1 120); do
+    grep -q '^RESULT' "$grass_case/report.txt" 2>/dev/null && break
+    sleep 0.25
+  done
+  [ -s "$grass_case/report.txt" ] || { echo "FAIL: grass-$grass_mode produced no report" >&2; exit 1; }
+  cat "$grass_case/report.txt"
+  grep -q '^RESULT: 0 failure' "$grass_case/report.txt"
+done

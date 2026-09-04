@@ -1596,6 +1596,214 @@ float kCapturedPlaneFloat(unsigned index) {
     return value;
 }
 
+// COM lifetime model: objects remain inspectable after their last Release so
+// the test can verify exactly when a native allocator would recycle them.
+struct GrassTestBuffer : ID3D11Buffer {
+    ULONG refs = 1;
+    unsigned descCalls = 0;
+    D3D11_BUFFER_DESC desc = {};
+    GrassTestBuffer() {
+        desc.ByteWidth = 44800;
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
+        *out = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+    void STDMETHODCALLTYPE GetDevice(ID3D11Device** out) override { *out = nullptr; }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
+    void STDMETHODCALLTYPE GetType(D3D11_RESOURCE_DIMENSION* out) override { *out = D3D11_RESOURCE_DIMENSION_BUFFER; }
+    void STDMETHODCALLTYPE SetEvictionPriority(UINT) override {}
+    UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
+    void STDMETHODCALLTYPE GetDesc(D3D11_BUFFER_DESC* out) override { ++descCalls; *out = desc; }
+};
+
+// Only the slots used by grass are supplied. Unexpected driver calls fail the
+// test instead of silently returning a plausible result.
+struct GrassTestDevice {
+    void** vtable;
+    void* slots[4] = {};
+    GrassTestBuffer staging, twin;
+    GrassTestDevice() : vtable(slots) {
+        staging.refs = twin.refs = 0;
+        slots[2] = (void*)&release;
+        slots[3] = (void*)&create;
+    }
+    static ULONG WINAPI release(ID3D11Device*) { return 1; }
+    static HRESULT WINAPI create(ID3D11Device* self, const D3D11_BUFFER_DESC* desc,
+                                  const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer** out) {
+        auto* device = (GrassTestDevice*)self;
+        GrassTestBuffer* buffer = desc->Usage == D3D11_USAGE_STAGING
+            ? &device->staging : &device->twin;
+        buffer->desc = *desc;
+        buffer->AddRef();
+        *out = buffer;
+        return S_OK;
+    }
+};
+
+struct GrassTestContext {
+    void** vtable;
+    void* slots[48] = {};
+    GrassTestDevice device;
+    unsigned maps = 0, copies = 0;
+    UINT readFlags = 0;
+    HRESULT readResult = S_OK;
+    BYTE data[44800] = {};
+    GrassTestContext() : vtable(slots) {
+        slots[3] = (void*)&getDevice;
+        slots[14] = (void*)&map;
+        slots[15] = (void*)&unmap;
+        slots[47] = (void*)&copy;
+        memcpy(data, kCapturedPlane, sizeof(kCapturedPlane));
+    }
+    ID3D11DeviceContext* get() { return (ID3D11DeviceContext*)this; }
+    static void WINAPI getDevice(ID3D11DeviceContext* self, ID3D11Device** out) {
+        *out = (ID3D11Device*)&((GrassTestContext*)self)->device;
+    }
+    static HRESULT WINAPI map(ID3D11DeviceContext* self, ID3D11Resource*, UINT,
+                               D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
+        auto* context = (GrassTestContext*)self;
+        ++context->maps;
+        if (type == D3D11_MAP_READ) {
+            context->readFlags = flags;
+            if (FAILED(context->readResult)) return context->readResult;
+        }
+        out->pData = context->data;
+        return S_OK;
+    }
+    static void WINAPI unmap(ID3D11DeviceContext*, ID3D11Resource*, UINT) {}
+    static void WINAPI copy(ID3D11DeviceContext* self, ID3D11Resource*, ID3D11Resource*) {
+        ++((GrassTestContext*)self)->copies;
+    }
+};
+
+void testGrassBufferLifetime() {
+    tq::grass::installBuffers();
+    GrassTestBuffer source;
+    tq::grass::noteBufferCreated(&source, &source.desc);
+    tq::grass::noteBufferCreated(&source, &source.desc);
+    check(source.refs == 2, "grass candidate owns one reference, including duplicate notifications");
+
+    BYTE* memory = (BYTE*)VirtualAlloc(nullptr, 49152, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    check(memory != nullptr, "allocate protected grass mapped-memory fixture");
+    if (!memory) { tq::grass::shutdown(); return; }
+    memcpy(memory, kCapturedPlane, sizeof(kCapturedPlane));
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    mapped.pData = memory;
+    tq::grass::noteMap(&source, 0, &mapped);
+    tq::grass::noteUnmap(&source, 0);
+    GrassTestContext context;
+    tq::grass::afterUnmap(context.get());
+    check(source.refs == 2 && tq::grass::crossedBuffer(&source) == &context.device.twin,
+          "grass promotion transfers ownership and produces a usable crossing");
+    const unsigned descriptorCalls = source.descCalls;
+    tq::grass::noteMap(&source, 0, &mapped);
+    tq::grass::noteUnmap(&source, 0);
+    tq::grass::afterUnmap(context.get());
+    check(source.descCalls == descriptorCalls, "tracked grass Map/Unmap adds no descriptor queries");
+    DWORD previous = 0;
+    const bool protectedMemory = VirtualProtect(memory, 49152, PAGE_NOACCESS, &previous) != 0;
+    check(protectedMemory, "revoke access to unmapped grass memory");
+    tq::grass::noteUnmap(&source, 0);
+    check(true, "a repeated Unmap cannot read a stale candidate mapping");
+    check(source.Release() == 1, "a released game buffer remains alive while grass tracks its address");
+    tq::grass::shutdown();
+    check(source.refs == 0 && context.device.twin.refs == 0,
+          "grass shutdown releases both source and twin ownership");
+
+    // The same address is now eligible for reuse by a tiny unrelated buffer.
+    source.refs = 1;
+    source.desc.ByteWidth = 16;
+    tq::grass::installBuffers();
+    tq::grass::noteBufferCreated(&source, &source.desc);
+    tq::grass::noteMap(&source, 0, &mapped);
+    tq::grass::noteUnmap(&source, 0);
+    check(source.refs == 1, "a recycled small buffer never reads protected mapped memory");
+    tq::grass::shutdown();
+
+    tq::grass::installBuffers();
+    GrassTestBuffer candidates[600];
+    for (auto& buffer : candidates) {
+        tq::grass::noteBufferCreated(&buffer, &buffer.desc);
+        buffer.Release();
+    }
+    unsigned retained = 0;
+    bool balanced = true;
+    for (auto& buffer : candidates) {
+        retained += buffer.refs;
+        balanced &= buffer.refs <= 1;
+    }
+    check(balanced && retained <= 256 && candidates[0].refs == 0,
+          "candidate churn releases evictions and keeps ownership bounded");
+    tq::grass::shutdown();
+    for (auto& buffer : candidates) balanced &= buffer.refs == 0;
+    check(balanced, "candidate shutdown leaves no retained references");
+
+    tq::grass::installBuffers();
+    GrassTestBuffer seeded, replacements[300];
+    GrassTestContext seedContext;
+    tq::grass::crossedBuffer(&seeded);
+    tq::grass::seedFromDraw(seedContext.get(), &seeded);
+    seeded.Release();
+    tq::grass::onPresent(seedContext.get());
+    for (auto& buffer : replacements) tq::grass::crossedBuffer(&buffer);
+    tq::grass::onPresent(seedContext.get());
+    check(seeded.refs == 0 && seedContext.copies == 1 && seedContext.maps == 0,
+          "evicting a stream cancels its seed before a reused slot can consume it");
+    seeded.refs = 1;
+    seeded.desc.ByteWidth = 16;
+    tq::grass::noteBufferCreated(&seeded, &seeded.desc);
+    tq::grass::noteMap(&seeded, 0, &mapped);
+    tq::grass::noteUnmap(&seeded, 0);
+    check(seeded.refs == 1, "address reuse after eviction is safe while the grass cache remains active");
+    tq::grass::shutdown();
+    balanced = seedContext.device.staging.refs == 0;
+    for (auto& buffer : replacements) balanced &= buffer.refs == 1;
+    check(balanced, "stream churn and shutdown release every cache reference");
+
+    tq::grass::installBuffers();
+    GrassTestBuffer refilled;
+    GrassTestContext refillContext;
+    tq::grass::crossedBuffer(&refilled);
+    tq::grass::seedFromDraw(refillContext.get(), &refilled);
+    BYTE empty[44800] = {};
+    mapped.pData = empty;
+    tq::grass::noteMap(&refilled, 0, &mapped);
+    tq::grass::noteUnmap(&refilled, 0);
+    tq::grass::afterUnmap(refillContext.get());
+    tq::grass::onPresent(refillContext.get());
+    tq::grass::onPresent(refillContext.get());
+    check(refillContext.maps == 0, "a refill cancels an older queued seed even when no cards remain");
+    tq::grass::shutdown();
+
+    tq::grass::installBuffers();
+    GrassTestBuffer normalSeed;
+    GrassTestContext normalContext;
+    tq::grass::crossedBuffer(&normalSeed);
+    tq::grass::seedFromDraw(normalContext.get(), &normalSeed);
+    tq::grass::onPresent(normalContext.get());
+    check(normalContext.maps == 0, "grass seeding still waits for a Present before attempting readback");
+    normalContext.readResult = DXGI_ERROR_WAS_STILL_DRAWING;
+    tq::grass::onPresent(normalContext.get());
+    check(normalContext.maps == 1 && normalContext.readFlags == D3D11_MAP_FLAG_DO_NOT_WAIT,
+          "busy grass readback retries without a GPU wait");
+    normalContext.readResult = S_OK;
+    tq::grass::onPresent(normalContext.get());
+    check(normalContext.maps == 3 && tq::grass::crossedBuffer(&normalSeed) == &normalContext.device.twin,
+          "completed grass readback still publishes a crossing");
+    tq::grass::shutdown();
+    check(normalSeed.refs == 1 && normalContext.device.twin.refs == 0
+          && normalContext.device.staging.refs == 0,
+          "completed seeding releases all owned resources at shutdown");
+    VirtualFree(memory, 0, MEM_RELEASE);
+}
+
 void testGrassCrossed() {
     float plane[32];
     loadPlane(plane);
@@ -3458,7 +3666,68 @@ void testShadowFitStabilizer() {
           "a degenerate fit extent is left untouched");
 }
 
+// Runs in its own fixture directory/process because production options and
+// device hooks are initialized once. Verify the actual DLL's vtable patches,
+// with every other Draw-hook consumer disabled.
+int testGrassOnlyHooks(bool enhanced) {
+    g_report = fopen("report.txt", "w");
+    if (!g_report) return 99;
+    FILE* ini = fopen("tqflicker.ini", "w");
+    check(ini != nullptr, "create isolated grass-only configuration");
+    if (ini) {
+        fprintf(ini,
+            "[graphics]\ngrass=%s\naa=fxaa\nshadows=original\n"
+            "tonemap=original\nhdr=off\nbloom=original\nanisotropy=1\n"
+            "[performance]\nstreaming=original\narchive_cache_mb=0\n"
+            "loose_texture_max=0\nshadow_defer_cold_resources=0\n"
+            "shadow_defer_cold_actor_pose=0\nterrain_preload_layers=0\n"
+            "secondary_pass_admission_budget=0\n"
+            "[debug]\ntrace=0\nperformance_trace=0\nframe_overlay=0\n",
+            enhanced ? "enhanced" : "original");
+        fclose(ini);
+    }
+    char path[MAX_PATH];
+    GetFullPathNameA("winmm.dll", MAX_PATH, path, nullptr);
+    HMODULE proxy = LoadLibraryA(path);
+    GetFullPathNameA("Direct3D11.dll", MAX_PATH, path, nullptr);
+    HMODULE host = LoadLibraryA(path);
+    typedef HRESULT (*MakeDeviceFn)(ID3D11Device**, ID3D11DeviceContext**);
+    MakeDeviceFn makeDevice = host
+        ? (MakeDeviceFn)(void*)GetProcAddress(host, "make_device") : nullptr;
+    Sleep(250);
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    HRESULT result = makeDevice ? makeDevice(&device, &context) : E_FAIL;
+    check(proxy && SUCCEEDED(result) && device && context,
+          "create a device through the production grass-only installation path");
+    if (proxy && context) {
+        void** slots = *(void***)context;
+        const unsigned indices[] = {12, 13, 14, 15};
+        bool expected = true;
+        for (unsigned slot : indices) {
+            MEMORY_BASIC_INFORMATION info = {};
+            expected &= VirtualQuery(slots[slot], &info, sizeof(info)) != 0
+                && (info.AllocationBase == proxy) == enhanced;
+        }
+        check(expected, enhanced
+            ? "grass alone installs DrawIndexed, Draw, Map and Unmap without tracing or secondary admission"
+            : "original grass leaves DrawIndexed, Draw, Map and Unmap unhooked when other consumers are off");
+    }
+    if (context) context->Release();
+    if (device) device->Release();
+    if (proxy) FreeLibrary(proxy);
+    if (host) FreeLibrary(host);
+    check(GetFileAttributesA("tqflicker-debug.log") == INVALID_FILE_ATTRIBUTES
+          && GetFileAttributesA("tqflicker-frames.csv") == INVALID_FILE_ATTRIBUTES,
+          "grass-only hook installation does not enable tracing");
+    fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
+    fclose(g_report);
+    return g_failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 3 && !strcmp(argv[1], "--grass-hooks"))
+        return testGrassOnlyHooks(!strcmp(argv[2], "enhanced"));
     const char* dll = argc > 1 ? argv[1] : "winmm.dll";
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
     g_report = fopen(report, "w");
@@ -3476,6 +3745,7 @@ int main(int argc, char** argv) {
     testDetour();
     testGrassPointerIndex();
     testGrassCrossed();
+    testGrassBufferLifetime();
     testBloomExtraction();
     testBloomShaders();
     testShadowSplitRedirect();
