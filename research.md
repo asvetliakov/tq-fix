@@ -30,13 +30,13 @@ experiments were on CrossOver/DXMT, not a native-Windows validation campaign.
 
 Three actionable mechanisms emerged:
 
-- **Directional-shadow cold resources.** The verified DX11 gather reaches
-  `Actor::AddToScene -> Actor::UpdateMeshInstance ->
-  GraphicsMeshInstance::UpdatePose -> Resource::EnsureAvailable` before the
-  later caster eligibility check. Separately, mesh shadow-pass counting
-  ensures the root mesh, and material setup can ensure textures that the
-  active shadow shader will never consume. These are reached DX11 paths,
-  not merely leftover DX9 interfaces (§81–§84 and earlier shadow findings).
+- **Directional-shadow cold resources.** The regular caster path can block
+  on a root mesh merely to read its shadow-pass count, then on an alpha-tested
+  base texture to construct a shadow pass. Material setup can additionally
+  load textures the active shadow shader never uses. The Actor pose path is
+  another, earlier root-mesh dependency—not the whole shadow problem. The
+  separate interception points and their fixes are explained below. These
+  are reached DX11 paths, not merely leftover DX9 interfaces.
 - **Runtime terrain's missing layer preload.**
   `TerrainRT::LoadRenderData -> TerrainType::LoadTextures` creates layer
   Resources, but the runtime owner's preload does not queue those layer
@@ -56,6 +56,53 @@ Three actionable mechanisms emerged:
 No complete shadow, frustum-culling, or resource-loader rewrite was required
 to address the observed route. That does not establish that those systems
 have no other limitations.
+
+## Directional-shadow resources: regular casters and the earlier Actor path
+
+`shadow_defer_cold_resources` handles the regular caster/material path,
+independently of the additional Actor pose option:
+
+- **Root mesh / pass count.** The shadow renderer asks
+  `GraphicsMeshInstance::GetNumShadowRenderPasses()`, which calls
+  `Resource::EnsureAvailable(mesh)` before returning the mesh's pass count.
+  The hook checks residency first, queues an unloaded root through the stock
+  loader, and returns zero shadow passes while the root is cold. This covers
+  both opaque and alpha-tested exact mesh-instance casters; it does not
+  require reaching `Actor::UpdateMeshInstance`. Resident roots resume the
+  normal pass-count path.
+- **Alpha-tested base texture / shadow record.** A resident mesh can still
+  have a cold base texture needed for its cutout shadow. At the verified
+  shadow-record construction call, the fix checks the exact mesh-instance
+  class and shadow style, preserves caster eligibility, queues the unloaded
+  texture, and omits that caster/pass while the texture is cold. The cutout
+  shadow returns when resident; it is not replaced with solid foliage.
+- **Material textures / shader inputs.**
+  `GraphicsMesh::SetShaderParameters -> GraphicsTexture::GetTexture` can
+  ensure a texture before the subsequent setter discovers that the shadow
+  shader has no corresponding parameter. The fix checks the resident active
+  shader first and skips unused inputs, including the separate instance bump
+  ensure. It also skips the generic base texture when a verified non-null
+  instance override immediately replaces its binding. An opaque caster with
+  a resident root can still cast without loading irrelevant textures; shader
+  inputs actually required by the pass retain their stock behavior.
+
+`shadow_defer_cold_actor_pose` adds the **earlier Actor boundary**. During
+directional gathering, `Actor::AddToScene -> Actor::UpdateMeshInstance ->
+GraphicsMeshInstance::UpdatePose -> Resource::EnsureAvailable` can load the
+root before the regular pass-count gate sees it cold. This fix queues the
+root and defers that pose update only when loading/queuing is confirmed;
+otherwise it calls stock. `AddToScene` still submits the renderable, and the
+regular root gate above omits its shadow while cold. A resident root takes
+the stock pose update. This is why the Actor option requires the complete
+regular cold-resource patch set rather than replacing it (§81–§84).
+
+These resource changes are scoped to the verified main-thread directional-
+shadow context. They do not defer normal colour rendering, point shadows,
+or arbitrary renderable classes. Cold-resource omission also remains distinct
+from the later shared secondary-draw budget: one avoids specific synchronous
+dependencies; the other spreads first drawing of otherwise eligible objects.
+Exact sites for all four paths are in the
+[disassembly target index](research/streaming/disassembly-targets.md).
 
 ## Accepted implementation
 
@@ -174,10 +221,24 @@ transition proxy; it is supporting mechanism evidence, not another claimed
 felt event. Nested CPU intervals and queued GPU intervals must not be summed
 as independent costs.
 
-The conclusion is **keep the measured fixes**. It is not “all stutter is
+The conclusion is **keep the combined, targeted fixes**: defer cold root
+meshes at regular shadow-pass counting, defer cold alpha-base textures at
+shadow-record construction, avoid unused/redundant shadow material textures,
+and catch the additional root-mesh dependency before Actor pose work. Queue
+terrain layers earlier through stock preload, then spread new reflection and
+directional-shadow draws with the shared admission budget. The regular shadow
+resource fixes are not limited to Actors, and the Actor hook does not replace
+them. The separate progressive uploader spreads eligible loose-file texture
+bytes; it is not an archive loader or a substitute for secondary admission.
+
+Together, the accepted changes made the old-route **play** hitch no longer
+noticeable in Runs 84–85 without reducing shadow distance or resolution, or
+rewriting the renderer. This supports the combination, not a claim that every
+component independently eliminates the hitch. It is not “all stutter is
 fixed”: save loading, first-world-frame cost, other routes, long-session
 identity/residency behavior, and native-Windows results are not established
-by these two route confirmations.
+by these two route confirmations. The later module refactor still requires
+its Run 87 in-game confirmation.
 
 ## Rejected explanations and experiments
 

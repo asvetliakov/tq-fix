@@ -60,9 +60,11 @@ here were made on the supported CrossOver/DXMT installation.
 
 Our fix is to prepare resources earlier and spread secondary drawing across
 frames. The defaults queue and temporarily omit cold directional-shadow casters,
-avoid unused shadow texture dependencies, invoke the stock terrain-layer
-preload, and share an eight-new-object-per-frame draw-admission budget across
-reflection and directional shadow. Normal colour drawing remains unchanged;
+covering both root meshes and alpha-tested base textures, and avoid unused
+shadow material inputs. An additional earlier Actor pose hook prevents loading
+the root before those regular caster checks. Terrain layers receive the stock
+preload, and reflection and directional shadow share an eight-new-object-per-
+frame draw-admission budget. Normal colour drawing remains unchanged;
 pending local shadows/reflections may appear later. This does not lower shadow
 resolution or undo the shadow-distance fix, and required no renderer rewrite.
 The separate 8 MiB archive cache remains enabled for its limited reuse benefit.
@@ -195,21 +197,25 @@ result, `arc_cache_evict` says whether the slab is too small, and
 `arc_cache_bad` must be zero.
 
 `shadow_defer_cold_resources=1` changes only exact `GraphicsMeshInstance`
-casters in the directional shadow map. Before the engine can even ask for shadow
-style, it synchronously ensures the root mesh merely to read its pass count.
+casters in the directional shadow map. This is the regular caster/material
+fix, not an Actor-only optimization. The renderer calls
+`GraphicsMeshInstance::GetNumShadowRenderPasses()`, which synchronously ensures
+the root mesh merely to read its pass count, before even asking for shadow style.
 A root mesh that is still unloaded or loading now makes that caster report
 zero passes; an unloaded mesh is explicitly queued through the engine's normal
 preload path, and the caster returns automatically when it is resident. This
-applies to opaque and alpha-tested mesh-instance casters. Resident casters and
-the normal colour pass are unchanged.
+applies to opaque and alpha-tested mesh-instance casters. Resident roots take
+the normal pass-count path; normal colour rendering and point shadows are
+unchanged.
 
-For an alpha-tested caster whose base texture is still unloaded or loading,
-the later caster/pass is likewise omitted and an unloaded texture is queued.
+For an alpha-tested caster whose root is resident but whose base texture is
+still unloaded or loading, the later shadow-record construction gate omits
+that caster/pass and queues an unloaded texture.
 Opaque resident casters still cast normally, but their material textures are
 not loaded when the active shadow shader has no matching parameter. The same
-check also covers
-an instance's optional `bumpTexture` override: stock code ensured that Resource
-before discovering that a directional-shadow shader had no bump input. The
+check also covers an instance's optional `bumpTexture` override: stock code
+ensured that Resource before discovering that a directional-shadow shader
+had no bump input. The
 generic mesh `baseTexture` is also omitted in the directional pass when the
 same instance has a distinct non-null base override that the verified stock
 path immediately ensures and binds to the same Name. The normal colour pass is
@@ -219,12 +225,13 @@ solid-looking foliage or a missing visible object. It defaults to `1`, works
 with the performance probe off, and installs no trace group by itself.
 Run 51 found no visible flicker or shadow popping from the texture omission.
 Run 59 then removed every directional-shadow texture load in play, leaving
-cold root meshes and GPU work as the marked burst. The root-mesh part remains
-an explicit temporary local-shadow quality trade under measurement; it is not
-claimed to remove the complete burst.
+cold root meshes and GPU work as the marked burst. These resource fixes are
+part of the subsequently accepted Run 84–85 combination, but are not claimed
+to remove the complete burst alone. Temporary local-shadow omission remains
+their deliberate quality trade.
 
-`shadow_defer_cold_actor_pose=1` moves that same cold-root decision to the
-earlier exact `Actor::AddToScene` call used while
+`shadow_defer_cold_actor_pose=1` adds another interception point, moving the
+cold-root decision to the earlier exact `Actor::AddToScene` call used while
 `GraphicsShadowMapDx11::RenderDirectional` gathers its scene. Stock code calls
 `Actor::UpdateMeshInstance`, which enters `GraphicsMeshInstance::UpdatePose`
 and synchronously loads the root mesh before the later caster gate can see it
