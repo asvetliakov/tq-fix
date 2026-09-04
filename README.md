@@ -205,13 +205,20 @@ the stale map visibly flickers and the complete build is merely paid on the
 following frame. Leave it at `0`; the switch remains only to preserve the exact
 measured experiment.
 
-`shadow_defer_cold_alpha=1` changes only alpha-tested
-`GraphicsMeshInstance` casters in the directional shadow map. If their base
-texture is still unloaded or loading, the caster/pass is omitted and an
-unloaded texture is explicitly queued through the engine's normal preload
-path. The caster returns automatically when that texture is resident. Opaque
-casters still cast normally, but their material textures are not loaded when
-the active shadow shader has no matching parameter. The same check now covers
+`shadow_defer_cold_alpha=1` changes only exact `GraphicsMeshInstance` casters
+in the directional shadow map. Before the engine can even ask for shadow
+style, it synchronously ensures the root mesh merely to read its pass count.
+A root mesh that is still unloaded or loading now makes that caster report
+zero passes; an unloaded mesh is explicitly queued through the engine's normal
+preload path, and the caster returns automatically when it is resident. This
+applies to opaque and alpha-tested mesh-instance casters. Resident casters and
+the normal colour pass are unchanged.
+
+For an alpha-tested caster whose base texture is still unloaded or loading,
+the later caster/pass is likewise omitted and an unloaded texture is queued.
+Opaque resident casters still cast normally, but their material textures are
+not loaded when the active shadow shader has no matching parameter. The same
+check also covers
 an instance's optional `bumpTexture` override: stock code ensured that Resource
 before discovering that a directional-shadow shader had no bump input. The
 generic mesh `baseTexture` is also omitted in the directional pass when the
@@ -221,10 +228,11 @@ unchanged, and a shadow shader that does use the bump texture still takes the
 stock path. The temporary alpha trade is a missing cutout shadow rather than
 solid-looking foliage or a missing visible object. It defaults to `0`, works
 with the performance probe off, and installs no trace group by itself.
-Run 51 found no visible flicker or shadow popping from this omission, but it
-did not remove the marked two-frame loading burst: other cold shadow textures
-were still loaded after the checked base texture became resident. Treat the
-switch as a verified mechanism, not yet as a complete loading-burst fix.
+Run 51 found no visible flicker or shadow popping from the texture omission.
+Run 59 then removed every directional-shadow texture load in play, leaving
+cold root meshes and GPU work as the marked burst. The root-mesh part remains
+an explicit temporary local-shadow quality trade under measurement; it is not
+claimed to remove the complete burst.
 
 Accepted anisotropy values are `1` through `16`; use `anisotropy=1` for the
 game's original trilinear filtering. Accepted rollback values are `aa=fxaa` and

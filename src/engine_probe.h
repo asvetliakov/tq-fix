@@ -129,15 +129,21 @@ void readOptions(const wchar_t* iniPath);
 
 // [performance] shadow_defer_cold_alpha, a fix and defaulting to 0.
 //
+// Before any caster record exists, GraphicsMeshInstance ensures its root mesh
+// merely to read the number of shadow passes. At 1, a root mesh in state 0 or
+// 1 makes that exact caster return zero passes; state 0 is explicitly enqueued
+// with the engine's normal preload arguments, and the caster returns when the
+// mesh reaches state 2. This applies to opaque and alpha-tested mesh-instance
+// casters only inside the directional map. Resident casters and the colour
+// pass are unchanged.
+//
 // GraphicsMeshInstance's alpha-tested shadow styles need a base texture only
-// to cut holes in the caster. At 1, a caster/pass whose verified base texture
-// Resource is in state 0 or 1 is omitted from that directional map; state 0 is
-// explicitly enqueued with the engine's normal preload arguments. It returns
-// automatically once the Resource reaches state 2. Opaque casters still render
-// normally, but a material texture whose Name is absent from their active
-// shadow shader is not loaded. The colour pass is unchanged. This avoids
-// rendering foliage/fences as solid while removing both classes of needless
-// synchronous shadow-side texture load. GraphicsMeshInstance's optional
+// to cut holes in the caster. A caster/pass whose verified base texture
+// Resource is in state 0 or 1 is likewise omitted until resident. Opaque
+// resident casters still render normally, but a material texture whose Name
+// is absent from their active shadow shader is not loaded. This avoids
+// rendering foliage/fences as solid while removing needless synchronous
+// shadow-side texture load. GraphicsMeshInstance's optional
 // bumpTexture override has the same stock ordering bug--EnsureAvailable runs
 // before the setter checks the shader--so it is likewise skipped only when
 // the active directional-shadow shader proves it has no bumpTexture input.
@@ -176,8 +182,11 @@ bool asyncLevelLoadForTest();
 bool shadowTransitionReuseForTest();
 bool shadowDeferColdAlphaForTest();
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state);
+bool shouldDeferShadowMeshForTest(unsigned state);
 void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
                                      bool failed);
+void countDeferredShadowMeshForTest(unsigned state, bool enqueued,
+                                    bool failed);
 // Drives the whole-map/matrix cache without patching an off-game synthetic
 // module. The production wrapper uses these same two helpers.
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix);

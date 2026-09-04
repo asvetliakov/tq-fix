@@ -923,6 +923,11 @@ void testEngineProbe() {
           && !tq::engineprobe::shouldDeferShadowAlphaForTest(3, 2)
           && !tq::engineprobe::shouldDeferShadowAlphaForTest(6, 0),
           "only alpha-tested styles in resource states 0/1 are deferred");
+    check(tq::engineprobe::shouldDeferShadowMeshForTest(0)
+          && tq::engineprobe::shouldDeferShadowMeshForTest(1)
+          && !tq::engineprobe::shouldDeferShadowMeshForTest(2)
+          && !tq::engineprobe::shouldDeferShadowMeshForTest(3),
+          "only root meshes in resource states 0/1 are deferred");
     tq::engineprobe::shutdown();
     tq::engineprobe::readOptions(nullptr);
     tq::probe::readOptions(nullptr);
@@ -2222,6 +2227,9 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
     tq::engineprobe::countDeferredShadowAlphaForTest(0, true, false);
     tq::engineprobe::countDeferredShadowAlphaForTest(1, false, false);
     tq::engineprobe::countDeferredShadowAlphaForTest(0, false, true);
+    tq::engineprobe::countDeferredShadowMeshForTest(0, true, false);
+    tq::engineprobe::countDeferredShadowMeshForTest(1, false, false);
+    tq::engineprobe::countDeferredShadowMeshForTest(0, false, true);
     tq::probe::endFrame(16.7f);
     check(tq::probe::counterForTest(
               0, tq::probe::CounterEngineShadowAlphaOmitted) == 3
@@ -2234,6 +2242,17 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && tq::probe::counterForTest(
               0, tq::probe::CounterEngineShadowAlphaEnqueueFailed) == 1,
           "cold alpha-shadow counters partition state and enqueue outcome");
+    check(tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMeshOmitted) == 3
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMeshOmittedState0) == 2
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMeshOmittedState1) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMeshOmittedEnqueued) == 1
+          && tq::probe::counterForTest(
+              0, tq::probe::CounterEngineShadowMeshOmittedEnqueueFailed) == 1,
+          "cold root-mesh counters partition state and enqueue outcome");
 
     // A steady baseline, then one frame that spikes in a single phase. The row
     // for that frame has to name the phase, not merely report the frame time.
@@ -2335,6 +2354,12 @@ void testProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
           && strstr(csvText, "engine_shadow_res_texture_us") != nullptr
           && strstr(csvText, "engine_shadow_res_type_other_us") != nullptr
           && strstr(csvText, "engine_shadow_mesh_cold_us") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_omitted") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_omitted_state0") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_omitted_state1") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_omitted_enqueued") != nullptr
+          && strstr(csvText, "engine_shadow_mesh_omitted_enqueue_failed")
+                 != nullptr
           && strstr(csvText, "engine_shadow_material_tex_us") != nullptr
           && strstr(csvText, "engine_shadow_material_tex_used_us") != nullptr
           && strstr(csvText, "engine_shadow_material_tex_unused_us") != nullptr

@@ -177,15 +177,18 @@ const BYTE kResourceFileNameBytes[] = {
 // shadow passes before shader selection and before the draw-list record is
 // constructed. For GraphicsMeshInstance, the first operation is
 // EnsureAvailable(this+4), where this+4 is its GraphicsMesh resource. The
-// complete 24-byte function is verified and only its E8 displacement is
-// changed. This is both the earliest exact cold-mesh boundary for a per-caster
-// omission and the point option 2 would have to make resident earlier.
+// complete 24-byte function is verified. Trace-only boots retarget its E8;
+// the behavior fix detours the entry while stealing only the first six
+// complete, non-relative bytes. This is both the earliest exact cold-mesh
+// boundary for a per-caster omission and the point option 2 would have to make
+// resident earlier.
 const DWORD kShadowMeshPassCountRva = 0x173440;
 const char kShadowMeshPassCountName[] =
     "?GetNumShadowRenderPasses@GraphicsMeshInstance@GAME@@UBEHXZ";
 const DWORD kEnsureAvailableRva = 0x2130f0;
 const char kEnsureAvailableName[] =
     "?EnsureAvailable@Resource@GAME@@QBEXXZ";
+const unsigned kGraphicsMeshResourceOffset = 4;
 const unsigned kShadowMeshEnsureCallOffset = 10;
 const BYTE kShadowMeshPassCountBytes[] = {
     0x56,                                      // push esi
@@ -1358,11 +1361,12 @@ bool g_asyncLevelLoad;
 // matching matrix for one frame. A fix rather than an instrument: defaults
 // off, reaches install() with the probe off, and does no timing in that mode.
 bool g_shadowTransitionReuse;
-// [performance] shadow_defer_cold_alpha. Alpha-tested shadow casters whose
-// base texture is not resident are omitted from this directional build and
-// explicitly handed to the engine's loader. They return on the first later
-// build after the texture reaches loaded state 2. Opaque casters and colour
-// rendering are untouched.
+// [performance] shadow_defer_cold_alpha. Exact GraphicsMeshInstance casters
+// whose root mesh is not resident are omitted before their pass count is read;
+// alpha-tested casters whose base texture is not resident are omitted later at
+// the record boundary. State-0 dependencies are explicitly handed to the
+// engine's loader and return after reaching state 2. Colour rendering and
+// resident casters are untouched.
 bool g_shadowDeferColdAlpha;
 bool g_shadowDeferActive;
 // Whether this install() is installing the trace at all. archive_cache_mb can
@@ -1395,6 +1399,7 @@ typedef void* (__fastcall* GuaranteedGetLevelFn)(void* self, void* edx,
                                                 int flag);
 typedef void (__fastcall* LoadResourceFn)(void* self, void* edx, void* resource);
 typedef void (__fastcall* EnsureAvailableFn)(void* self, void* edx);
+typedef int (__fastcall* ShadowMeshPassCountFn)(void* self, void* edx);
 typedef const char* (__fastcall* ResourceFileNameFn)(void* self, void* edx);
 typedef void* (__fastcall* GraphicsTextureGetTextureFn)(void* self, void* edx);
 typedef void (__fastcall* GraphicsMeshSetShaderParametersFn)(
@@ -1448,6 +1453,7 @@ BackgroundLoadLevelFn g_backgroundLoadLevel;
 GuaranteedGetLevelFn g_guaranteedGetLevel;
 LoadResourceFn g_loadResource;
 EnsureAvailableFn g_ensureAvailable;
+ShadowMeshPassCountFn g_shadowMeshPassCount;
 ResourceFileNameFn g_resourceFileName;
 GraphicsTextureGetTextureFn g_graphicsTextureGetTexture;
 GraphicsMeshSetShaderParametersFn g_graphicsMeshSetShaderParameters;
@@ -1479,6 +1485,7 @@ unsigned g_renderTicks;
 Detour g_loadLevelDetour;
 Detour g_guaranteedDetour;
 Detour g_loadResourceDetour;
+Detour g_shadowMeshPassCountDetour;
 Detour g_unloadLevelDetour;
 Detour g_enqueueDetour;
 Detour g_readFromFileDetour;
@@ -2633,6 +2640,12 @@ bool shouldDeferShadowAlpha(unsigned style, unsigned state) {
     return style >= 3 && style <= 5 && state <= 1;
 }
 
+bool shouldDeferShadowMesh(unsigned state) {
+    // Resource states 0 and 1 are respectively cold and loading. The stock
+    // method synchronously ensures both before it can read the pass count.
+    return state <= 1;
+}
+
 void countDeferredShadowAlpha(unsigned state, bool enqueued, bool failed) {
     if (!g_shadowTracing) return;
     tq::probe::engineCount(tq::probe::CounterEngineShadowAlphaOmitted);
@@ -2644,6 +2657,62 @@ void countDeferredShadowAlpha(unsigned state, bool enqueued, bool failed) {
     if (failed)
         tq::probe::engineCount(
             tq::probe::CounterEngineShadowAlphaEnqueueFailed);
+}
+
+void countDeferredShadowMesh(unsigned state, bool enqueued, bool failed) {
+    if (!g_shadowTracing) return;
+    tq::probe::engineCount(tq::probe::CounterEngineShadowMeshOmitted);
+    tq::probe::engineCount(state == 0
+        ? tq::probe::CounterEngineShadowMeshOmittedState0
+        : tq::probe::CounterEngineShadowMeshOmittedState1);
+    if (enqueued)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowMeshOmittedEnqueued);
+    if (failed)
+        tq::probe::engineCount(
+            tq::probe::CounterEngineShadowMeshOmittedEnqueueFailed);
+}
+
+int __fastcall hookShadowMeshPassCount(void* self, void* edx) {
+    if (!g_shadowMeshPassCount) return 0;
+    // This exported method is global, but its behavior changes only for the
+    // main-thread directional build. Every colour, point-shadow, worker, and
+    // resident call reaches the exact original function through its
+    // trampoline.
+    if (!g_shadowDeferActive || !onMainThread()
+        || InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0
+        || !g_resourceStateVerified || !self || !g_resourceLoaderAccessor
+        || !g_shadowEnqueue)
+        return g_shadowMeshPassCount(self, edx);
+
+    void* const mesh = *(void**)((BYTE*)self + kGraphicsMeshResourceOffset);
+    if (!mesh) return g_shadowMeshPassCount(self, edx);
+    const unsigned state = *(const unsigned*)((const BYTE*)mesh
+                                              + kResourceLoadedStateOffset);
+    if (!shouldDeferShadowMesh(state))
+        return g_shadowMeshPassCount(self, edx);
+
+    bool enqueued = false;
+    bool failed = false;
+    if (state == 0
+        && !*(void* const*)((const BYTE*)mesh + kResourceInQueueOffset)) {
+        void* const loader = g_resourceLoaderAccessor(mesh, nullptr);
+        if (loader) {
+            // Same verified stock preload tuple used by the alpha-base gate:
+            // priority 1, notify=true, immediate=false.
+            g_shadowEnqueue(loader, nullptr, mesh, 1, 1, 0);
+            const unsigned after = *(const unsigned*)((const BYTE*)mesh
+                                                       + kResourceLoadedStateOffset);
+            enqueued = after != 0
+                || *(void* const*)((const BYTE*)mesh
+                                    + kResourceInQueueOffset);
+        }
+        failed = !enqueued;
+    }
+    countDeferredShadowMesh(state, enqueued, failed);
+    // The verified stock null-mesh arm returns the same value. At this point
+    // no caster/pass record, material dependency, or draw has been built.
+    return 0;
 }
 
 int __fastcall hookBuildShadowRecord(
@@ -3673,6 +3742,8 @@ bool prepareShadowAlphaDefer(HMODULE engine) {
                                   kPreloadResourceRva);
     void* const ensure = resolve(engine, kEnsureAvailableName,
                                  kEnsureAvailableRva);
+    void* const passCount = resolve(engine, kShadowMeshPassCountName,
+                                    kShadowMeshPassCountRva);
     void* const materialOwner = resolve(
         engine, kGraphicsMeshSetShaderParametersName,
         kGraphicsMeshSetShaderParametersRva);
@@ -3686,7 +3757,7 @@ bool prepareShadowAlphaDefer(HMODULE engine) {
         engine, kShaderHasParameterName, kShaderHasParameterRva);
     void* const helper = (BYTE*)engine + kBuildShadowRecordRva;
     const bool ok = g_resourceStateVerified && style && texture && loader
-        && enqueue && preload && ensure && materialOwner
+        && enqueue && preload && ensure && passCount && materialOwner
         && instanceMaterialOwner && materialTexture && hasParameter
         && tq::detour::matches(
                engine, style,
@@ -3725,6 +3796,10 @@ bool prepareShadowAlphaDefer(HMODULE engine) {
                engine, loader,
                signature(kResourceLoaderAccessorBytes,
                          sizeof(kResourceLoaderAccessorBytes)))
+        && tq::detour::matches(
+               engine, passCount,
+               signature(kShadowMeshPassCountBytes,
+                         sizeof(kShadowMeshPassCountBytes)))
         && tq::detour::matches(
                engine, enqueue,
                signature(kEnqueueBytes, sizeof(kEnqueueBytes),
@@ -4394,8 +4469,20 @@ bool installShadow(HMODULE engine, bool trace) {
                 kShadowInstanceBumpEnsureCallOffset,
                 (const void*)g_ensureAvailable,
                 (const void*)&hookShadowInstanceBumpEnsure);
-        const bool deferOk = recordOk && contextOk && filterOk && bumpOk;
+        void* const passCount = resolve(engine, kShadowMeshPassCountName,
+                                        kShadowMeshPassCountRva);
+        const bool meshOk = bumpOk && passCount
+            && tq::detour::attach(
+                g_shadowMeshPassCountDetour, engine, passCount,
+                signature(kShadowMeshPassCountBytes,
+                          sizeof(kShadowMeshPassCountBytes)),
+                6, (const void*)&hookShadowMeshPassCount,
+                (void**)&g_shadowMeshPassCount);
+        const bool deferOk = recordOk && contextOk && filterOk && bumpOk
+            && meshOk;
         if (!deferOk) {
+            tq::detour::detach(g_shadowMeshPassCountDetour);
+            g_shadowMeshPassCount = nullptr;
             tq::detour::restoreCall(g_shadowInstanceBumpEnsurePatch);
             tq::detour::restoreCall(g_shadowMaterialTexturePatch);
             tq::detour::restoreCall(g_shadowMeshParameterPatch);
@@ -4421,19 +4508,24 @@ bool installShadow(HMODULE engine, bool trace) {
         note("GraphicsMeshInstance base-override context", contextActive);
         note("opaque texture-free / cold alpha shadow mitigation", deferOk);
         note("unused directional bump-texture omission", deferOk && bumpOk);
+        note("cold root-mesh caster deferral", deferOk && meshOk);
     }
     if (ok && trace && g_resourceStateVerified) {
-        void* const owner = resolve(engine, kShadowMeshPassCountName,
-                                    kShadowMeshPassCountRva);
         void* const ensure = resolve(engine, kEnsureAvailableName,
                                      kEnsureAvailableRva);
         g_ensureAvailable = (EnsureAvailableFn)ensure;
-        const bool meshOk = owner && ensure && tq::detour::patchCall(
-            g_shadowMeshEnsurePatch, engine, owner,
-            signature(kShadowMeshPassCountBytes,
-                      sizeof(kShadowMeshPassCountBytes)),
-            kShadowMeshEnsureCallOffset, ensure,
-            (const void*)&hookShadowMeshEnsure);
+        bool meshOk = g_shadowDeferActive
+            && g_shadowMeshPassCountDetour.installed;
+        if (!meshOk) {
+            void* const owner = resolve(engine, kShadowMeshPassCountName,
+                                        kShadowMeshPassCountRva);
+            meshOk = owner && ensure && tq::detour::patchCall(
+                g_shadowMeshEnsurePatch, engine, owner,
+                signature(kShadowMeshPassCountBytes,
+                          sizeof(kShadowMeshPassCountBytes)),
+                kShadowMeshEnsureCallOffset, ensure,
+                (const void*)&hookShadowMeshEnsure);
+        }
         // The fix's bump wrapper also forwards through this exact export.
         // A diagnostic-boundary mismatch must disable only that diagnostic,
         // never remove the forwarding target under an installed fix.
@@ -4827,6 +4919,8 @@ void shutdown() {
     g_backgroundLoadLevel = nullptr;
     g_regionLoadLevel = nullptr;
     tq::detour::restoreCall(g_shadowMeshEnsurePatch);
+    tq::detour::detach(g_shadowMeshPassCountDetour);
+    g_shadowMeshPassCount = nullptr;
     tq::detour::restoreCall(g_shadowInstanceBumpEnsurePatch);
     g_ensureAvailable = nullptr;
     tq::detour::restoreCall(g_shadowMaterialTexturePatch);
@@ -4966,11 +5060,21 @@ bool shadowDeferColdAlphaForTest() { return g_shadowDeferColdAlpha; }
 bool shouldDeferShadowAlphaForTest(unsigned style, unsigned state) {
     return shouldDeferShadowAlpha(style, state);
 }
+bool shouldDeferShadowMeshForTest(unsigned state) {
+    return shouldDeferShadowMesh(state);
+}
 void countDeferredShadowAlphaForTest(unsigned state, bool enqueued,
                                      bool failed) {
     const bool tracing = g_shadowTracing;
     g_shadowTracing = true;
     countDeferredShadowAlpha(state, enqueued, failed);
+    g_shadowTracing = tracing;
+}
+void countDeferredShadowMeshForTest(unsigned state, bool enqueued,
+                                    bool failed) {
+    const bool tracing = g_shadowTracing;
+    g_shadowTracing = true;
+    countDeferredShadowMesh(state, enqueued, failed);
     g_shadowTracing = tracing;
 }
 void primeShadowReuseForTest(void* region, void* surface, const void* matrix) {

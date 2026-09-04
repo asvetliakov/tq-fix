@@ -466,13 +466,15 @@ def check_shadow_mesh_boundary(engine):
     code = table("kShadowMeshPassCountBytes")
     at = const("kShadowMeshPassCountRva")
     off = const("kShadowMeshEnsureCallOffset")
+    mesh_field = const("kGraphicsMeshResourceOffset")
     ensure = const("kEnsureAvailableRva")
     ok(len(code) == 24,
        "GetNumShadowRenderPasses verifies all %d bytes (required 16-24)"
        % len(code))
-    ok(code[0:10] == [0x56, 0x8b, 0x71, 0x04, 0x85, 0xf6, 0x74, 0x0c,
-                      0x8b, 0xce],
-       "the boundary obtains GraphicsMeshInstance+4 and null-checks it")
+    ok(code[0:3] == [0x56, 0x8b, 0x71] and code[3] == mesh_field
+       and code[4:10] == [0x85, 0xf6, 0x74, 0x0c, 0x8b, 0xce],
+       "the boundary obtains GraphicsMeshInstance+%#x and null-checks it"
+       % mesh_field)
     ok(off + 5 <= len(code) and code[off] == 0xe8,
        "cold-mesh call offset %d lands on E8" % off)
     dest = at + off + 5 + struct.unpack_from("<i", bytes(code), off + 1)[0]
@@ -485,6 +487,71 @@ def check_shadow_mesh_boundary(engine):
        "GetNumShadowRenderPasses export resolves to its recorded RVA")
     ok(engine.exports().get(cstr("kEnsureAvailableName")) == ensure,
        "EnsureAvailable export resolves to its recorded RVA")
+
+    prepare_begin = src.find("bool prepareShadowAlphaDefer(HMODULE engine)")
+    prepare_end = src.find("\n}\n\nbool verifyShadowTextureDirectCallers", prepare_begin)
+    prepare = src[prepare_begin:prepare_end]
+    ok(prepare_begin >= 0 and prepare_end > prepare_begin
+       and "resolve(engine, kShadowMeshPassCountName" in prepare
+       and "&& tq::detour::matches(\n"
+           "               engine, passCount,\n"
+           "               signature(kShadowMeshPassCountBytes" in prepare,
+       "the fix verifies the root-mesh export before changing any entry")
+
+    hook_begin = src.find(
+        "int __fastcall hookShadowMeshPassCount(void* self, void* edx)")
+    hook_end = src.find("\n}\n\nint __fastcall hookBuildShadowRecord", hook_begin)
+    hook = src[hook_begin:hook_end]
+    predicate_begin = src.find("bool shouldDeferShadowMesh(unsigned state)")
+    predicate_end = src.find("\n}\n", predicate_begin)
+    predicate = src[predicate_begin:predicate_end]
+    ok(predicate_begin >= 0 and predicate_end > predicate_begin
+       and "return state <= 1;" in predicate,
+       "root-mesh state gate covers exactly unloaded and loading")
+    ok(hook_begin >= 0 and hook_end > hook_begin
+       and "!g_shadowDeferActive || !onMainThread()" in hook
+       and "InterlockedCompareExchange(&g_insideDirectional, 0, 0) <= 0"
+           in hook
+       and "self + kGraphicsMeshResourceOffset" in hook
+       and "if (!shouldDeferShadowMesh(state))" in hook
+       and hook.count("return g_shadowMeshPassCount(self, edx);") == 3,
+       "cold root-mesh omission is exact-class, main-thread and directional-only")
+    ok("g_shadowEnqueue(loader, nullptr, mesh, 1, 1, 0);" in hook
+       and "kResourceInQueueOffset" in hook
+       and "countDeferredShadowMesh(state, enqueued, failed);" in hook
+       and hook.rstrip().endswith("return 0;"),
+       "state-0 root meshes use the stock enqueue tuple and return zero passes")
+
+    install_begin = src.find("if (ok && g_shadowDeferColdAlpha) {")
+    install_end = src.find("\n    if (ok && trace", install_begin)
+    install = src[install_begin:install_end]
+    ok(install_begin >= 0 and install_end > install_begin
+       and "g_shadowMeshPassCountDetour" in install
+       and "signature(kShadowMeshPassCountBytes" in install
+       and "6, (const void*)&hookShadowMeshPassCount" in install
+       and "&& meshOk;" in install
+       and "detach(g_shadowMeshPassCountDetour)" in install
+       and "g_shadowMeshPassCount = nullptr;" in install,
+       "the 24-byte root-mesh target steals six bytes and is atomic with the fix")
+    ok("g_shadowDeferActive = deferOk;" in install,
+       "root-mesh behavior becomes active only after the complete patch set")
+    trace_begin = src.find("if (ok && trace && g_resourceStateVerified) {")
+    trace_end = src.find("\n        void* const materialOwner", trace_begin)
+    trace = src[trace_begin:trace_end]
+    ok(trace_begin >= 0 and trace_end > trace_begin
+       and "bool meshOk = g_shadowDeferActive\n"
+           "            && g_shadowMeshPassCountDetour.installed;" in trace
+       and "if (!meshOk)" in trace
+       and "g_shadowMeshEnsurePatch" in trace,
+       "the trace reuses the behavior detour instead of patching inside it")
+    shutdown_begin = src.find("void shutdown()")
+    shutdown_end = src.find("\n#ifdef TQ_SELFTEST", shutdown_begin)
+    shutdown = src[shutdown_begin:shutdown_end]
+    ok(shutdown_begin >= 0 and shutdown_end > shutdown_begin
+       and "restoreCall(g_shadowMeshEnsurePatch);" in shutdown
+       and "detach(g_shadowMeshPassCountDetour);" in shutdown
+       and "g_shadowMeshPassCount = nullptr;" in shutdown,
+       "shutdown restores either mesh instrument and clears the trampoline")
 
 
 def check_shadow_material_textures(engine):
@@ -940,9 +1007,10 @@ def check_shadow_alpha_defer(engine):
        and "g_shadowInstanceBumpEnsurePatch" in install
        and "hookShadowInstanceBumpEnsure" in install
        and "restoreCall(g_shadowInstanceBumpEnsurePatch)" in install
-       and "const bool deferOk = recordOk && contextOk && filterOk && bumpOk;"
-           in install,
-       "cold-alpha fix requires the verified bump call patch atomically")
+       and "const bool deferOk = recordOk && contextOk && filterOk && bumpOk"
+           in install
+       and "&& meshOk;" in install,
+       "cold-alpha fix requires the verified bump and mesh patches atomically")
 
     base_ensure = table("kShadowInstanceBaseEnsureWindowBytes")
     base_ensure_at = const("kShadowInstanceBaseEnsureWindowRva")

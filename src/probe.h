@@ -291,6 +291,13 @@ enum Counter {
     CounterEngineShadowTexFromUnresolvedUs,
     CounterEngineShadowMeshCold,
     CounterEngineShadowMeshColdUs,
+    // A cold root mesh rejected at GraphicsMeshInstance's exact pass-count
+    // boundary. State 0 is enqueued; state 1 is already in flight.
+    CounterEngineShadowMeshOmitted,
+    CounterEngineShadowMeshOmittedState0,
+    CounterEngineShadowMeshOmittedState1,
+    CounterEngineShadowMeshOmittedEnqueued,
+    CounterEngineShadowMeshOmittedEnqueueFailed,
     // Cold material textures pulled by GraphicsMesh::SetShaderParameters
     // while rendering the directional map. `used` means the active shadow
     // shader reports a parameter with the material entry's Name; `unused`

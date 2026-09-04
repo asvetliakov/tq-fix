@@ -5700,6 +5700,145 @@ and `shadow_split` must remain unchanged. No visual observation accompanied
 the completion message, so run 59 supplies no new artifact-safety claim.
 
 
+## 70. Run 60 result: the narrow root-mesh omission is visually safe, but the
+marked burst is mostly outside it
+
+Run 60 is archived as `tqflicker-frames.run60.csv`, SHA-256
+`87bcb615b8d81fc037f407b89e41246144361369b76be458d735c0431e536a03`;
+its live-written debug log has SHA-256
+`ab56a4629a000ad382e9013ac77e1db4e0e265768d409b31c4271ba446636697`.
+Both archives are byte-identical to the current live names. The CSV contains
+7,131 contiguous presented frames, 0--7130. The five session parts are
+**menu** 0--1782 (16.542 s), **load-game frame** 1783 (1.507 s), **loading
+screen** 1784--2865 (9.501 s), **first world frame** 2866 (767.918 ms), and
+**play** 2867--7130 (64.725 s).
+
+F12 at **play** frame 6481 is a reaction anchor. The only full-scene,
+collision-active candidate over 40 ms in the preceding two seconds is
+**play** frame 6461 at 260.847 ms; it ends 417 ms before the marker and starts
+678 ms before it. The frame changes directional-shadow region. It spends
+217.391 ms in `Engine::Render`, 9.206 ms in `Engine::Update`, and 31.661 ms in
+the message-pump class. The pump's 31.635 ms across three `PeekMessageA` calls
+returned two messages and dispatched both; this is not run 39's empty-peek
+shape. Render is independently dominant, so this observation does not reopen
+the message pump as a lever.
+
+The new exact base-class `GraphicsMeshInstance::GetNumShadowRenderPasses`
+behavior is active on the marked frame. It omits six state-0 root meshes and
+successfully gives all six to their own `ResourceLoader`; no enqueue fails.
+The next two directional builds omit eight and six roots respectively; the
+third following build, frame 6464, omits none. The count-only data cannot prove
+caster identity, but it does show that the cold-root population is transient
+and clears within three subsequent builds. The reporter specifically saw no
+missing shadow, shadow pop, or other visual fault during the session. That is
+the required visual acceptance of this narrow temporary omission.
+
+It is not a controlled magnitude result. Run 59 has a different route and a
+two-frame marked burst, so comparing its maximum with run 60's maximum would
+repeat the project's original mistake. Run 60 proves that the mechanism fires,
+queues cold roots, stops omitting them once resident, and is visually
+acceptable. It does not isolate how many milliseconds it saved.
+
+The remaining marked frame is much broader than directional shadows. Its 30
+main-thread Resource loads cost 102.518 ms. Only 17 / 23.383 ms occur inside
+`GraphicsShadowMapDx11::RenderDirectional`: 16 meshes / 21.923 ms and one
+shader / 1.460 ms, all entered in state 0. Therefore 13 main-thread loads /
+79.135 ms occur outside directional shadow. The enclosing directional CPU
+call is 25.145 ms. Its GPU interval is 30.071 ms while the whole-frame GPU
+interval is 237.965 ms. CPU loads, enclosing CPU calls, and GPU intervals are
+nested or overlapping and must not be added; the comparison only establishes
+that directional shadow is no longer the dominant class in this felt burst.
+
+Frames 6462 and 6463 are 28.030 and 17.356 ms. Frame 6462 synchronously loads
+one remaining directional mesh / 4.831 ms inside a 6.970 ms shadow call;
+frame 6463 has no Resource load and a 1.834 ms shadow call. Unlike run 59,
+there is no second large render/backpressure frame after this onset. That
+difference is descriptive only because the submitted scenes differ.
+
+Across **play**, the new root hook omits 27 instances: 26 state 0 and one state
+1. Ten state-0 roots are newly enqueued and no enqueue fails. Directional
+shadow still performs 75 synchronous loads / 75.728 ms: 70 meshes / 72.173 ms
+and five shaders / 3.555 ms, all entered in state 0. Texture loads remain zero.
+All 3,046 directional builds report the context patch active; every context,
+table, and enqueue failure is zero. The existing material, bump, base-override,
+and alpha gates remain active without a failed enqueue.
+
+The supported conclusion is to keep the narrow root-mesh behavior, not widen
+it blindly. The next passive trace should classify the 13 main-thread Resource
+loads / 79.135 ms outside directional shadow on the marked **play** frame by
+exact Resource class and verified immediate caller. The remaining whole-GPU
+interval is real, and §37 already establishes where GPU queue pressure blocks
+the CPU (`DrawIndexed`); another per-draw timing boot would describe the sink
+again without identifying which resource or scene transition created the
+work.
+
+
+## 69. Run 60: defer an exact caster before its cold root mesh is forced
+
+Run 59 removes every directional-shadow texture load in **play**, leaving two
+coupled costs on its marked full-scene, collision-active **play** onset. Frame
+6692 synchronously loads 29 meshes / 38.219 ms and one shader / 2.843 ms inside
+a 41.139 ms directional CPU call, while its directional GPU interval is
+137.047 ms and whole-GPU interval 329.861 ms. Five root-mesh ensures at the
+exact `GraphicsMeshInstance::GetNumShadowRenderPasses` boundary cost 11.111
+ms. Frame 6693 then drains the prior GPU queue. A further texture or draw-time
+instrument does not choose a new lever; the already proved root-mesh boundary
+does.
+
+Run 60 extends the existing `shadow_defer_cold_alpha=1` behavior at that one
+earliest boundary. The exact exported base-class method at RVA `0x173440`
+loads the root mesh pointer from instance+`0x4`, null-checks it, calls
+`Resource::EnsureAvailable`, then reads the pass count at mesh+`0x7c`. Its
+complete 24 bytes were already independently matched to the pinned image. The
+entry detour now steals six complete, non-relative bytes—`push esi; mov
+esi,[ecx+4]; test esi,esi`—with no relative operand. Its trampoline replays
+those bytes before returning to the original null check.
+
+The behavior predicate is deliberately narrower than “any cold mesh.” It is
+the exact base `GraphicsMeshInstance` export, on the main thread, while inside
+`GraphicsShadowMapDx11::RenderDirectional`, with a non-null root mesh in raw
+loaded state 0 or 1. State 0 is handed to its own verified
+`ResourceLoader` using the stock `(priority=1, notify=true, immediate=false)`
+tuple; state 1 is already loading. The method returns zero passes until state
+2, so no caster/pass record, later dependency, or GPU draw is created for that
+one caster. State 2 and every non-directional call forward through the exact
+original method. Derived renderables that override the virtual method never
+enter this base export.
+
+This is a temporary local missing-shadow trade, not whole-map reuse. It can
+test more than the direct 11.111 ms because a cold root caster can own later
+dependent mesh loads and directional GPU draws. It cannot remove non-mesh
+casters, already-resident newly visible geometry, or the non-shadow resource
+loads on the onset. Colour rendering, point/spot shadows, resident casters,
+culling, map size, and `shadow_split` are unchanged. A visible local shadow
+pop rejects or bounds it even if the burst becomes shorter.
+
+The behavior detour is an atomic dependency of the existing shadow-fix chain.
+It is installed only after the 24-byte signature and export/RVA identity pass;
+a failure restores the material, context, record, and bump call patches. With
+the trace enabled, the old internal Ensure call instrument is not patched
+inside the detoured entry; the behavior wrapper itself emits count-only
+`engine_shadow_mesh_omitted`, state-0/state-1, enqueued, and enqueue-failed
+columns. The fix stays default-off, reaches `install()` with the performance
+probe off, and brings no trace group.
+
+`verify-sites.py` passes 336 checks. Twenty independent mutations of the new
+mesh-field constant, reused RVA and byte identity, exact state predicate,
+main/directional gates, field use, enqueue tuple, zero-pass return, six-byte
+steal, atomic dependency, rollback/activation, diagnostic coexistence,
+pre-verification, and both rollback and shutdown pointer clearing are all
+rejected: 20/20 for run 60 and 109/109 cumulative relevant mutations. Doctor,
+the release build, and the full off-game self-test pass, including GPU
+timestamp retirement. Run 60 is installed from
+`cache/runs/run60-shadow-cold-root-mesh.ini`; installed and source DLLs match
+at SHA-256
+`3f8856f82878d7d143b388295f36f4b210ffcb7a4e2534b87f62378eaaa01694`,
+and installed and source INIs match at SHA-256
+`918a2ef1eec7dd71f46f79dd9caf2011416e8c44a3428bfdef7089d16809edcd`.
+The run-59 live CSV and debug log were byte-identical to their archives before
+the stale live names were removed. The game was not launched.
+
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

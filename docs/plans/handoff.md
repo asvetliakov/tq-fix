@@ -2,13 +2,60 @@
 
 Companion to `game-stutter-mitigation.md`, which is the plan. That document's
 "Status" section records where the plan was wrong; this one records what is
-built, what is measured, and what to do next. Current as of **run 59
-completed and archived**, with its verified build still installed, on branch
-`stutter-mitigation`.
+built, what is measured, and what to do next. Current as of **run 60 completed
+and archived**, with its visually accepted cold-root-mesh deferral still
+installed, on branch `stutter-mitigation`.
 
 ---
 
 ## READ THIS FIRST: the brief for the next session
+
+**Run 60 completed -- read findings §70 before §69.** It has 7,131 contiguous
+frames. Its five session parts are **menu** 0--1782 (16.542 s), **load-game
+frame** 1783 (1.507 s), **loading screen** 1784--2865 (9.501 s), **first
+world frame** 2866 (767.918 ms), and **play** 2867--7130 (64.725 s).
+
+F12 at **play** frame 6481 follows the one full-scene, collision-active
+**play** candidate within two seconds: frame 6461 at 260.847 ms, ending 417 ms
+before the press (onset 678 ms before it). The new exact
+`GraphicsMeshInstance::GetNumShadowRenderPasses` deferral fired on six state-0
+root meshes and enqueued all six. Eight roots were still omitted on frame
+6462, six on 6463, and none on 6464. Across **play**, 27 root-mesh omissions
+are 26 state 0 and one state 1; ten state-0 roots were newly enqueued and no
+enqueue failed. The reporter saw no missing or popping local shadow. This
+validates the narrow visual trade and its lifecycle, though route variation
+means it does not by itself measure how much shorter the burst became.
+
+The marked frame also shows where not to keep widening the shadow omission.
+It spends 102.518 ms in 30 main-thread Resource loads, but only 23.383 ms / 17
+loads are inside `GraphicsShadowMapDx11::RenderDirectional`: 16 meshes /
+21.923 ms and one shader / 1.460 ms. The other 13 main-thread loads consume
+79.135 ms outside directional shadow. Directional shadow CPU is 25.145 ms and
+its GPU interval is 30.071 ms, versus 217.391 ms in `Engine::Render` and a
+237.965 ms whole-GPU interval. Those nested and overlapping intervals must not
+be added. The 31.635 ms `PeekMessageA` time returned two messages across three
+peeks; it is not run 39's empty-peek shape, and the independently dominant
+render work leaves the twice-closed pump route closed.
+
+Keep the root-mesh fix. The next useful step is passive attribution of the 13
+main-thread Resource loads outside directional shadow by exact Resource class
+and verified immediate caller. Do not broaden caster omission until that
+larger class is named. A new draw-timing boot would only repeat §37: the
+remaining whole-GPU/render interval is known to surface as `DrawIndexed`
+backpressure but not yet tied to the resources or scene work that caused it.
+
+Across **play**, directional shadow performs 75 synchronous loads / 75.728 ms:
+70 meshes / 72.173 ms and five shaders / 3.555 ms, all entered in state 0;
+textures remain zero. All 3,046 directional builds report the context patch
+active and every context, table, and enqueue failure is zero. The texture
+omissions from runs 56--59 remain complete.
+
+The run-60 CSV and live-written debug log are archived and byte-identical to
+their live names. Their SHA-256 values are
+`87bcb615b8d81fc037f407b89e41246144361369b76be458d735c0431e536a03`
+and `ab56a4629a000ad382e9013ac77e1db4e0e265768d409b31c4271ba446636697`.
+The installed build is still the verified run-60 build described in §69. The
+game was not launched by the mod workflow.
 
 **Run 59 completed -- read findings §68 before §67.** It has 7,547 contiguous
 frames. Its five session parts are **menu** 0--1816 (16.947 s), **load-game
