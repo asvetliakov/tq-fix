@@ -1,5 +1,26 @@
 # Remaining gameplay hitches after resident mesh refresh
 
+Follow-up: text logging now uses ordinary 250 ms batches, one early wake per
+half-capacity crossing, and a durable flush only at shutdown. The historical
+analysis below describes the original capture. The installed comparison
+keeps performance/lifecycle recording enabled and turns only text output off
+on a release build; the earlier DLL, INI and logs are preserved under
+`cache/runs/text-logger-before-batching`. No gameplay result for that comparison
+has been measured yet. Text batching is also active when logging is re-enabled.
+
+Validation: all six off-game suites pass, including all 12,000 concurrent text
+records exactly once, the final shutdown sentinel, zero message-triggered
+wakeups for that below-watermark workload, one file open and one durable flush.
+The release DLL installed for the text-off run has SHA-256
+`bbe68360aab948ea289691b73bf7842c0b9c2e92ebba2a1a7aa17ce369b3a8f8`;
+the INI has SHA-256
+`b68c6a38aaec40e77c65752384b63c92eee94577768df0b7b28a11cce9b8b269`.
+Copies and a manifest are in `cache/runs/text-logger-off-prepared`.
+`hdr_debug=0` is explicit as well as `trace=0`. Graphics, mesh refresh, CSV,
+lifecycle and marker settings match the baseline. Existing logs were archived
+and removed from the live directory so stale text cannot masquerade as output
+from this comparison. Use the same route and mark gameplay hitches with F12.
+
 Investigation following `b359bc3`. Source capture:
 `cache/runs/mesh-refresh-first/{tqflicker-debug.log,tqflicker-frames.csv,tqflicker.ini}`.
 CSV SHA-256: `a14b36da956bee12d3873de7c2ac52d68c5ef324f2804de206d440557d7c9fba`.

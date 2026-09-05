@@ -54,10 +54,15 @@ bool isGammaShader(const void* bytecode, SIZE_T size);
 // CPU reference for the luminance curve embedded in the output shaders.
 float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative);
 
-// Diagnostics are buffered in memory and flushed by a worker. With both trace
-// and hdr_debug disabled, log calls return before locking or starting it.
+// Diagnostics are buffered and written in 250 ms batches (earlier at capacity).
+// The worker retains its file handle; durable flush happens at shutdown.
+// With both trace and hdr_debug disabled, log calls return before locking or
+// starting the writer (unless the build forces tracing).
 void log(const char* format, ...);
 void shutdown();
+#ifdef TQ_SELFTEST
+void logStatsForTest(unsigned& wakes, unsigned& opens, unsigned& flushes);
+#endif
 
 }  // namespace hdr
 }  // namespace tq

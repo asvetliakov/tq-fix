@@ -25,6 +25,11 @@ volatile LONG g_loggerState;
 HANDLE g_logEvent;
 HANDLE g_logStop;
 HANDLE g_logThread;
+constexpr DWORD kLogBatchMs = 250;
+constexpr LONG kLogWakeBytes = sizeof(g_log) / 2;
+#ifdef TQ_SELFTEST
+volatile LONG g_logCapacityWakes, g_logFileOpens, g_logDurableFlushes;
+#endif
 
 bool contains(const BYTE* bytes, SIZE_T size, const char* text) {
     SIZE_T count = strlen(text);
@@ -159,7 +164,6 @@ void flushLog(HANDLE file) {
             dropped, (long)(bytes - sent));
         WriteFile(file, warning, (DWORD)n, &written, nullptr);
     }
-    if (bytes || dropped) FlushFileBuffers(file);
 }
 
 DWORD WINAPI loggerThread(void*) {
@@ -167,13 +171,24 @@ DWORD WINAPI loggerThread(void*) {
     logPath(path);
     HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+#ifdef TQ_SELFTEST
+    if (file != INVALID_HANDLE_VALUE) InterlockedIncrement(&g_logFileOpens);
+#endif
     HANDLE events[2] = {g_logStop, g_logEvent};
     for (;;) {
-        DWORD wait = WaitForMultipleObjects(2, events, FALSE, 1000);
+        DWORD wait = WaitForMultipleObjects(2, events, FALSE, kLogBatchMs);
         flushLog(file);
         if (wait == WAIT_OBJECT_0) break;
     }
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (file != INVALID_HANDLE_VALUE) {
+        // Durability is a shutdown operation. Per-batch flushes can contend
+        // with game I/O even though the writer runs on another thread.
+        FlushFileBuffers(file);
+#ifdef TQ_SELFTEST
+        InterlockedIncrement(&g_logDurableFlushes);
+#endif
+        CloseHandle(file);
+    }
     return 0;
 }
 
@@ -413,15 +428,33 @@ void log(const char* format, ...) {
         memcpy(line + sizeof(line) - sizeof(suffix), suffix, sizeof(suffix));
         written = sizeof(line) - 1;
     }
+    bool wake = false;
     AcquireSRWLockExclusive(&g_logLock);
     if (written <= (int)sizeof(g_log) - g_logBytes) {
+        const LONG before = g_logBytes;
         memcpy(g_log + g_logBytes, line, written);
         g_logBytes += written;
+        // Wake once when a batch crosses the capacity watermark, not on
+        // every message. Ordinary output drains on the writer's timer.
+        wake = before < kLogWakeBytes && g_logBytes >= kLogWakeBytes;
     } else ++g_logDropped;
     ReleaseSRWLockExclusive(&g_logLock);
     ensureLogger();
-    if (g_loggerState == 2) SetEvent(g_logEvent);
+    if (wake && g_loggerState == 2) {
+#ifdef TQ_SELFTEST
+        InterlockedIncrement(&g_logCapacityWakes);
+#endif
+        SetEvent(g_logEvent);
+    }
 }
+
+#ifdef TQ_SELFTEST
+void logStatsForTest(unsigned& wakes, unsigned& opens, unsigned& flushes) {
+    wakes = (unsigned)g_logCapacityWakes;
+    opens = (unsigned)g_logFileOpens;
+    flushes = (unsigned)g_logDurableFlushes;
+}
+#endif
 
 void shutdown() {
     if (g_loggerState == 2) {

@@ -508,21 +508,24 @@ follow a valid call instruction; the immediate caller is otherwise explicitly
 call stack because this engine omits frame pointers. The fixed 128-record
 rolling window is reported by `engine_res_outside_dir_marker_truncated` if it
 could not retain the whole marker window. Records are buffered during the
-candidate frame and formatted only after F12, so the diagnostic does not add
-logging work to the stutter it is measuring.
+candidate frame and formatted only after F12. Recording still has overhead;
+background trace output can also affect scheduling and I/O.
 
 `resource_lifecycle=1` additionally records Actor/mesh preload visits, dependency
 requests, queue timing, worker loads, eviction/cooldown and address reuse. It
-requires `trace=1`, a nonzero `engine_trace`, and `performance_trace` enabled;
-use `performance_trace=full` and `stutter_marker=1` for a complete investigation.
+requires a nonzero `engine_trace` and `performance_trace` enabled. Use `trace=1`,
+`performance_trace=full` and `stutter_marker=1` for a complete investigation;
+`trace=0` suppresses text output while those observers remain active.
 F12 prints up to 1,024 previously unreported cold main-thread demands from the
 last 600 frames, including each resource and associated mesh history **before**
 the load. History uses a bounded 8,192-entry table; replacements and overwrites
 are reported. The seven additional lifecycle hooks are absent by default and
 add diagnostic overhead when enabled. The normal refresh fix is independent.
-The debug logger appends batches on its writer thread rather than stopping at
-64 KiB for the entire session. Its pending queue remains bounded, with explicit
-overflow and line-truncation notices. See the
+The debug logger keeps one file handle and appends ordinary text every 250 ms,
+waking earlier when pending output crosses half capacity. It flushes to disk
+at shutdown, rather than after every batch. This reduces diagnostic I/O traffic;
+recent buffered output can be lost if the process crashes. Its pending queue
+remains bounded, with explicit overflow and line-truncation notices. See the
 [lifecycle audit](research/streaming/mesh-preload-lifecycle.md) for interpretation.
 
 The terrain diagnostic adds `engine_terrain_preload` / `_us`, its true/false

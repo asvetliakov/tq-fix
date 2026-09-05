@@ -4383,6 +4383,12 @@ int testLogRetention() {
     check(complete, "all 12000 concurrent log records retained exactly once");
     check(text && strstr(text, "logger-stress final sentinel\r\n")
           && !strstr(text, "Trace output incomplete"), "shutdown drains final report without overflow");
+    unsigned wakes, opens, flushes;
+    tq::hdr::logStatsForTest(wakes, opens, flushes);
+    check(size < 2 * 1024 * 1024 && wakes == 0,
+          "12000 ordinary messages do not signal per-message writer wakeups");
+    check(opens == 1 && flushes == 1,
+          "text writer retains one handle and durably flushes only at shutdown");
     free(text); free(bytes);
     fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
     fclose(g_report);
