@@ -53,7 +53,8 @@ This **in-play scene-transition burst** was not one slow shadow function
 or an established Wine-only problem. The evidence supports several interacting
 costs: synchronous cold-resource loads during directional-shadow gathering,
 runtime terrain layers whose textures were never semantically preloaded, and
-bursty first GPU participation across reflection and directional shadows.
+bursty first GPU participation across reflection and directional shadows, and
+previously preloaded scenery assets evicted before visible use.
 A slow later D3D draw can be where queued work is waited on, not where it
 originated. These engine paths also exist on native Windows; the measurements
 here were made on the supported CrossOver/DXMT installation.
@@ -67,14 +68,20 @@ preload, and reflection and directional shadow share an eight-new-object-per-
 frame draw-admission budget. Normal colour drawing remains unchanged;
 pending local shadows/reflections may appear later. This does not lower shadow
 resolution or undo the shadow-distance fix, and required no renderer rewrite.
-The separate 8 MiB archive cache remains enabled for its limited reuse benefit.
+When the game revisits a stale but still-resident scenery mesh for preloading,
+the mesh refresh fix advances its normal dependency preload, up to eight such
+visits per Engine frame. This reduces idle eviction before the player reaches
+the mesh while preserving memory-pressure handling. The separate 8 MiB archive
+cache remains enabled for its limited reuse benefit.
 
 In Runs 84 and 85 the user no longer noticed the old-route **play** hitch.
 Run 85's old-location transition was 40.117 ms CPU / 40.780 ms GPU, with no
 large postponed rebound; that is a route-specific result, not a promise of
 stutter-free loading or universally smooth play. All fixes operate with
-`performance_trace=0`. The module/trace-off refactor at `79ef3ab` passes
-off-game tests; its Run 87 game confirmation is still pending. See
+`performance_trace=0`. On a later alternate route, mesh preload refresh reduced
+the matched transition from 323 to 79 ms and synchronous resource loading from
+212 to 29 ms. Normal frame times held steady in that comparison; remaining
+particle loads and other spikes mean this is not a stutter-free guarantee. See
 [research.md](research.md) for the evidence, trade-offs, and rejected explanations.
 
 The progressive texture uploader addresses a separate problem: submitting all
@@ -118,6 +125,7 @@ archive_cache_mb=8
 shadow_defer_cold_resources=1
 shadow_defer_cold_actor_pose=1
 terrain_preload_layers=1
+mesh_preload_refresh=1
 secondary_pass_admission_budget=8
 
 [debug]
@@ -126,6 +134,7 @@ trace=0
 performance_trace=0
 engine_trace=1
 stutter_marker=0
+resource_lifecycle=0
 ```
 
 `loose_texture_max` refuses a loose texture whose base level is larger than
@@ -261,6 +270,20 @@ It does not omit colour or shadows, change culling, or replace resource
 loading; it moves the texture queue request from first colour use to the point
 where those Resources first exist.
 
+`mesh_preload_refresh=1` reduces reloads of scenery that was preloaded successfully
+but became stale before the player reached it. At an existing main-thread Actor
+preload visit requesting material dependencies, a resident root untouched for
+at least 400 Engine frames can advance the normal Entity preload countdown.
+The native Actor then refreshes the mesh and its dependencies. At most eight
+visits per Engine frame are accelerated; ordinary visits already due still run.
+This works with tracing off and defaults to `1`; `0` restores stock timing.
+It adds no Present work, lock, timer query, allocation, or resource sweep.
+Native dependency work can occur earlier and resources can remain resident
+longer within the existing eviction rules. Already-cold roots, active cooldowns,
+and memory-pressure eviction retain stock behavior. The bound counts root
+visits, not dependency bytes or milliseconds. See the
+[matched gameplay validation](research/streaming/gameplay-loading-hitches.md#first-gameplay-validation-of-resident-refresh).
+
 `secondary_pass_admission_budget=N` progressively admits first-use objects to
 reflection and directional-shadow drawing. The two secondary consumers share
 one budget: an object admitted by reflection does not spend a second slot when
@@ -272,7 +295,7 @@ preparation, but their `Draw`/`DrawIndexed` calls wait for a later frame's
 slot, so postponed GPU first use does not return as one lump on the next
 consumer. Normal colour rendering remains unchanged. It defaults to `8`; `0`
 is stock/off; accepted positive values are `1` through `64`. The switch works
-with the performance probe off, requests only its two required D3D draw hooks,
+with the performance probe off, uses the two renderer draw-submission hooks,
 and installs no trace group by itself.
 
 Rejected experimental behavior keys have been removed from the current
@@ -485,6 +508,20 @@ could not retain the whole marker window. Records are buffered during the
 candidate frame and formatted only after F12, so the diagnostic does not add
 logging work to the stutter it is measuring.
 
+`resource_lifecycle=1` additionally records Actor/mesh preload visits, dependency
+requests, queue timing, worker loads, eviction/cooldown and address reuse. It
+requires `trace=1`, a nonzero `engine_trace`, and `performance_trace` enabled;
+use `performance_trace=full` and `stutter_marker=1` for a complete investigation.
+F12 prints up to 1,024 previously unreported cold main-thread demands from the
+last 600 frames, including each resource and associated mesh history **before**
+the load. History uses a bounded 8,192-entry table; replacements and overwrites
+are reported. The seven additional lifecycle hooks are absent by default and
+add diagnostic overhead when enabled. The normal refresh fix is independent.
+The debug logger appends batches on its writer thread rather than stopping at
+64 KiB for the entire session. Its pending queue remains bounded, with explicit
+overflow and line-truncation notices. See the
+[lifecycle audit](research/streaming/mesh-preload-lifecycle.md) for interpretation.
+
 The terrain diagnostic adds `engine_terrain_preload` / `_us`, its true/false
 argument counts, the two `TerrainType` shader-parameter entry counts, and
 `engine_terrain_ground` / `_us`. For each retained outside-directional load,
@@ -613,10 +650,11 @@ Those columns come from instrumentation written into `Engine.dll`'s own code,
 so they are gated twice: no *instrument* is installed unless
 `performance_trace` is on **and** `engine_trace` is not `0`, which means a
 normal boot installs none of the trace groups. The behavior fixes live in
-`archive_hooks.cpp`, `shadow_defer.cpp`, `terrain_preload.cpp`, and
-`secondary_admission.cpp`; `engine_hooks.cpp` coordinates their shared sites.
+`archive_hooks.cpp`, `shadow_defer.cpp`, `terrain_preload.cpp`,
+`mesh_preload.cpp`, and `secondary_admission.cpp`; `engine_hooks.cpp` coordinates their shared sites.
 They install with the probe off. `engine_probe.cpp` owns the optional Engine
-observers, and `probe.cpp` owns the frame recorder.
+observers, `resource_trace.cpp` owns the optional resource lifecycle recorder,
+and `probe.cpp` owns the frame recorder.
 
 With `performance_trace=0`, shared behavior hooks bypass the observers. There
 are no probe clock reads, GPU queries, frame recording, or trace-only Engine
@@ -625,10 +663,10 @@ need their own hooks, and small inline enable checks remain. A separate DLL
 build is unnecessary to disable recording. Full mode enables the same
 instrumentation in the same DLL.
 
-Every site is resolved by its exported name,
-checked against the address the audited build puts it at, and matched against
-16 to 24 bytes before 4 to 7 are written; a mismatch skips that one hook and
-leaves the rest. A build that is not the audited `Engine.dll` installs nothing
+Exported sites are resolved by name and checked against their audited RVA;
+internal sites use audited RVAs and instruction signatures. Relocated operands
+are verified against the loaded module base. Mismatches skip the affected hook
+or roll back a dependent group, preserving stock behavior. A build that is not the audited `Engine.dll` installs nothing
 at all and says so in `tqflicker-hdr.log`. `engine_trace=1` is everything;
 larger values are a mask -- `2` loads, `4` archive reads, `8` the fence, `16`
 the region lock, `32` the sweeps, `64` `WaitForLoadingToFinish`, `128` the

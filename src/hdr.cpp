@@ -15,8 +15,11 @@ namespace {
 Runtime g_runtime = {{true, ToneFrostbite, 203.0f, 0.0f, false, false},
                      false, false, false, 1000.0f};
 bool g_settingsRead;
-char g_log[64 * 1024];
+// Pending output only, not a lifetime limit. The writer appends drained batches.
+char g_log[4 * 1024 * 1024];
+char g_logSnapshot[sizeof(g_log)]; // Writer-owned; do not consume its thread stack.
 volatile LONG g_logBytes;
+unsigned g_logDropped;
 SRWLOCK g_logLock = SRWLOCK_INIT;
 volatile LONG g_loggerState;
 HANDLE g_logEvent;
@@ -135,16 +138,28 @@ void logPath(wchar_t path[MAX_PATH]) {
 
 void flushLog(HANDLE file) {
     if (!file || file == INVALID_HANDLE_VALUE) return;
-    char snapshot[sizeof(g_log)];
-    AcquireSRWLockShared(&g_logLock);
+    AcquireSRWLockExclusive(&g_logLock);
     LONG bytes = g_logBytes;
-    if (bytes > 0) memcpy(snapshot, g_log, (SIZE_T)bytes);
-    ReleaseSRWLockShared(&g_logLock);
-    SetFilePointer(file, 0, nullptr, FILE_BEGIN);
+    if (bytes > 0) memcpy(g_logSnapshot, g_log, (SIZE_T)bytes);
+    g_logBytes = 0;
+    const unsigned dropped = g_logDropped;
+    g_logDropped = 0;
+    ReleaseSRWLockExclusive(&g_logLock);
     DWORD written = 0;
-    if (bytes > 0) WriteFile(file, snapshot, (DWORD)bytes, &written, nullptr);
-    SetEndOfFile(file);
-    FlushFileBuffers(file);
+    LONG sent = 0;
+    while (sent < bytes) {
+        if (!WriteFile(file, g_logSnapshot + sent, (DWORD)(bytes - sent), &written, nullptr)
+            || !written) break;
+        sent += written;
+    }
+    if (dropped || sent != bytes) {
+        char warning[160];
+        int n = snprintf(warning, sizeof(warning),
+            "Trace output incomplete: %u messages dropped, %ld bytes not written\r\n",
+            dropped, (long)(bytes - sent));
+        WriteFile(file, warning, (DWORD)n, &written, nullptr);
+    }
+    if (bytes || dropped) FlushFileBuffers(file);
 }
 
 DWORD WINAPI loggerThread(void*) {
@@ -386,23 +401,23 @@ float toneMapLuminance(ToneMap toneMap, float luminance, float peakRelative) {
 }
 
 void log(const char* format, ...) {
-    if (!readSettings().trace) return;
-    AcquireSRWLockExclusive(&g_logLock);
-    LONG offset = g_logBytes;
-    if (!format || offset < 0 || offset >= (LONG)sizeof(g_log) - 1) {
-        ReleaseSRWLockExclusive(&g_logLock);
-        return;
-    }
+    if (!format || !readSettings().trace) return;
+    char line[4096];
     va_list args;
     va_start(args, format);
-    int written = _vsnprintf(g_log + offset, sizeof(g_log) - offset - 1, format, args);
+    int written = vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    if (written > 0) {
-        LONG next = offset + written;
-        if (next >= (LONG)sizeof(g_log)) next = sizeof(g_log) - 1;
-        g_log[next] = 0;
-        g_logBytes = next;
+    if (written <= 0) return;
+    if (written >= (int)sizeof(line)) {
+        const char suffix[] = " [trace line truncated]\r\n";
+        memcpy(line + sizeof(line) - sizeof(suffix), suffix, sizeof(suffix));
+        written = sizeof(line) - 1;
     }
+    AcquireSRWLockExclusive(&g_logLock);
+    if (written <= (int)sizeof(g_log) - g_logBytes) {
+        memcpy(g_log + g_logBytes, line, written);
+        g_logBytes += written;
+    } else ++g_logDropped;
     ReleaseSRWLockExclusive(&g_logLock);
     ensureLogger();
     if (g_loggerState == 2) SetEvent(g_logEvent);
@@ -411,12 +426,15 @@ void log(const char* format, ...) {
 void shutdown() {
     if (g_loggerState == 2) {
         SetEvent(g_logStop);
-        WaitForSingleObject(g_logThread, 2000);
+        // Keep the writer's handles valid if a slow filesystem outlives the
+        // bounded shutdown wait. Process teardown will reclaim them.
+        if (WaitForSingleObject(g_logThread, 2000) != WAIT_OBJECT_0) return;
     }
     if (g_logThread) CloseHandle(g_logThread);
     if (g_logStop) CloseHandle(g_logStop);
     if (g_logEvent) CloseHandle(g_logEvent);
     g_logThread = g_logStop = g_logEvent = nullptr;
+    InterlockedExchange(&g_loggerState, 3);
 }
 
 }  // namespace hdr

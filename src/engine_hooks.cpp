@@ -1,4 +1,6 @@
+#include "mesh_preload.h"
 #include "engine_internal.h"
+#include "resource_trace.h"
 
 namespace tq { namespace engine { namespace detail {
 
@@ -275,6 +277,8 @@ void readOptions(const wchar_t* iniPath) {
     readShadowOptions(iniPath);
     readTerrainOptions(iniPath);
     readSecondaryOptions(iniPath);
+    tq::resourcetrace::readOptions(iniPath);
+    tq::meshpreload::readOptions(iniPath);
     // The block cache rides on this file's one hook into the archive path, so
     // it reads its option here -- but it is a fix rather than an instrument,
     // and install() lets it in without the trace.
@@ -290,7 +294,8 @@ bool install(HMODULE engine) {
     // byte-identical to a build without this file otherwise. What
     // archive_cache_mb, shadow_defer_cold_resources,
     // shadow_defer_cold_actor_pose, terrain_preload_layers, and
-    // secondary_pass_admission_budget add independent ways in
+    // secondary_pass_admission_budget and mesh_preload_refresh add independent
+    // ways in
     // that install their own hooks and no instrumentation -- because they are
     // game-behaviour changes and have to work on a boot with the probe off.
     // wants() below refuses every trace group when g_tracing is false, so
@@ -311,7 +316,7 @@ bool install(HMODULE engine) {
                         && tq::probe::drawTimingEnabled();
     if (!g_tracing && !cache && !shadowDefer && !terrainPreload
         && !secondaryAdmission
-        && !marker)
+        && !marker && !tq::meshpreload::configured())
         return false;
     if (InterlockedCompareExchange(&g_installed, 1, 0)) return false;
 
@@ -422,6 +427,9 @@ bool install(HMODULE engine) {
     tq::hdr::log("Engine trace: directional cold-mesh retention %s\r\n",
                  g_shadowMeshResourceTracing ? "active" : "unavailable");
 
+    tq::resourcetrace::install(engine);
+    if (tq::meshpreload::install(engine)) ++g_installedHooks;
+
     tq::hdr::log("Engine trace: %s, mask=0x%x, cache %s,"
                  " cold-resource shadow defer %s, cold actor-pose defer %s,"
                  " terrain layer preload %s,"
@@ -442,6 +450,9 @@ bool install(HMODULE engine) {
 
 
 void shutdown() {
+    // Remove the Actor body call patch before restoring its optional entry observer.
+    tq::meshpreload::shutdown();
+    tq::resourcetrace::shutdown();
     // Stop classification before removing any one of the three brackets it
     // depends on. The game does not normally unload us, but explicit teardown
     // must never turn a missing hook into an "outside directional" sample.

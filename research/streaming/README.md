@@ -5,12 +5,28 @@ own resource loading and region streaming on the supported GOG/CrossOver build.
 It exists so that a frame hitch which survives with every mod feature disabled
 can be attributed to Titan Quest with evidence, rather than by elimination.
 
-It is a **static** audit.  Nothing here launches the game.
+The regeneration tools perform a **static** audit and do not launch the game.
+The reviewed conclusions also include archived runtime captures.
 
 The game binaries are not copied into this repository.
 `../shadows/supported-build.md` identifies them by SHA-256 — the same four
 hashes gate this audit — and `tools/run-audit.sh` regenerates the mechanical
 evidence from a local installation.
+
+## Current conclusion
+
+The earlier secondary-pass fixes improved the accepted old-route transition.
+On the later alternate route, successful scenery preloading was undone by idle
+eviction before visible use; active cooldowns also rejected renewed requests.
+Bounded resident mesh preload refresh reduced the matched frame from 323 to
+79 ms and main-thread loading from 212 to 29 ms. It preserves native eviction
+budgets and cooldowns, and runs independently of tracing. Particle realization,
+native draw waits and separate update spikes remain outside that result.
+
+Read [findings §112](findings.md#112-alternate-route-residency-loss-and-bounded-mesh-preload-refresh),
+[gameplay loading hitches](gameplay-loading-hitches.md), and the
+[mesh preload lifecycle audit](mesh-preload-lifecycle.md) before using older
+prepared-run notes as current conclusions.
 
 ## Layout
 
@@ -56,10 +72,23 @@ The script refuses binaries whose hashes do not match
 The first run imports and analyzes `Engine.dll` into
 `build/streaming-audit/ghidra` as project `tq-engine`; later runs reuse that
 project with `-noanalysis` and only re-export.  The reviewed export was produced
-with Ghidra 12.1.3 and OpenJDK 21 and contains **1,483 `Engine.dll` functions
-rooted at 189 seed matches**. The later runtime-terrain roots are explicit, so
+with Ghidra 12.1.3 and OpenJDK 21 and contains **1,596 `Engine.dll` functions
+rooted at 211 seed matches**. The later runtime-terrain roots are explicit, so
 the vtable-only `TerrainRT` methods remain in the export even when no direct
 call graph discovers them.
+
+The mesh additions have separate verification tools, using the same game path:
+
+```sh
+TQ_GAME_DIR='/path/to/Titan Quest - Anniversary Edition' \
+  python3 research/streaming/tools/verify-resource-trace.py
+TQ_GAME_DIR='/path/to/Titan Quest - Anniversary Edition' \
+  python3 research/streaming/tools/verify-mesh-refresh.py
+```
+
+They verify native hook windows, relocation operands, return cleanup and the
+Actor/Entity instruction fixtures used by the executable off-game tests.
+`tools/verify-sites.py` remains the verifier for the existing streaming sites.
 
 ## Shared tooling
 

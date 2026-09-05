@@ -1,3 +1,4 @@
+#include "resource_trace.h"
 #include "engine_internal.h"
 
 namespace tq { namespace secondaryadmission { namespace detail {
@@ -250,6 +251,7 @@ void __fastcall hookGraphicsMeshInstanceRenderPass(
             self, edx, pass, name, canvas, sceneRenderer);
         return;
     }
+    tq::resourcetrace::RenderScope lifecycle(self);
     countAdmissionRenderable(GpuChunkMeshInstance, self);
     if (g_reflectionAdmissionRenderActive && onMainThread()) {
         tq::probe::engineCount(

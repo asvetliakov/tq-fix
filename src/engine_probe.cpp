@@ -1,3 +1,5 @@
+#include "mesh_preload.h"
+#include "resource_trace.h"
 #include "engine_internal.h"
 
 namespace tq { namespace engineprobe { namespace detail {
@@ -3951,9 +3953,11 @@ void __fastcall hookLoadResource(void* self, void* edx, void* resource) {
     char resourceNameCopy[kOutsideDirResourceNameChars + 1] = {};
     if (outsideDir || shadowMeshReport)
         copyResourceName(resourceNameCopy, resourceName);
+    const unsigned lifecycleTicket = tq::resourcetrace::beginDemand(resource);
     const int64_t started = tq::probe::now();
     g_loadResource(self, edx, resource);
     const uint32_t elapsed = tq::probe::microsecondsSince(started);
+    tq::resourcetrace::finishDemand(lifecycleTicket, elapsed);
     if (main)
         noteGpuChunkRenderableResource(elapsed, terrainType,
                                        terrainMaterialIndex);
@@ -4007,7 +4011,13 @@ void __fastcall hookEnqueueResource(void* self, void* edx, const void* resource,
                                     int priority, int a, int b) {
     if (!g_enqueue) return;
     tq::probe::engineCount(tq::probe::CounterEngineResEnqueued);
+    const bool lifecycle = tq::resourcetrace::enabled() && resource;
+    const unsigned before = lifecycle ? *(const unsigned*)((const BYTE*)resource + 0x30) : 0;
+    const bool queued = lifecycle && *(void* const*)((const BYTE*)resource + 0x60);
+    const unsigned until = lifecycle ? *(const unsigned*)((const BYTE*)resource + 0x34) : 0;
     g_enqueue(self, edx, resource, priority, a, b);
+    if (lifecycle) tq::resourcetrace::enqueue(resource, priority, a, b, before, queued, until,
+                                            __builtin_return_address(0));
 }
 
 int __fastcall hookReadFromFile(void* self, void* edx, int entry, BYTE* dest,
@@ -4422,6 +4432,8 @@ BOOL __stdcall hookPeekMessage(LPMSG message, HWND window, UINT first,
         reportCrossPassBuffersAtMarker();
         reportOffMainTexturesAtMarker();
         reportGpuChunksAtMarker();
+        tq::resourcetrace::report();
+        tq::meshpreload::report();
         tq::probe::markStutter();
     }
     if (!timePeek) return result;

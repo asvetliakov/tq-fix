@@ -1,15 +1,17 @@
 # Stutter investigation: findings and fix conclusion
 
-This is a current synthesis of the streaming investigation, not a new CSV
-analysis. Measured acceptance comes from Runs 84–85; subsequent defaults and
-trace-off refactoring are recorded through findings §111 and commit `79ef3ab`.
-Run 87 is prepared/installed but its in-game confirmation remains pending.
+This synthesis includes the accepted old-route Runs 84–85 and the later
+alternate-route mesh residency investigation and gameplay validation. The latter
+reduced a matched transition from 323 to 79 ms, with main-thread resource loading
+falling from 212 to 29 ms. Remaining particle, native draw and update costs are
+separate unresolved work; this is not a claim of universally smooth play.
 
-The detailed record is [streaming findings](research/streaming/findings.md).
-Sections are corrected forward: read §111–§108 before treating earlier
-conclusions as current. The [handoff](docs/plans/handoff.md) records the active
-state; the [disassembly target index](research/streaming/disassembly-targets.md)
-records exact identities, call chains, byte contracts, and implementation owners.
+Read [streaming findings §112](research/streaming/findings.md#112-alternate-route-residency-loss-and-bounded-mesh-preload-refresh)
+and the [gameplay loading analysis](research/streaming/gameplay-loading-hitches.md)
+for the current evidence. Older prepared-run notes in §111 and earlier sections
+are historical. The [disassembly target index](research/streaming/disassembly-targets.md)
+and [mesh lifecycle audit](research/streaming/mesh-preload-lifecycle.md) record
+native identities, calling conventions and hook ownership.
 
 ## What was wrong
 
@@ -28,7 +30,7 @@ mechanism compatible with the user's report of unmodded native-Windows
 stutters, not evidence that Wine or a host round trip is the cause. The recorded
 experiments were on CrossOver/DXMT, not a native-Windows validation campaign.
 
-Three actionable mechanisms emerged:
+Four actionable mechanisms emerged:
 
 - **Directional-shadow cold resources.** The regular caster path can block
   on a root mesh merely to read its shadow-pass count, then on an alpha-tested
@@ -52,6 +54,14 @@ Three actionable mechanisms emerged:
   experiments isolated a single driver-internal cause such as shader
   compilation, residency management, or a particular native-Windows stall
   (§105 corrected by §106–§108).
+
+- **Loss of preloaded scenery residency.** On the alternate route, 68 of 71
+  blocking resource calls reloaded previously preloaded, evicted meshes/materials.
+  Native idle eviction and a 200-frame cooldown defeated renewed preload
+  requests; shadow deferral and draw admission do not budget normal colour
+  resource loading. Advancing a stale resident root's normal Actor preload,
+  within an eight-visit-per-frame bound, prevents much of that idle loss.
+  Memory-pressure eviction and already-cold roots retain stock behavior.
 
 No complete shadow, frustum-culling, or resource-loader rewrite was required
 to address the observed route. That does not establish that those systems
@@ -110,6 +120,7 @@ Exact sites for all four paths are in the
 | --- | --- |
 | `shadow_defer_cold_resources=1` | Queue unloaded exact mesh-instance shadow dependencies; omit cold root casters and cold alpha-base passes until resident. Skip material inputs absent from the active shadow shader and the verified redundant base-texture binding. |
 | `shadow_defer_cold_actor_pose=1` | Move the root decision before directional Actor pose work. Skip only when queuing/loading is confirmed; an unconfirmed enqueue falls back to stock. Implies the complete cold-resource patch set. |
+| `mesh_preload_refresh=1` | At an existing dependency-aware Actor preload visit, advance the countdown for a resident root untouched for at least 400 Engine frames. Accelerate at most eight visits per Engine frame; use native dependency preloading and leave eviction/cooldown rules intact. |
 | `terrain_preload_layers=1` | Call the game's `TerrainType::PreLoad(true)` immediately after runtime layer `LoadTextures`, using its normal background loaders. |
 | `secondary_pass_admission_budget=8` | Share eight newly admitted renderable identities per presented frame across exact reflection and directional-shadow contexts. Pending objects keep Resource/material preparation but suppress their secondary `Draw`/`DrawIndexed` calls until admitted. |
 | `streaming=optimized` | For eligible mapped loose-file textures, show a low-mip view while uploading withheld high-mip bytes in frame-paced chunks. This budgets texture transfer, not object admission or archive reads. |
@@ -237,8 +248,36 @@ rewriting the renderer. This supports the combination, not a claim that every
 component independently eliminates the hitch. It is not “all stutter is
 fixed”: save loading, first-world-frame cost, other routes, long-session
 identity/residency behavior, and native-Windows results are not established
-by these two route confirmations. The later module refactor still requires
-its Run 87 in-game confirmation.
+by those two route confirmations. The later alternate-route validation below
+addresses one additional residency failure.
+
+## Alternate-route residency validation
+
+The [complete lifecycle capture](research/streaming/gameplay-loading-hitches.md)
+resolved the missing-preload versus eviction question: successful background
+loads were followed by idle eviction before visible use. The refresh build
+performed 57 accelerated visits and had no budget deferrals in its first matched
+run. Resource history and marker output had no recorded loss.
+
+| Measurement | Before | Refresh |
+| --- | ---: | ---: |
+| Matched transition frame | 323.015 ms | 79.485 ms |
+| Main-thread resource loading | 211.727 ms / 71 calls | 29.480 ms / 12 calls |
+| Resource loading across ±120 frames | 255.215 ms | 42.494 ms |
+| Gameplay median / p95 | 19.860 / 25.531 ms | 19.624 / 23.985 ms |
+
+The wider window supports reducing synchronous reloads rather than just moving
+them a few frames earlier. One instrumented route repetition per configuration
+does not prove zero cost or a general speedup. The shipping refresh path has no
+Present work or lock; native dependency traversal can run earlier, and current
+preload interest can retain resources longer within unchanged budget rules.
+`mesh_preload_refresh=0` restores the original Actor preload timing.
+
+The remaining transition contains first-use particle texture loading, five
+smaller scenery reloads and native draw time. Other approximately 100 ms spikes
+have different profiles. Preserve these distinctions when choosing the next
+fix; increasing the secondary budget or disabling cooldowns globally is not
+justified by the residency improvement.
 
 ## Rejected explanations and experiments
 
@@ -260,9 +299,9 @@ individual tests and corrections; this summary does not reopen them.
 ## Trace-off operation and validation
 
 Performance behavior now lives in `shadow_defer.cpp`, `terrain_preload.cpp`,
-`secondary_admission.cpp`, and `archive_hooks.cpp`, coordinated by
-`engine_hooks.cpp`. `engine_probe.cpp` and `probe.cpp` provide optional
-observers/recording. With `performance_trace=0`, fixes still install, tracing-
+`mesh_preload.cpp`, `secondary_admission.cpp`, and `archive_hooks.cpp`, coordinated by
+`engine_hooks.cpp`. `engine_probe.cpp`, `resource_trace.cpp`, and `probe.cpp`
+provide optional observers/recording. With `performance_trace=0`, fixes still install, tracing-
 only hooks do not, and shared behavior wrappers bypass observers. Small
 cached-flag checks and the hooks/state required by gameplay fixes remain;
 this is not a claim of literally zero extra instructions. One DLL supports
@@ -274,6 +313,10 @@ It claims no measured frame-time gain from those removals. Doctor, build, and
 self-test passed, including GPU timestamp retirement and actual shared-wrapper
 tests with mock stock callees. Verification passes 865 checks; mutation audits
 rejected 362 scalar/window perturbations and 22 trace-off gate regressions.
-Off-game mocks do not replace game validation. Run 87 keeps the normal live
-settings with both traces off; its subjective regression check remains the
-next step, with no CSV or F12 record expected.
+Those counts describe the historical refactor audit, not the full current
+verification inventory. The mesh refresh additionally passes native Actor/Entity
+execution, call-patch/entry-observer coexistence, bounded admission and restoration
+tests. Its matched gameplay validation used full tracing; normal trace-off
+performance must not be inferred from mocks alone. The opt-in lifecycle recorder
+has separate rebased-signature and history tests, and concurrent logger tests
+verify output beyond the former 64 KiB session limit.

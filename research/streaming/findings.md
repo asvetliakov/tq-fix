@@ -9184,6 +9184,43 @@ both traces off. It is a subjective regression check of the refactored hooks;
 no CSV or F12 record is expected. Report the menu, load-game frame, loading
 screen, first world frame and play separately if any regression is observed.
 
+## 112. Alternate-route residency loss and bounded mesh preload refresh
+
+The later alternate route exposes a different limitation from the accepted
+Runs 84–85: successful preload is not a residency guarantee. A complete F12
+lifecycle capture found that 68 of 71 main-thread loads in a 323.015 ms gameplay
+transition reloaded previously preloaded, evicted assets (208.427 of 211.727 ms
+loading). In 64 calls, native cooldown was still active. The retained Actor
+history and native 800-frame idle eviction / 200-frame cooldown explain why
+renewed preload visits could fail to prepare visible scenery in time.
+
+The fix defaults `mesh_preload_refresh=1`. It intercepts only Actor's existing
+call to Entity::PreLoad and advances the countdown when dependency preload is
+requested on the main thread, the root remains resident, and its last native
+touch is at least 400 Engine frames old. At most eight visits per Engine frame
+are accelerated. The original Actor/Entity bodies perform dependency preloading;
+stock-due visits proceed even when the acceleration budget is exhausted.
+Resource eviction, cooldowns, already-cold roots and ordinary colour draws stay
+native. No Present lock, timer, allocation or resource sweep is introduced.
+
+The first same-route validation recorded 57 accelerations and zero budget
+deferrals. The matched frame fell to 79.485 ms and main-thread loading to
+29.480 ms / 12 calls. Loading across ±120 frames fell from 255.215 to 42.494 ms;
+normal frame-time median/p95 held steady. These are instrumented route-specific
+results, not proof of zero overhead or complete removal of stutter. Initial
+world warmup, F12 output and the later world/menu exit are excluded.
+
+The optional seven-hook lifecycle recorder captures pre-demand resource and
+parent history, worker loading, queue state, eviction and address reuse. The
+logger now appends buffered output beyond the previous 64 KiB session cutoff.
+The native call-site fix and Actor entry observer have separate byte ownership
+and reverse teardown order. Signature checks, native Actor/Entity executable
+tests, trace-off/grass/device-recreation regressions and concurrent logger tests
+pass. The exact native flow and limits are in
+[mesh-preload-lifecycle.md](mesh-preload-lifecycle.md); capture evidence,
+resource names, hashes, performance comparisons and remaining spikes are in
+[gameplay-loading-hitches.md](gameplay-loading-hitches.md).
+
 ## Cross-references worth acting on
 
 1. `hookArchiveUnmap` (`src/visual.cpp:617-650`) binds to `FileDirectory`, not to

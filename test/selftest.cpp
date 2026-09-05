@@ -1,3 +1,4 @@
+#include "mesh_preload.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -16,6 +17,7 @@
 #include "renderer_draw.h"
 #include "renderer_draw_sites.h"
 #include "engine_probe.h"
+#include "resource_trace.h"
 #include "engine.h"
 #include "secondary_admission.h"
 #include "frustum_fix.h"
@@ -4341,7 +4343,54 @@ int testDeviceRecreation() {
     return g_failures ? 1 : 0;
 }
 
+DWORD WINAPI logStressWorker(void* argument) {
+    const unsigned worker = (unsigned)(uintptr_t)argument;
+    for (unsigned n = 0; n < 4000; ++n)
+        tq::hdr::log("logger-stress worker=%u sequence=%u payload=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\r\n", worker, n);
+    return 0;
+}
+int testLogRetention() {
+    g_report = fopen("report.txt", "w");
+    if (!g_report) return 99;
+    FILE* ini = fopen("tqflicker.ini", "w");
+    if (!ini) { fclose(g_report); return 98; }
+    fputs("[debug]\ntrace=1\n", ini); fclose(ini);
+    check(tq::hdr::readSettings().trace, "logger stress trace enabled");
+    HANDLE threads[3] = {};
+    for (unsigned n = 0; n < 3; ++n)
+        threads[n] = CreateThread(nullptr, 0, logStressWorker, (void*)(uintptr_t)n, 0, nullptr);
+    for (HANDLE thread : threads) {
+        check(thread != nullptr, "logger producer starts");
+        if (thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
+    }
+    tq::hdr::log("logger-stress final sentinel\r\n");
+    tq::hdr::shutdown();
+    long size = 0;
+    BYTE* bytes = (BYTE*)readFile("tqflicker-debug.log", &size);
+    check(bytes && size > 64 * 1024, "logger appends beyond old 64 KiB session limit");
+    char* text = (char*)calloc((size > 0 ? size : 0) + 1, 1);
+    if (bytes && text) memcpy(text, bytes, size);
+    unsigned seen[3][4000] = {};
+    unsigned lines = 0;
+    if (text) for (char* line = text; line && *line;) {
+        unsigned worker, sequence;
+        if (sscanf(line, "logger-stress worker=%u sequence=%u", &worker, &sequence) == 2
+            && worker < 3 && sequence < 4000) { ++seen[worker][sequence]; ++lines; }
+        char* next = strchr(line, '\n'); line = next ? next + 1 : nullptr;
+    }
+    bool complete = lines == 12000;
+    for (const auto& worker : seen) for (unsigned count : worker) complete &= count == 1;
+    check(complete, "all 12000 concurrent log records retained exactly once");
+    check(text && strstr(text, "logger-stress final sentinel\r\n")
+          && !strstr(text, "Trace output incomplete"), "shutdown drains final report without overflow");
+    free(text); free(bytes);
+    fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
+    fclose(g_report);
+    return g_failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && !strcmp(argv[1], "--log-retention")) return testLogRetention();
     if (argc == 2 && !strcmp(argv[1], "--device-recreation"))
         return testDeviceRecreation();
     if (argc == 3 && !strcmp(argv[1], "--grass-hooks"))
@@ -4956,6 +5005,8 @@ int main(int argc, char** argv) {
 
     testTimestampCapability(device, context);
     testProbe(device, context);
+    check(tq::meshpreload::test(), "mesh preload refresh: resident-only interest, stock-due bypass, bounded admission, touch deduplication and frame wrap");
+    check(tq::resourcetrace::test(), "resource lifecycle: rebased signatures, mutation rejection, pre-demand history, worker/eviction/reuse and ring bounds");
     testEngineProbe();
     testArchiveCache();
     testFrameOverlay(device, context);

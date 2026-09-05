@@ -435,7 +435,7 @@ def check_configuration_contract():
            "streaming=optimized", "loose_texture_max=4096",
            "archive_cache_mb=8", "shadow_defer_cold_resources=1",
            "shadow_defer_cold_actor_pose=1", "terrain_preload_layers=1",
-           "secondary_pass_admission_budget=8"],
+           "mesh_preload_refresh=1", "secondary_pass_admission_budget=8"],
        "README performance sample matches all shipping defaults exactly")
     ok("shadow_defer_cold_alpha" not in options
        and "shadow_defer_cold_resources" in readme_src

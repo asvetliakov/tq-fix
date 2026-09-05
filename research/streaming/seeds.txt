@@ -68,6 +68,16 @@ PreLoadDependentResources
 MarkAsUsed@Resource
 GetLastTouchedFrame
 
+# Mesh/material preload lifecycle (alternate-route gameplay hitch).
+Actor::PreLoad
+PreLoad@Actor
+Entity::PreLoad
+PreLoad@Entity
+GraphicsMeshInstance::PreLoad
+PreLoad@GraphicsMeshInstance
+@101b0a50
+@10212c70
+
 # ---------------------------------------------------------------------------
 # Archive, file system, and the memory-mapped archive views the mod leases.
 # ---------------------------------------------------------------------------
