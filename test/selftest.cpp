@@ -4161,11 +4161,11 @@ int main(int argc, char** argv) {
     testUpload();
 
     tq::hdr::Settings defaultHdr = tq::hdr::readSettings();
-    check(!defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneOriginal
+    check(defaultHdr.requestHdr && defaultHdr.toneMap == tq::hdr::ToneFrostbite
           && defaultHdr.paperWhiteNits == 203.0f
           && defaultHdr.peakNitsOverride == 0.0f
           && !defaultHdr.debug && !defaultHdr.trace,
-          "HDR defaults to off/original/203 nits with diagnostics disabled");
+          "HDR defaults to auto/frostbite/203 nits with diagnostics disabled");
 
     const tq::hdr::ToneMap outputModes[] = {
         tq::hdr::ToneAgx, tq::hdr::ToneFrostbite
@@ -4636,18 +4636,18 @@ int main(int argc, char** argv) {
             context->PSSetShader(gradeShader, nullptr, 0);
             ID3D11PixelShader* reboundGrade = nullptr;
             context->PSGetShader(&reboundGrade, nullptr, nullptr);
-            check(reboundGrade == gradeShader,
-                  "the original color-grading pass remains active by default");
+            check(reboundGrade && reboundGrade != gradeShader,
+                  "the enhanced color-grading pass is active by default");
             if (reboundGrade) reboundGrade->Release();
             context->PSSetShader(gammaShader, nullptr, 0);
             ID3D11PixelShader* reboundGamma = nullptr;
             context->PSGetShader(&reboundGamma, nullptr, nullptr);
-            check(reboundGamma == gammaShader,
-                  "the original gamma pass remains active by default");
+            check(reboundGamma && reboundGamma != gammaShader,
+                  "the Frostbite output transform is active by default");
             if (reboundGamma) reboundGamma->Release();
         } else {
-            check(false, "retain the exact color-grading pass");
-            check(false, "retain the exact gamma pass");
+            check(false, "replace the exact color-grading pass");
+            check(false, "replace the exact gamma pass");
         }
         if (gradeShader) gradeShader->Release();
         if (gammaShader) gammaShader->Release();

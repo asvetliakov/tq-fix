@@ -26,9 +26,9 @@ it:
   projection widens.
 - progressively uploads eligible large loose-file textures in bounded,
   frame-paced chunks instead of submitting every high-resolution mip at once.
-- can keep the final scene/post-process chain in FP16 and apply either a
-  look-preserving Frostbite-style display mapper or a modern AgX-derived output
-  transform for SDR and HDR displays when explicitly enabled.
+- keeps the final scene/post-process chain in FP16 with a look-preserving
+  Frostbite-style display mapper by default, with an optional modern AgX-derived
+  output transform for SDR and HDR displays.
 - replaces the game's fixed, low-resolution bloom with an aspect-correct
   multi-scale float bloom while the enhanced FP16 output path is active.
 
@@ -106,8 +106,8 @@ grass=enhanced
 edge_updates=expanded
 bloom=enhanced
 bloom_strength=0.85
-hdr=off
-tonemap=original
+hdr=auto
+tonemap=frostbite
 paper_white_nits=203
 peak_nits=auto
 
@@ -329,9 +329,8 @@ Use `edge_updates=original` to restore the game's fixed 4:3 entity-update
 frustum. The expanded mode changes update coverage only; it does not alter the
 camera FOV, far plane, or rendering culling.
 
-HDR and custom tone mapping are disabled by default, retaining the complete
-original 8-bit color-output path. To opt in, set `hdr=auto` and select
-`tonemap=frostbite` or `tonemap=agx`. `hdr=auto` enables true HDR when the
+The defaults are `hdr=auto` and `tonemap=frostbite`. Existing explicit INI
+settings take precedence. `hdr=auto` enables true HDR when the
 operating system and active display report HDR support; the enhanced FP16 path
 also remains active on an SDR desktop and maps its extended scene highlights
 back into SDR. Frostbite is the neutral display mapper: it preserves the game's
