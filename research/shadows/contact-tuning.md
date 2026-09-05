@@ -13,11 +13,14 @@ The initial stronger candidate used upright 0.25; the approval changes it to
 The screenshot is a bright, elevated, zoomed-out village view. Broad building
 and tree shadows already exist. Figures and cart wheels occupy little screen
 area, while the fields, roofs and cobbles have dense texture detail. Additional
-shadowing should clarify feet, wheel contacts and the bases of stonework;
-large dark regions on roofs or fields would overwhelm that purpose.
+shadowing was initially intended to clarify feet, wheel contacts and the bases
+of stonework. In the user's subsequent before/after comparison, the clearest
+benefit was richer vegetation patches; improvement on buildings and small
+props was limited. The approved profile retains that modest vegetation benefit
+without increasing strength or reach to force a more obvious change elsewhere.
 
-The latest trace snapshot contained 6,144 rows. Filtering for more than 500
-indexed draws and a marched receiver gives 3,874 gameplay rows. Every one had a
+The earlier, weaker-profile trace snapshot contained 6,144 rows. Filtering for
+more than 500 indexed draws and a marched receiver gives 3,874 gameplay rows. Every one had a
 successful refresh, with zero invalid captures, neutral frames or full-ring
 frames. Median and p95 history age were both one frame. This is now active
 shading; the previous padded-buffer failure is resolved.
@@ -26,14 +29,14 @@ Of these rows, 3,024 had active contact strength and 850 had strength toggled
 off. The full receiver's median GPU time was 0.705 ms active and 0.391 ms off;
 the difference is about 0.31 ms. These are descriptive session statistics,
 not a controlled same-scene performance delta. CPU refresh median was about
-0.008–0.009 ms. Lowering the normal gate and adding samples will increase the
-eligible work; the next run must measure that increase.
+0.008–0.009 ms. Lowering the normal gate and adding samples increases the
+eligible work; these figures do not measure the final approved profile's cost.
 
 ## Approved settings
 
 | Key | Previous | Approved | Why |
 | --- | ---: | ---: | --- |
-| `shadow_contact` | on | on | Keep the optional receiver march enabled for comparison. |
+| `shadow_contact` | on | on | Ship enabled as requested after gameplay comparison; users can still disable it. |
 | `shadow_contact_steps` | 8 | 12 | Preserve sampling density as reach grows; more taps improve coverage, not darkness by themselves. |
 | `shadow_contact_length` | 0.20 | 0.35 | Reach farther around wheels, feet and stones so the result can survive the small screen footprint. Avoid starting with a long 0.7–1.0 ray in dense vegetation. |
 | `shadow_contact_bias` | 0.020 | 0.012 | Admit smaller near-contact depth separations; retain nonzero slack against false self-occlusion. |

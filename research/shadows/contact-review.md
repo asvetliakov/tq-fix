@@ -148,3 +148,32 @@ with the captured 2048-byte dynamic allocation size, puts nonzero data in the
 unused tail, verifies usable uploaded parameters, and separately checks that
 176-byte sources are rejected and 192-byte sources remain supported. The prior
 fixture used only a 192-byte allocation, which missed this distinction.
+
+## Final review before merging to main
+
+The final pass checked shader composition, CPU/GPU parameter agreement,
+nonblocking readback and history lifetime, draw binding restoration, device
+recreation, tracing attribution and the approved defaults. Two additional
+validation gaps were reproduced with regression tests:
+
+- A finite double-precision inverse could overflow when narrowed into the
+  float buffer sent to the GPU. Inversion now rejects values beyond `FLT_MAX`.
+- The contact matcher accepted the same instruction shape with the inverse
+  matrix moved to another location in cb0. It now requires cb0[8..11], matching
+  the CPU reader. The general deferred PCF matcher remains independent of that
+  contact-specific layout restriction.
+
+Both new assertions failed against the pre-fix source. These guards leave the
+audited game's shader output and the user-approved defaults unchanged. The
+tuning record also distinguishes the earlier weak-profile performance capture
+from the approved profile and records the observed vegetation benefit without
+claiming a substantial improvement on buildings or small props.
+
+Final verification passed: release and diagnostic builds (32-bit x86, all 200
+exports), seven CrossOver test processes with 640 passing checks including CSV
+validation, and exactly one match among 453 shaders for contact, deferred PCF
+and receiver identification. Contact-plus-PCF composition also succeeds at
+every supported step count from 4 through 16. Logs are under
+`build/contact-final-*.log`; `contact-final-regression-before.log` records the
+two expected failures before the fixes. No new gameplay performance claim is
+made by this validation.

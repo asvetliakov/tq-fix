@@ -4191,6 +4191,13 @@ void testContactShadowTransform() {
     check(!tq::contact::invertRowMatrix(infinite, rejected),
           "refuse to invert a matrix carrying a non-finite value");
 
+    // Finite input and a finite double inverse do not guarantee that the
+    // float constant-buffer representation is finite (the inverse has 1e40).
+    const float overflowing[16] = {1, 1e20f, 0, 0, 0, 1, 1e20f, 0,
+                                  0, 0, 1, 0, 0, 0, 0, 1};
+    check(!tq::contact::invertRowMatrix(overflowing, rejected),
+          "refuse an inverse that overflows the GPU float representation");
+
     // No INI is present here: verify the gameplay-approved shipped profile.
     const tq::shadow::ContactSettings& settings = tq::shadow::contactSettings();
     check(settings.enabled && tq::contact::enabled(),
@@ -5206,6 +5213,40 @@ int main(int argc, char** argv) {
                   marched.data, marched.size, 8, &twice),
               "refuse to march a shader that already declares b13");
         tq::dxbc::release(&twice);
+
+        // A similar receiver can place its inverse matrix elsewhere in cb0.
+        // Its march must be refused: the CPU reads exactly cb0[8..11].
+        BYTE* movedMatrix = deferredBytes ? (BYTE*)malloc(deferredSize) : nullptr;
+        unsigned movedRows = 0;
+        if (movedMatrix) {
+            memcpy(movedMatrix, deferredBytes, deferredSize);
+            uint32_t* header = (uint32_t*)movedMatrix;
+            for (unsigned i = 0; i < header[7]; ++i) {
+                uint32_t* chunk = (uint32_t*)(movedMatrix + header[8 + i]);
+                if (chunk[0] != 0x58454853u && chunk[0] != 0x52444853u) continue;
+                uint32_t* code = chunk + 2;
+                for (unsigned at = 2; at < code[1];) {
+                    uint32_t* p = code + at;
+                    unsigned op = p[0] & 0x7ffu;
+                    unsigned count = op == 53 ? p[1] : (p[0] >> 24) & 0x7fu;
+                    if (!count || count > code[1] - at) break;
+                    if (op == 17 && count == 8 && p[6] == 0
+                        && p[7] >= 8 && p[7] <= 11) {
+                        --p[7];
+                        ++movedRows;
+                    }
+                    at += count;
+                }
+            }
+        }
+        tq::dxbc::PatchResult wrongLayout = {};
+        check(movedRows == 4 && tq::dxbc::matchesDeferredShadowReceiver(
+                  movedMatrix, (SIZE_T)deferredSize)
+              && !tq::dxbc::addContactShadowMarch(
+                  movedMatrix, (SIZE_T)deferredSize, 12, &wrongLayout),
+              "refuse contact shading when the shader and CPU matrix layouts disagree");
+        tq::dxbc::release(&wrongLayout);
+        free(movedMatrix);
 
         // Step counts outside the configured range would emit a block the
         // capacity check was not sized for.

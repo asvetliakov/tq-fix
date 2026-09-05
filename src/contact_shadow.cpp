@@ -638,7 +638,9 @@ bool invertRowMatrix(const float in[16], float out[16]) {
     if (!_finite(determinant) || fabs(determinant) < 1.0e-20) return false;
     for (unsigned i = 0; i < 16; ++i) {
         double value = c[i] / determinant;
-        if (!_finite(value)) return false;
+        // The GPU consumes floats. A finite double can still overflow when
+        // narrowed, even when all input elements and the determinant are finite.
+        if (!_finite(value) || fabs(value) > FLT_MAX) return false;
         out[i] = (float)value;
     }
     return true;

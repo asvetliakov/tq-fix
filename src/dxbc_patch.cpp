@@ -508,6 +508,9 @@ bool findContactAnchors(const uint32_t* code, unsigned wordCount,
         if (!four) continue;
         const unsigned source = p[4];
         const unsigned base = p[7];
+        // The CPU readback uses the audited cb0[8..11] layout. A matching
+        // instruction shape with another matrix offset cannot use that data.
+        if (base != 8) continue;
         const uint32_t masks[4] = {0x12u, 0x22u, 0x42u, 0x12u};
         bool shaped = true;
         for (unsigned n = 0; n < 4 && shaped; ++n) {
