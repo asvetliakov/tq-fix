@@ -1,6 +1,7 @@
 #include "visual.h"
 #include "bloom_hook.h"
 #include "grass.h"
+#include "renderer_draw.h"
 #include "dxbc_patch.h"
 #include "frame_overlay.h"
 #include "hdr.h"
@@ -84,8 +85,6 @@ typedef void(WINAPI* IASetVertexBuffersFn)(ID3D11DeviceContext*, UINT, UINT,
                                            const UINT*);
 typedef void(WINAPI* IASetIndexBufferFn)(ID3D11DeviceContext*, ID3D11Buffer*,
                                          DXGI_FORMAT, UINT);
-typedef void(WINAPI* DrawFn)(ID3D11DeviceContext*, UINT, UINT);
-typedef void(WINAPI* DrawIndexedFn)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void(WINAPI* ClearRenderTargetViewFn)(ID3D11DeviceContext*,
                                               ID3D11RenderTargetView*,
                                               const FLOAT[4]);
@@ -110,8 +109,14 @@ VSSetShaderFn g_vsSetShader;
 PSSetShaderResourcesFn g_psSetShaderResources;
 IASetVertexBuffersFn g_iaSetVertexBuffers;
 IASetIndexBufferFn g_iaSetIndexBuffer;
-DrawFn g_draw;
-DrawIndexedFn g_drawIndexed;
+// Renderer call sites own interception. Resolve native dispatch anew after
+// every state change, including the crossed-grass vertex-buffer binding.
+void g_draw(ID3D11DeviceContext* context, UINT count, UINT start) {
+    context->Draw(count, start);
+}
+void g_drawIndexed(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    context->DrawIndexed(count, start, base);
+}
 ClearRenderTargetViewFn g_clearRenderTargetView;
 OMSetRenderTargetsFn g_omSetRenderTargets;
 RSSetViewportsFn g_rsSetViewports;
@@ -319,6 +324,8 @@ bool patchSlot(void** slot, void* replacement, void** original) {
 }
 
 void restoreSlots() {
+    tq::rendererdraw::shutdown();
+    tq::secondaryadmission::setSecondaryAdmissionDrawHooksReady(false);
     for (int i = g_patchCount - 1; i >= 0; --i) {
         Patch& p = g_patches[i];
         if (!readable(p.slot) || *p.slot != p.replacement) continue;
@@ -2918,7 +2925,7 @@ void drawGrassCross(ID3D11DeviceContext* context, UINT count, UINT start, INT ba
     if (crossed) {
         tq::probe::count(tq::probe::CounterGrassCross);
         context->IASetVertexBuffers(0, 1, &crossed, &stride, &offset);
-        // The original entry point: the hook has already run for this draw.
+        // This bypasses the renderer hook and uses current native dispatch.
         g_drawIndexed(context, count, start, base);
         context->IASetVertexBuffers(0, 1, &bound, &stride, &offset);
     }
@@ -3161,15 +3168,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (g_options.smaa || toneEnabled || nativeBloomControl
         || g_deferredBindingTracing || secondaryAdmissionDrawHooks
         || grassBufferHooks) {
-        const bool indexedOk = patchSlot(
-            &cv[12], (void*)&hookDrawIndexed, (void**)&g_drawIndexed);
-        const bool drawOk = patchSlot(
-            &cv[13], (void*)&hookDraw, (void**)&g_draw);
-        secondaryAdmissionDrawHooksReady = indexedOk && drawOk;
+        secondaryAdmissionDrawHooksReady = tq::rendererdraw::install(
+            GetModuleHandleW(L"Direct3D11.dll"), &hookDraw, &hookDrawIndexed);
         ok &= secondaryAdmissionDrawHooksReady;
-    } else {
-        g_drawIndexed = (DrawIndexedFn)cv[12];
-        g_draw = (DrawFn)cv[13];
     }
     tq::secondaryadmission::setSecondaryAdmissionDrawHooksReady(
         secondaryAdmissionDrawHooks && secondaryAdmissionDrawHooksReady);

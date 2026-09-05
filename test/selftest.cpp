@@ -13,6 +13,8 @@
 #include "bloom_hook.h"
 #include "frame_overlay.h"
 #include "detour.h"
+#include "renderer_draw.h"
+#include "renderer_draw_sites.h"
 #include "engine_probe.h"
 #include "engine.h"
 #include "secondary_admission.h"
@@ -44,6 +46,132 @@ IDXGISwapChain* g_presentSwapChain;
 void check(bool passed, const char* description) {
     fprintf(g_report, "%s  %s\n", passed ? "ok  " : "FAIL", description);
     if (!passed) ++g_failures;
+}
+
+typedef void (*SubmitDrawFn)(ID3D11DeviceContext*, UINT);
+typedef void (*SubmitIndexedFn)(ID3D11DeviceContext*, UINT, UINT, INT);
+unsigned g_rendererDrawEntries, g_rendererIndexedEntries, g_nativeDraws, g_nativeIndexedA, g_nativeIndexedB;
+UINT g_expectedCount, g_expectedStart;
+INT g_expectedBase;
+bool g_nativeArgs, g_companion, g_suppressDraw;
+void* g_rendererDrawReturn;
+void* g_rendererIndexedReturn;
+
+void WINAPI rendererNativeDraw(ID3D11DeviceContext*, UINT count, UINT start) {
+    ++g_nativeDraws;
+    g_nativeArgs &= count == g_expectedCount && start == 0;
+}
+void WINAPI rendererNativeIndexedB(ID3D11DeviceContext*, UINT count, UINT start, INT base) {
+    ++g_nativeIndexedB;
+    g_nativeArgs &= count == g_expectedCount && start == g_expectedStart && base == g_expectedBase;
+}
+void WINAPI rendererNativeIndexedA(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    ++g_nativeIndexedA;
+    g_nativeArgs &= count == g_expectedCount && start == g_expectedStart && base == g_expectedBase;
+    // Simulate native dispatch changing during the first submission, before
+    // the hook submits an extra draw. No recovery runs between the two.
+    (*(void***)context)[12] = (void*)&rendererNativeIndexedB;
+}
+void WINAPI rendererDrawHandler(ID3D11DeviceContext* context, UINT count, UINT start) {
+    ++g_rendererDrawEntries;
+    g_rendererDrawReturn = __builtin_return_address(0);
+    if (!g_suppressDraw) context->Draw(count, start);
+}
+void WINAPI rendererIndexedHandler(ID3D11DeviceContext* context, UINT count, UINT start, INT base) {
+    ++g_rendererIndexedEntries;
+    g_rendererIndexedReturn = __builtin_return_address(0);
+    if (g_suppressDraw) return;
+    context->DrawIndexed(count, start, base);
+    if (g_companion) context->DrawIndexed(count, start, base);
+}
+
+void testRendererDrawHooks() {
+    using namespace tq::rendererdraw::sites;
+    HMODULE module = LoadLibraryA("Direct3D11.dll");
+    typedef BOOL (*PrepareFn)();
+    PrepareFn prepare = module ? (PrepareFn)(void*)GetProcAddress(module, "prepare_draw_sites") : nullptr;
+    SubmitDrawFn draw = module ? (SubmitDrawFn)(void*)GetProcAddress(module, "submit_draw") : nullptr;
+    SubmitIndexedFn indexed = module ? (SubmitIndexedFn)(void*)GetProcAddress(module, "submit_indexed") : nullptr;
+    const bool ready = prepare && draw && indexed && prepare();
+    check(ready, "prepare executable copies of the renderer's audited draw windows");
+    if (!ready) { if (module) FreeLibrary(module); return; }
+    BYTE* drawWindow = (BYTE*)module + kDrawWindowRva;
+    BYTE* indexedWindow = (BYTE*)module + kIndexedWindowRva;
+    BYTE changed = kIndexedWindow[0] ^ 1;
+    tq::detour::writeBytes(indexedWindow, kIndexedWindow, &changed, 1);
+    check(!tq::rendererdraw::install(module, &rendererDrawHandler, &rendererIndexedHandler)
+          && !memcmp(drawWindow, kDrawWindow, sizeof(kDrawWindow)),
+          "a mismatch outside the indexed patch rejects both sites before any write");
+    tq::detour::writeBytes(indexedWindow, &changed, kIndexedWindow, 1);
+    const bool installed = tq::rendererdraw::install(module, &rendererDrawHandler, &rendererIndexedHandler);
+    check(installed && tq::rendererdraw::installed(), "install both renderer draw-site patches");
+    if (installed) {
+        void* vtable[115] = {};
+        vtable[12] = (void*)&rendererNativeIndexedA;
+        vtable[13] = (void*)&rendererNativeDraw;
+        struct FakeContext { void** table; } fake = {vtable};
+        ID3D11DeviceContext* context = (ID3D11DeviceContext*)&fake;
+        g_nativeArgs = true;
+        g_expectedCount = 27; g_expectedStart = 11; g_expectedBase = -7;
+        g_companion = true;
+        draw(context, g_expectedCount);
+        indexed(context, g_expectedCount, g_expectedStart, g_expectedBase);
+        check(g_nativeArgs && g_rendererDrawEntries == 1 && g_rendererIndexedEntries == 1
+              && g_nativeDraws == 1 && g_nativeIndexedA == 1 && g_nativeIndexedB == 1,
+              "preserve draw arguments and use changed native dispatch for a companion without recursion");
+        check(g_rendererDrawReturn == drawWindow + kDrawPatchOffset + kPatchSize
+              && g_rendererIndexedReturn == indexedWindow + kIndexedPatchOffset + kPatchSize,
+              "both replacements return to the renderer's original next instruction");
+        check(vtable[12] == (void*)&rendererNativeIndexedB && vtable[13] == (void*)&rendererNativeDraw,
+              "renderer interception leaves native Draw and DrawIndexed slots untouched");
+        g_companion = false;
+        for (unsigned i = 0; i < 1000; ++i) {
+            vtable[12] = i % 2 ? (void*)&rendererNativeIndexedA : (void*)&rendererNativeIndexedB;
+            indexed(context, g_expectedCount, g_expectedStart, g_expectedBase);
+        }
+        check(g_nativeArgs && g_rendererIndexedEntries == 1001
+              && g_nativeIndexedA + g_nativeIndexedB == 1002,
+              "repeated native target switches cannot remove renderer interception or corrupt the stack");
+        const unsigned nativeBefore = g_nativeDraws + g_nativeIndexedA + g_nativeIndexedB;
+        g_suppressDraw = true;
+        draw(context, g_expectedCount);
+        indexed(context, g_expectedCount, g_expectedStart, g_expectedBase);
+        g_suppressDraw = false;
+        check(g_nativeDraws + g_nativeIndexedA + g_nativeIndexedB == nativeBefore,
+              "renderer callbacks can suppress both submissions without entering native draw");
+        check(tq::rendererdraw::install(module, &rendererDrawHandler, &rendererIndexedHandler),
+              "repeated installation does not patch an already redirected call again");
+    }
+    tq::rendererdraw::shutdown();
+    check(!tq::rendererdraw::installed()
+          && !memcmp(drawWindow, kDrawWindow, sizeof(kDrawWindow))
+          && !memcmp(indexedWindow, kIndexedWindow, sizeof(kIndexedWindow)),
+          "shutdown restores both complete renderer windows byte for byte");
+    void* nativeTable[115] = {};
+    nativeTable[12] = (void*)&rendererNativeIndexedB;
+    nativeTable[13] = (void*)&rendererNativeDraw;
+    struct RestoredContext { void** table; } restored = {nativeTable};
+    const unsigned hookEntries = g_rendererDrawEntries + g_rendererIndexedEntries;
+    const unsigned nativeEntries = g_nativeDraws + g_nativeIndexedA + g_nativeIndexedB;
+    draw((ID3D11DeviceContext*)&restored, g_expectedCount);
+    indexed((ID3D11DeviceContext*)&restored, g_expectedCount, g_expectedStart, g_expectedBase);
+    check(g_nativeArgs && g_rendererDrawEntries + g_rendererIndexedEntries == hookEntries
+          && g_nativeDraws + g_nativeIndexedA + g_nativeIndexedB == nativeEntries + 2,
+          "restored renderer sites execute native draws without entering the removed hooks");
+    if (tq::rendererdraw::install(module, &rendererDrawHandler, &rendererIndexedHandler)) {
+        BYTE* site = drawWindow + kDrawPatchOffset;
+        BYTE owned[7], foreign[7];
+        memcpy(owned, site, sizeof(owned));
+        memcpy(foreign, owned, sizeof(foreign));
+        foreign[0] ^= 1;
+        tq::detour::writeBytes(site, owned, foreign, sizeof(foreign));
+        tq::rendererdraw::shutdown();
+        check(!memcmp(site, foreign, sizeof(foreign))
+              && !memcmp(indexedWindow, kIndexedWindow, sizeof(kIndexedWindow)),
+              "shutdown preserves a subsequent foreign patch while restoring the untouched companion site");
+        tq::detour::writeBytes(site, foreign, kDrawWindow + kDrawPatchOffset, sizeof(foreign));
+    } else check(false, "reinstall renderer sites for ownership-aware shutdown test");
+    FreeLibrary(module);
 }
 
 void onTestPrePresent(IDXGISwapChain* swapChain) {
@@ -3667,7 +3795,7 @@ void testShadowFitStabilizer() {
 }
 
 // Runs in its own fixture directory/process because production options and
-// device hooks are initialized once. Verify the actual DLL's vtable patches,
+// device hooks are initialized once. Verify the actual DLL's renderer patches,
 // with every other Draw-hook consumer disabled.
 int testGrassOnlyHooks(bool enhanced) {
     g_report = fopen("report.txt", "w");
@@ -3707,11 +3835,26 @@ int testGrassOnlyHooks(bool enhanced) {
         for (unsigned slot : indices) {
             MEMORY_BASIC_INFORMATION info = {};
             expected &= VirtualQuery(slots[slot], &info, sizeof(info)) != 0
-                && (info.AllocationBase == proxy) == enhanced;
+                && (info.AllocationBase == proxy) == (enhanced && slot >= 14);
         }
         check(expected, enhanced
-            ? "grass alone installs DrawIndexed, Draw, Map and Unmap without tracing or secondary admission"
+            ? "grass alone installs Map and Unmap while leaving native draw slots untouched"
             : "original grass leaves DrawIndexed, Draw, Map and Unmap unhooked when other consumers are off");
+        using namespace tq::rendererdraw::sites;
+        bool rendererPatched = true;
+        const DWORD patchRvas[] = {kDrawWindowRva + kDrawPatchOffset,
+                                  kIndexedWindowRva + kIndexedPatchOffset};
+        for (DWORD rva : patchRvas) {
+            BYTE* site = (BYTE*)host + rva;
+            if (enhanced) {
+                void* target = site + 7 + *(int32_t*)(site + 3);
+                MEMORY_BASIC_INFORMATION info = {};
+                rendererPatched &= site[2] == 0xe8
+                    && VirtualQuery(target, &info, sizeof(info)) && info.AllocationBase == proxy;
+            } else rendererPatched &= site[0] == 0x8b && site[1] == 0x08;
+        }
+        check(rendererPatched, enhanced ? "grass alone installs both production renderer submission hooks"
+                                       : "original grass leaves renderer submission sites unchanged");
     }
     if (context) context->Release();
     if (device) device->Release();
@@ -3740,6 +3883,7 @@ int main(int argc, char** argv) {
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
     testRendererPresentHook();
+    testRendererDrawHooks();
     testBloomHook();
     testGrassProbe();
     testDetour();
@@ -3970,8 +4114,8 @@ int main(int argc, char** argv) {
               "CreateSamplerState is redirected into the visual proxy");
         void* draw = (*(void***)context)[13];
         queried = VirtualQuery(draw, &info, sizeof(info)) != 0;
-        check(queried && info.AllocationBase == proxy,
-              "Draw is redirected into the visual proxy");
+        check(queried && info.AllocationBase != proxy,
+              "native Draw remains outside the visual proxy");
     }
 
     if (device) {
@@ -4176,7 +4320,9 @@ int main(int argc, char** argv) {
                 context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 context->VSSetShader(fullscreenVS, nullptr, 0);
                 context->PSSetShader(fxaa, nullptr, 0);
-                context->Draw(3, 0);
+                SubmitDrawFn submit = (SubmitDrawFn)(void*)GetProcAddress(host, "submit_draw");
+                check(submit != nullptr, "resolve the renderer submission fixture for SMAA");
+                if (submit) submit(context, 3);
                 ID3D11PixelShader* restoredPS = nullptr;
                 ID3D11ShaderResourceView* restoredSRV = nullptr;
                 ID3D11RenderTargetView* restoredRTV = nullptr;

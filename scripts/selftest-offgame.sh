@@ -10,11 +10,11 @@ REPORT_WIN='C:\tqflicker-selftest\report.txt'
 [ -f build/winmm.dll ] || { echo "no build/winmm.dll - run: npm run build" >&2; exit 1; }
 
 i686-w64-mingw32-g++ -o build/selftest.exe \
-  test/selftest.cpp test/engine_runtime.cpp src/arc_cache.cpp src/bloom_hook.cpp src/detour.cpp src/dxbc_patch.cpp src/engine_probe.cpp src/engine_hooks.cpp src/shadow_defer.cpp src/terrain_preload.cpp src/secondary_admission.cpp src/archive_hooks.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp \
+  test/selftest.cpp test/engine_runtime.cpp src/arc_cache.cpp src/bloom_hook.cpp src/detour.cpp src/renderer_draw.cpp src/dxbc_patch.cpp src/engine_probe.cpp src/engine_hooks.cpp src/shadow_defer.cpp src/terrain_preload.cpp src/secondary_admission.cpp src/archive_hooks.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp \
   -I src -I build/gen -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   -DTQ_SELFTEST -ld3d11
 i686-w64-mingw32-g++ -shared -o build/Direct3D11.dll \
-  test/device_host.cpp -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
+  test/device_host.cpp -I src -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   -ld3d11
 
 rm -rf "$WORK"

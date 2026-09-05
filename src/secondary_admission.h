@@ -4,8 +4,8 @@
 
 namespace tq { namespace secondaryadmission {
 
-// Both Draw slots must be live before the shared per-frame budget can omit a
-// renderable. The frame serial is independent of the performance recorder.
+// Both renderer draw sites must be hooked before the shared per-frame budget
+// can omit a renderable. Its frame serial is independent of the recorder.
 bool secondaryPassAdmissionRequested();
 void setSecondaryAdmissionDrawHooksReady(bool ready);
 void secondaryAdmissionFrameBoundary();

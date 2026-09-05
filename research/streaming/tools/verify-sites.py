@@ -2866,7 +2866,7 @@ def check_reflections(engine):
        and "secondaryPassAdmissionRequested()" in visual_src
        and "setSecondaryAdmissionDrawHooksReady(" in visual_src
        and "|| secondaryAdmissionDrawHooks" in visual_src
-       and "secondaryAdmissionDrawHooksReady = indexedOk && drawOk;"
+       and "secondaryAdmissionDrawHooksReady = tq::rendererdraw::install("
            in visual_src
        and visual_src.find("setSecondaryAdmissionDrawHooksReady(")
            < visual_src.find("tq::engine::install(")
