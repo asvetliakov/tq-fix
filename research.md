@@ -120,7 +120,7 @@ Exact sites for all four paths are in the
 | --- | --- |
 | `shadow_defer_cold_resources=1` | Queue unloaded exact mesh-instance shadow dependencies; omit cold root casters and cold alpha-base passes until resident. Skip material inputs absent from the active shadow shader and the verified redundant base-texture binding. |
 | `shadow_defer_cold_actor_pose=1` | Move the root decision before directional Actor pose work. Skip only when queuing/loading is confirmed; an unconfirmed enqueue falls back to stock. Implies the complete cold-resource patch set. |
-| `mesh_preload_refresh=1` | At an existing dependency-aware Actor preload visit, advance the countdown for a root untouched for at least 400 Engine frames if resident or evicted with an expired nonzero deadline and no queue entry. Share eight accelerations per frame. Remove the requeue cooldown only from automatic mesh/texture age eviction; preserve native eviction ages, budgets and loading. Cold-root countdown recovery awaits gameplay validation. |
+| `mesh_preload_refresh=1` | At an existing dependency-aware Actor preload visit, advance the countdown for a root untouched for at least 400 Engine frames if resident or evicted with an expired nonzero deadline and no queue entry. Share eight accelerations per frame. Remove the requeue cooldown only from automatic mesh/texture age eviction; preserve native eviction ages, budgets and loading. First combined validation: 255 → 177 → 55 ms, with no evicted-resource demand in the latest transition window. |
 | `terrain_preload_layers=1` | Call the game's `TerrainType::PreLoad(true)` immediately after runtime layer `LoadTextures`, using its normal background loaders. |
 | `secondary_pass_admission_budget=8` | Share eight newly admitted renderable identities per presented frame across exact reflection and directional-shadow contexts. Pending objects keep Resource/material preparation but suppress their secondary `Draw`/`DrawIndexed` calls until admitted. |
 | `streaming=optimized` | For eligible mapped loose-file textures, show a low-mip view while uploading withheld high-mip bytes in frame-paced chunks. This budgets texture transfer, not object admission or archive reads. |
@@ -277,11 +277,14 @@ worker-loaded resources still under cooldown after eviction, costing 144 ms to
 reload on demand. The follow-up changes only the two native idle-eviction
 cooldown arguments; see the [latest lifecycle evidence and candidate](research/streaming/residual-gameplay-hitches.md#batched-text-repeat-and-idle-requeue-candidate).
 
-The remaining transition contains first-use particle texture loading, five
-smaller scenery reloads and native draw time. Other approximately 100 ms spikes
-have different profiles. Preserve these distinctions when choosing the next
-fix; increasing the secondary budget or disabling cooldowns globally is not
-justified by the residency improvement.
+Subsequent cooldown and countdown fixes reduced the repeated transition from
+255 to 177 to 55 ms. In the latest capture, the ±120-frame window contains no
+synchronous demand for previously evicted resources; its main-thread loading
+falls from 202 to 118 to 35 ms. The user tentatively reported no felt hitch.
+The remaining transition is mostly first-use particle loading, with 12 ms of
+native draw time. A separate earlier 204 ms frame is dominated by Engine update
+and remains unexplained. This validates the scenery mechanism for this run,
+not universal hitch-free gameplay. See the [combined validation](research/streaming/residual-gameplay-hitches.md#combined-recovery-validation-scenery-reloads-absent).
 
 ## Rejected explanations and experiments
 

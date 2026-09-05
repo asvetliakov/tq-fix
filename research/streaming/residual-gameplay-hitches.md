@@ -491,3 +491,77 @@ its INI has SHA-256
 `5a1657f49a79e30eba487cf053d9ceb80934da08de018b7dacde45c27d2caf64`.
 The preparation archive is `cache/runs/evicted-root-prepared`. INI values remain
 identical to the preceding run, and the prior DLL/configuration/logs are preserved.
+
+## Combined recovery validation: scenery reloads absent
+
+The first run of the combined fix is archived as `cache/runs/evicted-root-first`,
+with the DLL, INI, manifest, `lifecycle.json` and `comparison.json`. CSV SHA-256:
+`b7e4963cc4a639faeff84cfbdce431e10ab5f94e81297e85158650d80908197e`;
+text SHA-256: `68cc4635d947d39fb23ce364a09f5b146663e70da3aae9c48a9aa2fe153d14d3`.
+The candidate DLL and INI hashes match the preceding preparation. The log
+confirms recovery enabled, idle cooldown zero, all seven lifecycle sites,
+59 accelerations including **22 cold-root recoveries**, and zero budget deferrals.
+History replacements, unreported overwrites and F12 truncations are zero.
+There are 3,800 consecutive CPU rows, 3,745 GPU results, 47 GPU timeouts and
+zero dropped rows; GPU coverage is incomplete, so CPU conclusions do not rely
+on filling in missing GPU results.
+
+The user tentatively reported no felt hitch. The transition at 3341 changes
+from one to two owners as before. F12 at 3426 still falls inside the 120-frame
+detail window. Exclude first world frame 2001, its 120-frame warmup and exit
+frame 3621; the comparison window is gameplay 2121–3620 (29.822 seconds).
+
+| Measurement | Before cooldown fix | Cooldown fix only | Combined recovery |
+|---|---:|---:|---:|
+| Transition CPU | 255.408 ms | 176.771 ms | **55.463 ms** |
+| Main-thread transition loads | 70 / 172.898 ms | 34 / 84.651 ms | **7 / 22.752 ms** |
+| Previously evicted transition demands | 63 / 143.524 ms | 31 / 83.164 ms | **0** |
+| Main-thread loading across ±120 frames | 202.315 ms | 118.058 ms | **35.030 ms** |
+| Main-thread loading across [-600,+120] | 218.791 ms | 133.365 ms | **50.570 ms** |
+| Transition native draw submission | 55.824 ms | 61.198 ms | **12.095 ms** |
+| Gameplay median | 19.601 ms | 19.461 ms | 19.481 ms |
+| Gameplay p95 | 23.595 ms | 23.486 ms | 23.651 ms |
+| Gameplay p99 | 32.483 ms | 30.878 ms | 30.882 ms |
+
+All seven loads at the transition have no prior observed queue/load/unload:
+three shaders, `Effects\auras`, the inventory transparency texture,
+`smoke_8x8__01.tex` (20.539 ms) and `candleflame01.tex` (0.363 ms). There are no
+mesh loads at that frame and no demand for a previously evicted resource among
+the 16 loads across ±120 frames. Two small first-observed mesh loads later in
+that window are ambient turtle and `davykroken` assets, not the previous scenery
+reloads. The earlier statue/candle/dependency population no longer falls into
+the synchronous load path in this capture. Together with 22 recovery admissions,
+this supports successful preload before use. The recorder prints cold demands,
+not every resident resource, so individual worker completion timestamps for
+those absent demands are not emitted.
+
+Transition update is 24.912 ms, including 20.902 ms of particle loading; render
+is 26.386 ms, including only 1.850 ms of resource loading. Native Present is
+0.041 ms and mod presentation 0.108 ms. The second geometry scene's native draws
+fall to 11.545 ms. Earlier resource realization could reduce downstream driver
+work, but the draw improvement alone does not prove a driver mechanism.
+Grass remains 173/173 crossed draws, at 0.139 ms. Secondary admission is one,
+with no suppression or overflow. The wider windows show no compensating
+synchronous loading burst near the transition; their maximum is the 55 ms
+transition itself for ±120, and a separate 68.970 ms update spike for [-600,+120].
+
+The full gameplay window is **not hitch-free**. Frame 2302 takes 203.843 ms,
+of which 189.647 ms is inside Engine update. Its only resource load is a 0.703 ms
+mesh load during render, not update. Measured main-thread object waiting is
+0.051 ms, the unload fence 0.001 ms, and no Engine critical-section contention
+or main-thread sleep is recorded. Seven resource sweeps record zero whole
+microseconds. Enqueue count is 568, versus 553 in the preceding frame; neither
+that count nor the unpartitioned update duration identifies a cause. Mod observer
+locks and unmeasured native update children remain possibilities. The F12 report
+is far too late to recover detailed history for frame 2302. Smaller 51–69 ms
+update spikes also persist. Maximum gameplay Peek time is 3.425 ms.
+
+Conclusion: retain the combined recovery fix; this run validates the targeted
+scenery reload mechanism and agrees with the user's improved experience.
+Normal frame-time statistics are essentially unchanged. Do not claim zero
+overhead, general smoothness, or that the separate update spike is unrelated to
+all mod/diagnostic code. The existing build and trace configuration remain
+installed. Further work on particle initialization and the major update children
+should follow the complete diagnostic plan above, rather than blindly expanding
+the resource admission budget. No runtime changes were made while reviewing
+this successful capture.

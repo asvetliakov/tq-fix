@@ -68,10 +68,11 @@ preload, and reflection and directional shadow share an eight-new-object-per-
 frame draw-admission budget. Normal colour drawing remains unchanged;
 pending local shadows/reflections may appear later. This does not lower shadow
 resolution or undo the shadow-distance fix, and required no renderer rewrite.
-When the game revisits a stale but still-resident scenery mesh for preloading,
-the mesh refresh fix advances its normal dependency preload, up to eight such
-visits per Engine frame. This reduces idle eviction before the player reaches
-the mesh while preserving memory-pressure handling. The separate 8 MiB archive
+When the game revisits a stale scenery mesh for preloading, the mesh refresh
+fix advances its normal dependency preload, up to eight such visits per Engine
+frame. This refreshes resident meshes and recovers eligible evicted roots,
+while preserving memory-pressure handling. Automatic mesh/texture age eviction
+also permits immediate requeueing on renewed interest. The separate 8 MiB archive
 cache remains enabled for its limited reuse benefit.
 
 In Runs 84 and 85 the user no longer noticed the old-route **play** hitch.
@@ -81,7 +82,9 @@ stutter-free loading or universally smooth play. All fixes operate with
 `performance_trace=0`. On a later alternate route, mesh preload refresh reduced
 the matched transition from 323 to 79 ms and synchronous resource loading from
 212 to 29 ms. Normal frame times held steady in that comparison; remaining
-particle loads and other spikes mean this is not a stutter-free guarantee. See
+particle loads and other spikes mean this is not a stutter-free guarantee.
+Cooldown and countdown follow-ups reduced a later 255 ms repeat to 55 ms, with
+no evicted scenery reloaded synchronously in the transition window. See
 [research.md](research.md) for the evidence, trade-offs, and rejected explanations.
 
 The progressive texture uploader addresses a separate problem: submitting all
