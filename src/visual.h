@@ -16,6 +16,11 @@ inline bool isFp16SceneTargetOrdinal(unsigned id) {
 // failure.
 void install(ID3D11Device* device, ID3D11DeviceContext* context,
              IDXGISwapChain* swapChain = nullptr);
+// Called at the renderer's device-creation boundary, with rendering stopped.
+// Retires the previous device before DXGI can reuse its window. A compiler
+// timeout leaves the existing state intact and rejects this creation attempt.
+bool prepareDeviceRecreation();
+bool isAuxiliaryWindow(HWND window);
 // Advances one bounded chunk of a retained game-side texture upload. Called
 // from the game's Present path so upload work is spread across frames.
 void onPresent(IDXGISwapChain* swapChain);

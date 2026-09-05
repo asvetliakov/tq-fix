@@ -45,6 +45,7 @@ bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
 // Validates FP16/color-space support after creation. The caller must discard
 // the candidate device and retry the original description when this fails.
 bool activateSwapChain(IDXGISwapChain* swapChain);
+void resetSwapChain();
 void reapplyColorSpace(IDXGISwapChain* swapChain);
 
 bool isColorGradingShader(const void* bytecode, SIZE_T size);

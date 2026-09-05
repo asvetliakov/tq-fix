@@ -34,12 +34,9 @@ typedef HRESULT(WINAPI* CreateDeviceAndSwapChainFn)(
     IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*, UINT,
     UINT, const DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D11Device**,
     D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
-typedef HRESULT(WINAPI* CreateVertexShaderFn)(
-    ID3D11Device*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11VertexShader**);
 
 CreateDeviceFn             g_createDevice;
 CreateDeviceAndSwapChainFn g_createDeviceAndSwapChain;
-CreateVertexShaderFn       g_createVertexShader;
 
 struct Patch {
     void** slot;
@@ -49,7 +46,6 @@ struct Patch {
 
 Patch  g_patches[3];
 int    g_patchCount;
-LONG   g_devicePatched;
 HANDLE g_stop;
 HANDLE g_done;
 HANDLE g_thread;
@@ -161,50 +157,10 @@ bool resolveWinmm(HINSTANCE self) {
     return true;
 }
 
-HRESULT WINAPI hookCreateVertexShader(ID3D11Device* device, const void* bytecode,
-                                      SIZE_T size, ID3D11ClassLinkage* linkage,
-                                      ID3D11VertexShader** shader) {
-    tq::probe::Scope timing(tq::probe::PhaseShaderCreate);
-    tq::probe::count(tq::probe::CounterShaderCreate);
-    tq::dxbc::PatchResult patched = {};
-    bool changed = tq::dxbc::clampBoneIndices(bytecode, size, &patched);
-    HRESULT result = g_createVertexShader(
-        device, changed ? patched.data : bytecode, changed ? patched.size : size,
-        linkage, shader);
-    if (changed && FAILED(result))
-        result = g_createVertexShader(device, bytecode, size, linkage, shader);
-    tq::dxbc::release(&patched);
-    return result;
-}
-
-void patchDevice(ID3D11Device* device) {
-    if (!device || InterlockedCompareExchange(&g_devicePatched, 1, 0)) return;
-    void** vtable = *(void***)device;
-    void** slot = &vtable[12];  // ID3D11Device::CreateVertexShader
-    if (!readable(slot) || !readable(*slot)) {
-        tq::hdr::log("Device vertex-shader slot is unreadable: device=%p slot=%p\r\n",
-                     device, slot);
-        InterlockedExchange(&g_devicePatched, 0);
-        return;
-    }
-    // Publish the call-through before making the hook reachable from another
-    // thread through the shared DXMT vtable.
-    g_createVertexShader = (CreateVertexShaderFn)*slot;
-    if (!rememberPatch(slot, (void*)&hookCreateVertexShader)) {
-        tq::hdr::log("Device vertex-shader hook failed: slot=%p target=%p\r\n",
-                     slot, *slot);
-        g_createVertexShader = nullptr;
-        InterlockedExchange(&g_devicePatched, 0);
-    } else {
-        tq::hdr::log("Device vertex-shader hook installed: device=%p\r\n", device);
-    }
-}
-
 void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
                   IDXGISwapChain* swapChain = nullptr) {
     tq::hdr::log("Installing hooks: device=%p context=%p swapChain=%p\r\n",
                  device, context, swapChain);
-    patchDevice(device);
     // The directional shadow split is an Engine.dll constant redirect, so it
     // is installed once the module is loaded and is independent of the device.
     HMODULE engine = GetModuleHandleW(L"Engine.dll");
@@ -220,9 +176,11 @@ void installHooks(ID3D11Device* device, ID3D11DeviceContext* context,
 
 void releaseCreation(IDXGISwapChain** swapChain, ID3D11Device** device,
                      ID3D11DeviceContext** context) {
+    if (context && *context) (*context)->ClearState();
+    if (swapChain && *swapChain) { (*swapChain)->Release(); *swapChain = nullptr; }
+    if (context && *context) (*context)->Flush();
     if (context && *context) { (*context)->Release(); *context = nullptr; }
     if (device && *device) { (*device)->Release(); *device = nullptr; }
-    if (swapChain && *swapChain) { (*swapChain)->Release(); *swapChain = nullptr; }
 }
 
 HRESULT WINAPI hookCreateDevice(
@@ -232,6 +190,11 @@ HRESULT WINAPI hookCreateDevice(
     ID3D11DeviceContext** context) {
     tq::hdr::log("D3D11CreateDevice entered: flags=0x%x levels=%u\r\n",
                  flags, levelCount);
+    if (!tq::visual::prepareDeviceRecreation()) {
+        if (device) *device = nullptr;
+        if (context) *context = nullptr;
+        return E_FAIL;
+    }
     HRESULT result = g_createDevice(adapter, driverType, software, flags, levels,
                                     levelCount, sdkVersion, device, selectedLevel, context);
     tq::hdr::log("D3D11CreateDevice returned: hr=0x%08lx device=%p context=%p\r\n",
@@ -255,6 +218,18 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
                      (unsigned)description->SwapEffect, flags);
     else
         tq::hdr::log("D3D11CreateDeviceAndSwapChain entered without a description\r\n");
+    // This import belongs to the renderer. A different window is an auxiliary
+    // chain, not replacement of the tracked game output.
+    if (description && tq::visual::isAuxiliaryWindow(description->OutputWindow))
+        return g_createDeviceAndSwapChain(
+            adapter, driverType, software, flags, levels, levelCount, sdkVersion,
+            description, swapChain, device, selectedLevel, context);
+    if (description && !tq::visual::prepareDeviceRecreation()) {
+        if (swapChain) *swapChain = nullptr;
+        if (device) *device = nullptr;
+        if (context) *context = nullptr;
+        return E_FAIL;
+    }
     DXGI_SWAP_CHAIN_DESC candidate = {};
     bool tryFloatOutput = tq::streaming::presentHookInstalled() && description
                        && tq::hdr::makeSwapChainCandidate(*description, &candidate);

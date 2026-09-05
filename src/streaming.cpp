@@ -252,8 +252,7 @@ void setResizeCallback(void (*callback)(IDXGISwapChain*)) {
 }
 
 void shutdown() {
-    g_tearingSwapChain = nullptr;
-    g_tearingPresentLogged = false;
+    releaseSwapChain();
     g_presentCallback = nullptr;
     g_postPresentCallback = nullptr;
     g_preResizeCallback = nullptr;
@@ -267,6 +266,11 @@ void shutdown() {
     InterlockedExchange(&g_firstPresentReturned, 0);
     InterlockedExchange(&g_presentReturnCount, 0);
     InterlockedExchange(&g_rendererInstalled, 0);
+}
+
+void releaseSwapChain() {
+    g_tearingSwapChain = nullptr;
+    g_tearingPresentLogged = false;
     if (g_resizeSlot && g_resizeBuffers && readable(g_resizeSlot)
         && *g_resizeSlot == (void*)&hookResizeBuffers)
         writePointer(g_resizeSlot, (void*)g_resizeBuffers);

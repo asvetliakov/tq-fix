@@ -18,6 +18,8 @@ bool presentHookInstalled();
 // Retains ResizeBuffers handling only where no Steam overlay is loaded. Present
 // itself is deliberately never patched through the shared DXGI vtable.
 void installSwapChain(IDXGISwapChain* swapChain);
+// Detaches chain-specific state while keeping the renderer Present hook.
+void releaseSwapChain();
 void setPresentCallback(void (*callback)(IDXGISwapChain*));
 void setPostPresentCallback(void (*callback)(IDXGISwapChain*));
 void setPreResizeCallback(void (*callback)(IDXGISwapChain*));

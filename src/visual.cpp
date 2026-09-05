@@ -56,6 +56,11 @@ Patch g_patches[32];
 int g_patchCount;
 LONG g_installed;
 LONG g_firstPresentLogged;
+bool g_optionsRead;
+
+typedef HRESULT(WINAPI* CreateVertexShaderFn)(ID3D11Device*, const void*, SIZE_T,
+    ID3D11ClassLinkage*, ID3D11VertexShader**);
+CreateVertexShaderFn g_createVertexShader;
 
 typedef HRESULT(WINAPI* CreateTexture2DFn)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*,
                                            const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
@@ -312,14 +317,40 @@ bool readable(const void* address) {
 
 bool patchSlot(void** slot, void* replacement, void** original) {
     if (!slot || !replacement || !readable(slot) || !readable(*slot)) return false;
+    void* prior = *slot;
+    if (prior == replacement) {
+        for (int i = 0; i < g_patchCount; ++i) {
+            const Patch& p = g_patches[i];
+            if (p.slot == slot && p.replacement == replacement) {
+                if (original) *original = p.original;
+                return true;
+            }
+        }
+        return false; // Never publish the hook itself as its call-through.
+    }
+    if (g_patchCount == (int)(sizeof(g_patches) / sizeof(g_patches[0]))) return false;
     DWORD oldProtection;
     if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &oldProtection)) return false;
-    void* old = InterlockedExchangePointer((PVOID volatile*)slot, replacement);
+    // Device vtables can also be used by loader threads. Publish the original
+    // before the hook becomes callable, including the always-on skinning fix.
+    if (original) InterlockedExchangePointer((PVOID volatile*)original, prior);
+    void* old = InterlockedCompareExchangePointer((PVOID volatile*)slot, replacement, prior);
     DWORD ignored;
     VirtualProtect(slot, sizeof(*slot), oldProtection, &ignored);
-    if (original) *original = old;
-    if (old != replacement && g_patchCount < (int)(sizeof(g_patches) / sizeof(g_patches[0])))
-        g_patches[g_patchCount++] = {slot, old, replacement};
+    if (old != prior) return false; // Another owner changed it during installation.
+    g_patches[g_patchCount++] = {slot, prior, replacement};
+    return true;
+}
+
+bool verifySlots() {
+    for (int i = 0; i < g_patchCount; ++i) {
+        const Patch& p = g_patches[i];
+        if (!readable(p.slot) || *p.slot != p.replacement) {
+            tq::hdr::log("Visual hook verification failed: slot=%p expected=%p\r\n",
+                         p.slot, p.replacement);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -881,12 +912,14 @@ void startUnmapWorker() {
     g_unmapReady = true;
 }
 
-void stopUnmapWorker() {
+void stopUnmapWorker(bool recreating = false) {
     if (!g_unmapReady) return;
     g_unmapReady = false;
     if (g_unmapStop) SetEvent(g_unmapStop);
     if (g_unmapThread) {
-        WaitForSingleObject(g_unmapThread, 2000);
+        // A live replacement must not reuse the queue/lock while its old
+        // worker can still access them. This join is outside the frame path.
+        WaitForSingleObject(g_unmapThread, recreating ? INFINITE : 2000);
         CloseHandle(g_unmapThread);
         g_unmapThread = nullptr;
     }
@@ -1343,6 +1376,22 @@ HRESULT WINAPI hookCreateTexture2D(ID3D11Device* device, const D3D11_TEXTURE2D_D
             (unsigned)desc->Format, desc->BindFlags, desc->MiscFlags,
             initial != nullptr);
     return hr;
+}
+
+HRESULT WINAPI hookCreateVertexShader(ID3D11Device* device, const void* bytecode,
+                                      SIZE_T size, ID3D11ClassLinkage* linkage,
+                                      ID3D11VertexShader** shader) {
+    tq::probe::Scope timing(tq::probe::PhaseShaderCreate);
+    tq::probe::count(tq::probe::CounterShaderCreate);
+    tq::dxbc::PatchResult patched = {};
+    bool changed = tq::dxbc::clampBoneIndices(bytecode, size, &patched);
+    HRESULT result = g_createVertexShader(
+        device, changed ? patched.data : bytecode, changed ? patched.size : size,
+        linkage, shader);
+    if (changed && FAILED(result))
+        result = g_createVertexShader(device, bytecode, size, linkage, shader);
+    tq::dxbc::release(&patched);
+    return result;
 }
 
 HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode, SIZE_T size,
@@ -3039,7 +3088,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         tq::hdr::log("Visual install skipped: already installed\r\n");
         return;
     }
-    readOptions();
+    // Options and the trace writer belong to the session, not the device.
+    // In particular, re-reading probe options would replace its pending rows.
+    if (!g_optionsRead) { readOptions(); g_optionsRead = true; }
     g_deferredBindingTracing =
         tq::engineprobe::deferredDrawTraceRequested();
     const bool secondaryAdmissionDrawHooks =
@@ -3118,7 +3169,8 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     }
     void** dv = *(void***)device;
     void** cv = *(void***)context;
-    bool ok = true;
+    bool ok = patchSlot(&dv[12], (void*)&hookCreateVertexShader,
+                         (void**)&g_createVertexShader);
     if (g_options.anisotropy > 1)
         ok &= patchSlot(&dv[23], (void*)&hookCreateSamplerState, (void**)&g_createSamplerState);
     else g_createSamplerState = (CreateSamplerStateFn)dv[23];
@@ -3204,6 +3256,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     // Its trace groups require the probe, while accepted performance fixes
     // enter independently and install only their audited sites.
     tq::engine::install(GetModuleHandleW(L"Engine.dll"));
+    ok &= verifySlots();
     tq::hdr::log("Visual slot patching returned: ok=%u patches=%d\r\n",
                  ok ? 1u : 0u, g_patchCount);
     if (ok && nativeBloomControl) {
@@ -3237,8 +3290,11 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         tq::bloomhook::shutdown();
         g_globalBloomEnabled = false;
         restoreSlots();
-        g_context->Release();
-        g_context = nullptr;
+        // Optional visual failure must not disable the original skinning fix.
+        // Keep the context reference until teardown so its vtable stays alive.
+        const bool coreReady = patchSlot(&dv[12], (void*)&hookCreateVertexShader,
+                                         (void**)&g_createVertexShader);
+        tq::hdr::log("Skinning hook after visual rollback: ready=%u\r\n", coreReady ? 1u : 0u);
         stopUnmapWorker();
         tq::upload::shutdown();
         tq::streaming::setPresentCallback(nullptr);
@@ -3333,16 +3389,29 @@ void onResize(IDXGISwapChain* swapChain) {
     }
 }
 
-void shutdown() {
+static bool releaseVisual(bool recreating) {
+    // The compiler writes device-owned globals and uses the original entry
+    // points. Join it before restoring slots or releasing any graphics state.
+    bool workerStopped = true;
+    if (g_programThread) {
+        workerStopped = WaitForSingleObject(g_programThread, 2000) == WAIT_OBJECT_0;
+        if (recreating && !workerStopped) {
+            tq::hdr::log("Device recreation deferred: shader worker still running\r\n");
+            return false;
+        }
+        CloseHandle(g_programThread);
+        g_programThread = nullptr;
+    }
     // First: these are writes into Engine.dll's .text, and every one of them
     // has to be back before the probe they report into goes away.
-    tq::engine::shutdown();
+    if (!recreating) tq::engine::shutdown();
     g_deferredBindingTracing = false;
     memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
     tq::streaming::setPresentCallback(nullptr);
     tq::streaming::setPostPresentCallback(nullptr);
     tq::streaming::setPreResizeCallback(nullptr);
     tq::streaming::setResizeCallback(nullptr);
+    if (recreating) tq::streaming::releaseSwapChain();
     tq::bloomhook::shutdown();
     g_globalBloomEnabled = false;
     g_bloomToggleKeyDown = false;
@@ -3351,7 +3420,7 @@ void shutdown() {
     // Jobs first, so nothing is still holding a lease when the leases go, and
     // the worker before that, so no view is unmapped from under it.
     tq::upload::shutdown();
-    stopUnmapWorker();
+    stopUnmapWorker(recreating);
     if (g_looseRedirects)
         tq::hdr::log("Loose texture cap: %ld redirected to the archive, "
                      "largest %ld px\r\n", g_looseRedirects, g_looseBiggest);
@@ -3361,12 +3430,8 @@ void shutdown() {
         memset(&g_mappingLeases[i], 0, sizeof(g_mappingLeases[i]));
     }
     InterlockedExchange(&g_leasedBytes, 0);
-    bool workerStopped = true;
-    if (g_programThread) {
-        workerStopped = WaitForSingleObject(g_programThread, 2000) == WAIT_OBJECT_0;
-        CloseHandle(g_programThread);
-        g_programThread = nullptr;
-    }
+    if (recreating && g_context) g_context->ClearState();
+    tq::grass::releaseBuffers();
     // On an abnormal explicit unload, leaking process-local graphics objects is
     // safer than freeing them beneath a worker that DXMT has not returned.
     if (workerStopped) {
@@ -3385,14 +3450,25 @@ void shutdown() {
     memset(g_postProcessBindings, 0, sizeof(g_postProcessBindings));
     g_postProcessBindingCount = 0;
     memset(g_shadowTextures, 0, sizeof(g_shadowTextures)); g_shadowTextureCount = 0;
+    if (g_swapChain) {
+        if (recreating) {
+            BOOL fullscreen = FALSE;
+            if (SUCCEEDED(g_swapChain->GetFullscreenState(&fullscreen, nullptr)) && fullscreen)
+                g_swapChain->SetFullscreenState(FALSE, nullptr);
+        }
+        g_swapChain->Release(); g_swapChain = nullptr;
+    }
+    // Flush after all back-buffer/chain references are gone: D3D11 defers
+    // destruction, and a surviving flip chain prevents reuse of its HWND.
+    if (recreating && g_context) g_context->Flush();
     if (g_context) { g_context->Release(); g_context = nullptr; }
-    if (g_swapChain) { g_swapChain->Release(); g_swapChain = nullptr; }
     g_device = nullptr; g_fxaaBound = g_shadowBound = false;
     g_colorGradingBound = g_gammaBound = false;
     g_backBufferNeedsRestore = false;
     releaseFlipOutputTargets();
     InterlockedExchange(&g_firstFlipOutputRestoreLogged, 0);
     g_backBufferIdentity = nullptr; g_backBufferWidth = g_backBufferHeight = 0;
+    g_createVertexShader = nullptr;
     g_createTexture2D = nullptr;
     g_createBuffer = nullptr;
     g_createPixelShader = nullptr;
@@ -3410,12 +3486,38 @@ void shutdown() {
     g_archiveOpenFile = nullptr;
     g_looseTraceLines = g_looseRedirects = g_looseBiggest = 0;
     if (workerStopped) tq::probe::releaseResources();
-    tq::probe::shutdown();
-    tq::frameoverlay::reset();
+    if (!recreating) {
+        tq::probe::shutdown();
+        tq::frameoverlay::reset();
+        g_optionsRead = false;
+    }
     InterlockedExchange(&g_archiveVtablePatched, 0);
     InterlockedExchange(&g_programState, 0);
     InterlockedExchange(&g_installed, 0);
+    InterlockedExchange(&g_firstPresentLogged, 0);
+    tq::shadow::resetShadowMapSizes();
+    g_shadowScale = 1;
+    InterlockedExchange(&g_shadowTableFullLogged, 0);
+    return true;
 }
+
+bool isAuxiliaryWindow(HWND window) {
+    DXGI_SWAP_CHAIN_DESC current = {};
+    return g_swapChain && SUCCEEDED(g_swapChain->GetDesc(&current))
+        && current.OutputWindow != window;
+}
+
+bool prepareDeviceRecreation() {
+    if (!g_installed && !g_context && !g_swapChain) return true;
+    tq::hdr::log("Device recreation: releasing visual state for device=%p swapChain=%p\r\n",
+                 g_device, g_swapChain);
+    if (!releaseVisual(true)) return false;
+    tq::hdr::resetSwapChain();
+    tq::hdr::log("Device recreation: old graphics state released\r\n");
+    return true;
+}
+
+void shutdown() { releaseVisual(false); }
 
 }  // namespace visual
 }  // namespace tq

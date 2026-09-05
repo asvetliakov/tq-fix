@@ -241,12 +241,16 @@ DXGI_SWAP_CHAIN_DESC fp16SwapChainDescription(
     return candidate;
 }
 
-bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
-                            DXGI_SWAP_CHAIN_DESC* candidate) {
-    Settings settings = readSettings();
+void resetSwapChain() {
     g_runtime.displayHdr = false;
     g_runtime.fp16Active = false;
     g_runtime.active = false;
+}
+
+bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
+                            DXGI_SWAP_CHAIN_DESC* candidate) {
+    Settings settings = readSettings();
+    resetSwapChain();
     if (!candidate || settings.toneMap == ToneOriginal)
         return false;
     DXGI_OUTPUT_DESC1 output = {};

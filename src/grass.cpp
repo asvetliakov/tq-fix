@@ -262,7 +262,7 @@ void installFromModule(HMODULE engine) {
     // what the detour reports. Nothing about a grass draw is distinguishable
     // at the device level without it that would not cost a COM call on every
     // draw in the frame.
-    if (!enabled()) return;
+    if (!enabled() || installed()) return;
     if (!engine) {
         tq::hdr::log("Grass hooks skipped: Engine.dll not loaded\r\n");
         return;
@@ -943,13 +943,7 @@ static void completeSeed(ID3D11DeviceContext* context) {
     LeaveCriticalSection(&g_grassLock);
 }
 
-void shutdown() {
-    g_originalRender[0] = nullptr;
-    g_originalRender[1] = nullptr;
-    tq::detour::detach(g_render[0]);
-    tq::detour::detach(g_render[1]);
-    g_engineBegin = nullptr;
-    g_engineEnd = nullptr;
+void releaseBuffers() {
     if (g_grassLockReady) {
         EnterCriticalSection(&g_grassLock);
         for (unsigned i = 0; i < kMaxGrassBuffers; ++i) clearStream(i);
@@ -975,6 +969,16 @@ void shutdown() {
     g_scratch = nullptr;
     g_pendingSlot = (LONG)kMaxGrassBuffers;
     InterlockedExchange(&g_twinDrawLogged, 0);
+}
+
+void shutdown() {
+    tq::detour::detach(g_render[0]);
+    tq::detour::detach(g_render[1]);
+    g_originalRender[0] = nullptr;
+    g_originalRender[1] = nullptr;
+    g_engineBegin = nullptr;
+    g_engineEnd = nullptr;
+    releaseBuffers();
     InterlockedExchange(&g_rendering, 0);
     InterlockedExchange(&g_installed, 0);
 }

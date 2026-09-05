@@ -96,6 +96,8 @@ bool enabled();
 // happens entirely at the device level and needs none of the Engine detours
 // above, so it stays available with the probe off.
 void installBuffers();
+// Drops all device-owned streams/readbacks; keeps the Engine detours installed.
+void releaseBuffers();
 
 // The rotated twin of a grass stream, or null when there is none yet. The
 // caller binds it in place of `source` and repeats the draw.

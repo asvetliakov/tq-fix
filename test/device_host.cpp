@@ -6,7 +6,11 @@
 // Leave executable padding at the audited game RVAs. The fixture verifies it
 // is padding before writing, so linker changes cannot overwrite real code.
 asm(".text\n"
+#ifdef TQ_RECREATE_HOST
+    ".space 0x87000, 0xcc\n");
+#else
     ".space 0x60000, 0xcc\n");
+#endif
 
 extern "C" {
 void* fixture_draw_entry;
@@ -45,6 +49,27 @@ extern "C" __declspec(dllexport) BOOL prepare_draw_sites() {
     // the exact patch window, and the renderer's following counter updates.
     fixture_draw_entry = module + kDrawWindowRva + 10;
     fixture_indexed_entry = module + kIndexedWindowRva + 10;
+#ifdef TQ_RECREATE_HOST
+    const BYTE present[] = {
+        0x8b,0x51,0x34,0x33,0xc0,0x38,0x81,0xdb,0x05,0,0,0x56,
+        0x8b,0x32,0x0f,0x95,0xc0,0x6a,0,0x50,0x52,0xff,0x56,0x20,
+        0x5e,0xc2,0x04,0
+    };
+    for (unsigned i = 0; i < sizeof(present); ++i)
+        if (module[0x61190 + i] != 0xcc) return FALSE;
+    for (unsigned i = 0; i < sizeof(void*); ++i)
+        if (module[0x8625c + i] != 0xcc) return FALSE;
+    DWORD old, ignored;
+    if (!VirtualProtect(module + 0x61190, sizeof(present), PAGE_EXECUTE_READWRITE, &old))
+        return FALSE;
+    memcpy(module + 0x61190, present, sizeof(present));
+    VirtualProtect(module + 0x61190, sizeof(present), old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), module + 0x61190, sizeof(present));
+    if (!VirtualProtect(module + 0x8625c, sizeof(void*), PAGE_READWRITE, &old))
+        return FALSE;
+    *(void**)(module + 0x8625c) = module + 0x61190;
+    VirtualProtect(module + 0x8625c, sizeof(void*), old, &ignored);
+#endif
     ready = true;
     return TRUE;
 }
@@ -72,6 +97,7 @@ extern "C" __declspec(dllexport) void submit_indexed(
     invoke_indexed(renderer, base, 0, start, count);
 }
 
+#ifndef TQ_RECREATE_HOST
 extern "C" __declspec(dllexport) HRESULT make_device(
     ID3D11Device** device, ID3D11DeviceContext** context) {
     if (!prepare_draw_sites()) return E_FAIL;
@@ -79,3 +105,33 @@ extern "C" __declspec(dllexport) HRESULT make_device(
     return D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
                              &wanted, 1, D3D11_SDK_VERSION, device, nullptr, context);
 }
+#else
+extern "C" __declspec(dllexport) HRESULT make_swap_chain(
+    HWND window, UINT buffers, ID3D11Device** device,
+    ID3D11DeviceContext** context, IDXGISwapChain** swapChain) {
+    DXGI_SWAP_CHAIN_DESC desc = {};
+    desc.BufferDesc.Width = 640; desc.BufferDesc.Height = 360;
+    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.BufferDesc.RefreshRate.Numerator = 60;
+    desc.BufferDesc.RefreshRate.Denominator = 1;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = buffers;
+    desc.OutputWindow = window;
+    desc.Windowed = TRUE;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    D3D_FEATURE_LEVEL wanted = D3D_FEATURE_LEVEL_11_0;
+    return D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE,
+        nullptr, 0, &wanted, 1, D3D11_SDK_VERSION, &desc, swapChain,
+        device, nullptr, context);
+}
+
+extern "C" __declspec(dllexport) HRESULT submit_present(IDXGISwapChain* chain, BOOL vsync) {
+    BYTE renderer[0x600] = {};
+    *(IDXGISwapChain**)(renderer + 0x34) = chain;
+    renderer[0x5db] = vsync ? 1 : 0;
+    typedef HRESULT (__thiscall* PresentFn)(void*, void*);
+    BYTE* module = (BYTE*)GetModuleHandleW(L"Direct3D11.dll");
+    return (*(PresentFn*)(module + 0x8625c))(renderer, nullptr);
+}
+#endif

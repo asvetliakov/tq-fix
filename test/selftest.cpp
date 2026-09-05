@@ -4057,7 +4057,7 @@ void testShadowFitStabilizer() {
 // Runs in its own fixture directory/process because production options and
 // device hooks are initialized once. Verify the actual DLL's renderer patches,
 // with every other Draw-hook consumer disabled.
-int testGrassOnlyHooks(bool enhanced) {
+int testGrassOnlyHooks(bool enhanced, bool rejectRenderer = false) {
     g_report = fopen("report.txt", "w");
     if (!g_report) return 99;
     FILE* ini = fopen("tqflicker.ini", "w");
@@ -4082,6 +4082,21 @@ int testGrassOnlyHooks(bool enhanced) {
     typedef HRESULT (*MakeDeviceFn)(ID3D11Device**, ID3D11DeviceContext**);
     MakeDeviceFn makeDevice = host
         ? (MakeDeviceFn)(void*)GetProcAddress(host, "make_device") : nullptr;
+    if (rejectRenderer) {
+        typedef BOOL (*PrepareFn)();
+        PrepareFn prepare = host ? (PrepareFn)(void*)GetProcAddress(host, "prepare_draw_sites") : nullptr;
+        bool rejected = prepare && prepare();
+        BYTE* signature = (BYTE*)host + tq::rendererdraw::sites::kDrawWindowRva;
+        DWORD protection = 0;
+        rejected = rejected && VirtualProtect(signature, 1, PAGE_EXECUTE_READWRITE, &protection);
+        if (rejected) {
+            *signature ^= 0xff; // Outside the overwritten call site: reject the audited signature.
+            DWORD ignored;
+            VirtualProtect(signature, 1, protection, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), signature, 1);
+        }
+        check(rejected, "prepare an unsupported renderer signature to exercise visual rollback");
+    }
     Sleep(250);
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -4095,9 +4110,11 @@ int testGrassOnlyHooks(bool enhanced) {
         for (unsigned slot : indices) {
             MEMORY_BASIC_INFORMATION info = {};
             expected &= VirtualQuery(slots[slot], &info, sizeof(info)) != 0
-                && (info.AllocationBase == proxy) == (enhanced && slot >= 14);
+                && (info.AllocationBase == proxy) == (enhanced && !rejectRenderer && slot >= 14);
         }
-        check(expected, enhanced
+        check(expected, rejectRenderer
+            ? "visual rollback restores the native context slots"
+            : enhanced
             ? "grass alone installs Map and Unmap while leaving native draw slots untouched"
             : "original grass leaves DrawIndexed, Draw, Map and Unmap unhooked when other consumers are off");
         using namespace tq::rendererdraw::sites;
@@ -4106,15 +4123,19 @@ int testGrassOnlyHooks(bool enhanced) {
                                   kIndexedWindowRva + kIndexedPatchOffset};
         for (DWORD rva : patchRvas) {
             BYTE* site = (BYTE*)host + rva;
-            if (enhanced) {
+            if (enhanced && !rejectRenderer) {
                 void* target = site + 7 + *(int32_t*)(site + 3);
                 MEMORY_BASIC_INFORMATION info = {};
                 rendererPatched &= site[2] == 0xe8
                     && VirtualQuery(target, &info, sizeof(info)) && info.AllocationBase == proxy;
             } else rendererPatched &= site[0] == 0x8b && site[1] == 0x08;
         }
-        check(rendererPatched, enhanced ? "grass alone installs both production renderer submission hooks"
+        check(rendererPatched, enhanced && !rejectRenderer ? "grass alone installs both production renderer submission hooks"
                                        : "original grass leaves renderer submission sites unchanged");
+        MEMORY_BASIC_INFORMATION core = {};
+        check(device && VirtualQuery((*(void***)device)[12], &core, sizeof(core))
+              && core.AllocationBase == proxy,
+              "the skinning shader hook remains installed regardless of optional visual activation");
     }
     if (context) context->Release();
     if (device) device->Release();
@@ -4128,9 +4149,204 @@ int testGrassOnlyHooks(bool enhanced) {
     return g_failures ? 1 : 0;
 }
 
+struct RecreationLifetime : IUnknown {
+    LONG refs = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (iid != __uuidof(IUnknown)) return E_NOINTERFACE;
+        *out = this; AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs); }
+    ULONG STDMETHODCALLTYPE Release() override { return InterlockedDecrement(&refs); }
+};
+
+int testDeviceRecreation() {
+    g_report = fopen("report.txt", "w");
+    if (!g_report) return 99;
+    FILE* ini = fopen("tqflicker.ini", "w");
+    if (!ini) return 99;
+    fprintf(ini, "[debug]\ntrace=1\nperformance_trace=full\n");
+    fclose(ini);
+    char path[MAX_PATH];
+    GetFullPathNameA("Direct3D11.dll", MAX_PATH, path, nullptr);
+    HMODULE host = LoadLibraryA(path);
+    typedef BOOL (*PrepareFn)();
+    typedef HRESULT (*CreateFn)(HWND, UINT, ID3D11Device**, ID3D11DeviceContext**, IDXGISwapChain**);
+    typedef HRESULT (*PresentFn)(IDXGISwapChain*, BOOL);
+    PrepareFn prepare = host ? (PrepareFn)(void*)GetProcAddress(host, "prepare_draw_sites") : nullptr;
+    CreateFn create = host ? (CreateFn)(void*)GetProcAddress(host, "make_swap_chain") : nullptr;
+    PresentFn present = host ? (PresentFn)(void*)GetProcAddress(host, "submit_present") : nullptr;
+    bool prepared = prepare && prepare();
+    GetFullPathNameA("winmm.dll", MAX_PATH, path, nullptr);
+    HMODULE proxy = prepared ? LoadLibraryA(path) : nullptr;
+    Sleep(250);
+    HWND window = CreateWindowExA(0, "STATIC", "TQ recreation selftest", WS_OVERLAPPEDWINDOW,
+        0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(prepared && proxy && create && present && window,
+          "prepare the production swap-chain creation and Present fixture");
+    long gammaSize = 0;
+    void* gammaBytes = readFile("tq-dxbc-PS-gamma.dxbc", &gammaSize);
+    const GUID lifetimeId = {0xaec28e07, 0x70f2, 0x462f, {0xb6,0x53,0x68,0x71,0x1a,0x12,0x98,0x2f}};
+    RecreationLifetime chains[4], grasses[4];
+    unsigned completed = 0;
+    for (unsigned pass = 0; prepared && proxy && create && present && window && pass < 4; ++pass) {
+        ID3D11Device* device = nullptr;
+        ID3D11DeviceContext* context = nullptr;
+        IDXGISwapChain* chain = nullptr;
+        HRESULT hr = create(window, pass % 2 ? 1 : 2, &device, &context, &chain);
+        check(SUCCEEDED(hr) && device && context && chain,
+              "create the next device through the production renderer import");
+        if (FAILED(hr) || !device || !context || !chain) break;
+        bool hooksReady = true;
+        const unsigned deviceSlots[] = {3, 5, 7, 9, 12, 15, 23};
+        const unsigned contextSlots[] = {8, 9, 14, 15, 33, 44, 45, 50};
+        for (unsigned slot : deviceSlots) {
+            MEMORY_BASIC_INFORMATION info = {};
+            hooksReady &= VirtualQuery((*(void***)device)[slot], &info, sizeof(info))
+                && info.AllocationBase == proxy;
+        }
+        for (unsigned slot : contextSlots) {
+            MEMORY_BASIC_INFORMATION info = {};
+            hooksReady &= VirtualQuery((*(void***)context)[slot], &info, sizeof(info))
+                && info.AllocationBase == proxy;
+        }
+        check(hooksReady, "all required visual device/context hooks are installed on this generation");
+        using namespace tq::rendererdraw::sites;
+        bool drawReady = true;
+        const DWORD drawRvas[] = {kDrawWindowRva + kDrawPatchOffset,
+                                 kIndexedWindowRva + kIndexedPatchOffset};
+        for (DWORD rva : drawRvas) {
+            BYTE* site = (BYTE*)host + rva;
+            void* target = site + 7 + *(int32_t*)(site + 3);
+            MEMORY_BASIC_INFORMATION info = {};
+            drawReady &= site[2] == 0xe8 && VirtualQuery(target, &info, sizeof(info))
+                && info.AllocationBase == proxy;
+        }
+        const unsigned nativeDrawSlots[] = {12, 13};
+        for (unsigned slot : nativeDrawSlots) {
+            MEMORY_BASIC_INFORMATION info = {};
+            drawReady &= VirtualQuery((*(void***)context)[slot], &info, sizeof(info))
+                && info.AllocationBase != proxy;
+        }
+        check(drawReady, "both renderer draw hooks are installed without patching native Draw slots");
+        if (pass) {
+            check(chains[pass - 1].refs == 1,
+                  "recreation releases the previous swap chain before returning the replacement");
+            check(grasses[pass - 1].refs == 1,
+                  "recreation releases the previous device's retained grass streams");
+        }
+        DXGI_SWAP_CHAIN_DESC desc = {};
+        chain->GetDesc(&desc);
+        check(desc.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
+              && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD && desc.BufferCount >= 2,
+              "repeated buffer-count changes preserve FP16 flip presentation");
+        check(SUCCEEDED(chain->SetPrivateDataInterface(lifetimeId, &chains[pass])),
+              "attach a lifetime observer to the current swap chain");
+        ID3D11PixelShader* gamma = nullptr;
+        hr = gammaBytes ? device->CreatePixelShader(gammaBytes, gammaSize, nullptr, &gamma) : E_FAIL;
+        bool replaced = false;
+        for (unsigned wait = 0; gamma && wait < 250 && !replaced; ++wait) {
+            context->PSSetShader(gamma, nullptr, 0);
+            ID3D11PixelShader* active = nullptr;
+            context->PSGetShader(&active, nullptr, nullptr);
+            ID3D11Device* owner = nullptr;
+            if (active) active->GetDevice(&owner);
+            replaced = active && active != gamma && owner == device;
+            if (owner) owner->Release();
+            if (active) active->Release();
+            if (!replaced) Sleep(20);
+        }
+        check(SUCCEEDED(hr) && replaced,
+              "the replacement gamma shader belongs to the current device");
+        context->PSSetShader(nullptr, nullptr, 0);
+        if (gamma) gamma->Release();
+
+        if (!pass) {
+            HWND auxiliary = CreateWindowExA(0, "STATIC", "Auxiliary", WS_OVERLAPPEDWINDOW,
+                0, 0, 640, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            ID3D11Device* auxDevice = nullptr;
+            ID3D11DeviceContext* auxContext = nullptr;
+            IDXGISwapChain* auxChain = nullptr;
+            HRESULT auxResult = auxiliary
+                ? create(auxiliary, 1, &auxDevice, &auxContext, &auxChain) : E_FAIL;
+            DXGI_SWAP_CHAIN_DESC auxDesc = {};
+            if (auxChain) auxChain->GetDesc(&auxDesc);
+            check(SUCCEEDED(auxResult) && auxDesc.BufferDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
+                  && chains[pass].refs == 2,
+                  "an auxiliary window keeps its original output and leaves the primary chain tracked");
+            if (auxChain) auxChain->Release();
+            if (auxContext) auxContext->Release();
+            if (auxDevice) auxDevice->Release();
+            if (auxiliary) DestroyWindow(auxiliary);
+        }
+
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 44800; bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ID3D11Buffer* grass = nullptr;
+        hr = device->CreateBuffer(&bd, nullptr, &grass);
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        bool mappedGrass = grass && SUCCEEDED(context->Map(grass, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+        if (mappedGrass) {
+            for (unsigned plane = 0; plane < 350; ++plane)
+                memcpy((BYTE*)mapped.pData + plane * sizeof(kCapturedPlane), kCapturedPlane, sizeof(kCapturedPlane));
+            context->Unmap(grass, 0);
+        }
+        check(SUCCEEDED(hr) && mappedGrass,
+              "grass creation and Map/Unmap remain usable on the replacement device");
+        if (grass) {
+            grass->SetPrivateDataInterface(lifetimeId, &grasses[pass]);
+            grass->Release();
+            check(grasses[pass].refs == 2, "the current grass stream is retained by the new tracking table");
+        }
+        ID3D11Texture2D* back = nullptr;
+        ID3D11RenderTargetView* target = nullptr;
+        if (SUCCEEDED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back)))
+            device->CreateRenderTargetView(back, nullptr, &target);
+        if (back) back->Release();
+        check(target != nullptr, "create the replacement back-buffer view");
+        if (target) {
+            const float color[4] = {0.2f, 0.3f, 0.4f, 1.0f};
+            for (unsigned frame = 0; frame < 3; ++frame) {
+                context->OMSetRenderTargets(1, &target, nullptr);
+                context->ClearRenderTargetView(target, color);
+                check(SUCCEEDED(present(chain, pass % 2 == 0)),
+                      "Present succeeds through the reinitialized FP16 callbacks");
+            }
+            target->Release();
+        }
+        check(device->GetDeviceRemovedReason() == S_OK,
+              "recreation does not use resources from the retired device");
+        // Leave the output bound, just as a renderer can do at teardown. The
+        // mod must clear it and drop its own references before the next create.
+        chain->Release(); context->Release(); device->Release();
+        ++completed;
+    }
+    check(completed == 4, "complete repeated VSync-on/off-style recreations");
+    free(gammaBytes);
+    if (proxy) FreeLibrary(proxy);
+    if (window) DestroyWindow(window);
+    long logSize = 0;
+    void* logBytes = readFile("tqflicker-debug.log", &logSize);
+    char* log = (char*)calloc((size_t)logSize + 1, 1);
+    if (log && logBytes) memcpy(log, logBytes, (size_t)logSize);
+    check(log && logBytes && !strstr(log, "FP16 swap-chain attempt failed")
+          && strstr(log, "Device recreation: old graphics state released"),
+          "recreation trace confirms cleanup with no original-output fallback");
+    free(log);
+    free(logBytes);
+    fprintf(g_report, "\nRESULT: %d failure(s)\n", g_failures);
+    fclose(g_report);
+    return g_failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && !strcmp(argv[1], "--device-recreation"))
+        return testDeviceRecreation();
     if (argc == 3 && !strcmp(argv[1], "--grass-hooks"))
-        return testGrassOnlyHooks(!strcmp(argv[2], "enhanced"));
+        return testGrassOnlyHooks(strcmp(argv[2], "original") != 0,
+                                  !strcmp(argv[2], "rollback"));
     const char* dll = argc > 1 ? argv[1] : "winmm.dll";
     const char* report = argc > 2 ? argv[2] : "C:\\tqflicker-selftest.txt";
     g_report = fopen(report, "w");

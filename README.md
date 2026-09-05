@@ -346,6 +346,10 @@ behavior. No extra INI setting is needed. Unsupported systems keep the
 non-tearing path, and a rejected tearing-capable creation retries FP16 without
 that flag before falling back to the original output path.
 
+When a graphics-setting change recreates the device, the mod releases the old
+swap chain and rebuilds its visual resources on the replacement device, so
+changes such as toggling VSync can retain FP16 output and the visual fixes.
+
 `paper_white_nits` defaults to 203;
 `peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
 HDR is available but the report is unusable. A numeric `peak_nits` overrides
