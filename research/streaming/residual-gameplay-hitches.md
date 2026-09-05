@@ -406,3 +406,88 @@ its INI has SHA-256
 `981551347aeddea8286847f3ad3c86d7c5a5d4c39d4f3df4e6a78bf32967dde0`.
 Copies and a manifest are in `cache/runs/idle-requeue-prepared`. INI values
 match the preceding batched-text run. Gameplay validation is pending.
+
+## Idle-requeue validation and cold-root countdown recovery
+
+The result is archived as `cache/runs/idle-requeue-first`, including the DLL,
+INI, manifest, parsed `lifecycle.json` and `analysis.json`. CSV SHA-256:
+`d3944b5e6b5aff07bd85684c4c76d34643976794a2ef493a2350769a7e63ed52`;
+text SHA-256: `926013f5c0cd2eaf5dd77e144c05d0f3943adf037f4bf31a2fc9ed3c5ee9dc58`.
+The installed DLL/INI match the candidate above. The log confirms idle requeue
+cooldown zero, all seven lifecycle sites, 28 refresh accelerations and zero
+budget deferrals. There are no history replacements, demand overwrites or
+report truncations. All 3,724 CSV rows are consecutive, with 3,710 GPU results,
+six timeouts and zero dropped rows.
+
+Initial world frame 1984, its warmup and exit frame 3569 are excluded. Gameplay
+2104–3568 spans 29.049 seconds: median 19.461 ms, p95 23.486 ms, p99 30.878 ms.
+The prior batched-text run was 19.601 / 23.595 / 32.483 ms across 28.967 seconds.
+Five frames exceed 50 ms versus four previously; four are update-dominated
+50–68 ms frames with at most 0.255 ms of main-thread resource loading.
+Maximum gameplay Peek time is only 2.688 ms. This does not establish a general
+performance guarantee or a fix for the separate update spikes.
+
+The marked one-to-two-owner transition at 3339 improves from **255.408 to
+176.771 ms**, and main-thread resource loading from **172.898 to 84.651 ms**.
+Main-thread loading across ±120 frames drops from 202.315 to 118.058 ms;
+across [-600,+120] it drops from 218.791 to 133.365 ms. The wider window supports
+less synchronous demand rather than merely moving the same work slightly
+earlier. Worker queue completion for resources absent from the demand report
+cannot be individually inferred from their absence alone.
+
+All 34 marked resource demands now have **no future cooldown and no pending
+queue node**. Of those, 31 / 83.164 ms were previously worker-loaded and evicted;
+three / 1.487 ms have no observed earlier queue. Update-time particle demand
+occurs later in this run (18.951 ms at 3349 and 9.028 ms at 3352), so not all of
+the transition improvement can be credited to the cooldown change. Native draw
+submission remains 61.198 ms. Present takes 0.084 ms, mod presentation 0.106 ms,
+and the upload step 2.652 ms.
+
+The remaining Actor countdown delay is now explicit:
+
+* `ouranosstatue_01.msh` last preloaded at 2389, then was evicted at 3193 with
+  deadline Engine frame 3196. At the latest Actor visit, frame 3337, its countdown
+  was 29 and the supplied step 28: the native Entity gate returned false.
+  Drawing demanded it at 3339. Root plus two textures cost 35.901 ms.
+* `candlesmall01.msh` was evicted at 3198. Its latest Actor visit at 3334 had
+  countdown 58 / step 28. Its `necropolistomb01normal.tex` dependency costs
+  another 24.853 ms at the transition.
+* Other cold roots show the same positive-countdown condition despite recent
+  Actor visits. Removing the queue cooldown cannot help until a native queue
+  request actually occurs; the original acceleration path accepted only state 2.
+
+The next candidate extends that same Actor-to-Entity call-site decision, with
+no new hooks. A stale root in state 0 may share the existing **eight-per-frame
+total** acceleration budget when it has an expired nonzero unload deadline and
+no native queue node. The same 400-frame touched-age guard remains, including
+for cold roots, to avoid immediately retrying a recently pressure-evicted mesh.
+New resources with the constructor's zero deadline, state-1 loading resources,
+queued resources, active cooldowns and non-main-thread calls retain stock timing.
+Ordinary already-due Actor visits still bypass this acceleration budget.
+
+The implementation continues into the original Entity and Actor bodies, which
+perform native mesh/dependency queueing. It does not load a mesh synchronously
+or write resource state/queue/deadline fields itself. Native queue insertion
+deduplicates shared roots. This may bring bounded root requests and their native
+dependency work earlier; the root count is not a byte/time budget. Resources
+outside active native Actor preload visits are not swept or pinned.
+
+Rechecked the existing Entity gate and native enqueue/unload disassembly, then
+freshly disassembled the Resource constructor. Additional runtime signatures
+verify constructor state/deadline zeroing at `212ec5`, unload deadline storage
+and `ret 4` at `212cbb`, and the native unsigned deadline comparison at `214627`.
+State and queue-node accessors were already verified by the shared install gate.
+The native Actor/Entity executable fixture now exercises cold admission and
+queued/new/future-deadline exclusions, alongside the trace-entry coexistence
+case. Pure decision tests cover the shared budget, main-thread/include gates,
+loading resources, recent pressure eviction and native deadline semantics.
+F12 adds `recovered` as a subset of the total `accelerated` count. Gameplay
+validation of this extension is pending.
+
+All six off-game suites passed (`build/evicted-root-selftest.log`), as did the
+mesh and general streaming-site verifiers. The installed release candidate
+has SHA-256 `33e170a4901f211bc5d23554a04d21ead0db811253a2bec32b518e55c025cb76`;
+its INI has SHA-256
+`5a1657f49a79e30eba487cf053d9ceb80934da08de018b7dacde45c27d2caf64`.
+The preparation archive is `cache/runs/evicted-root-prepared`. INI values remain
+identical to the preceding run, and the prior DLL/configuration/logs are preserved.

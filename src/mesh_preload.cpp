@@ -1,14 +1,14 @@
 #include "mesh_preload.h"
 #include "engine_internal.h"
 
-// Refresh renewed, resident preload interest before the native 800-frame idle
-// eviction window. Permit renewed queue requests after automatic age eviction;
-// keep native loading, eviction ages and memory budgets intact.
+// Refresh stale resident interest and recover stale evicted roots during native
+// preload visits. Permit renewed requests after automatic age eviction; keep
+// native loading, eviction ages and memory budgets intact.
 namespace tq { namespace meshpreload { namespace {
 using namespace tq::engine::detail;
 constexpr unsigned kRefreshAge = 400, kRefreshBudget = 8;
 bool g_requested = true, g_active;
-unsigned g_budgetFrame, g_used, g_refreshed, g_deferred;
+unsigned g_budgetFrame, g_used, g_refreshed, g_recovered, g_deferred;
 const BYTE* g_engine;
 tq::detour::CallPatch g_patch;
 BYTE* g_idleCooldown[2];
@@ -31,6 +31,15 @@ const BYTE kEntityTail[] = {
 };
 const BYTE kTouched[] = {0x8b,0x41,0x3c,0xc3};
 const BYTE kFrame[] = {0x8b,0x81,0xf0,0x03,0x00,0x00,0xc3};
+const BYTE kInitialDeadline[] = {
+    0xc7,0x46,0x30,0x00,0x00,0x00,0x00,0xc7,0x46,0x34,0x00,0x00,0x00,0x00
+};
+const BYTE kUnloadDeadline[] = {
+    0x8b,0x44,0x24,0x08,0x89,0x46,0x34,0x5e,0xc2,0x04,0x00
+};
+const BYTE kQueueDeadline[] = {
+    0x8b,0xb8,0xf0,0x03,0x00,0x00,0x3b,0x7d,0x34,0x72,0x52
+};
 // Engine::EvictOldResources: texture (+24) and mesh (+2c) managers only.
 // Preserve the 800-frame touched age, 1600-frame used age, size filter and
 // native callee. Change only push 200 to push 0 for the requeue cooldown.
@@ -69,11 +78,21 @@ unsigned word(const void* p, unsigned offset) {
 }
 // Pure decision apart from the per-frame admission counter. No resource list,
 // allocation, lock, timer query, or file I/O in the shipping path.
-bool admit(unsigned now, unsigned touched, unsigned state, int countdown,
-           int step, bool include, bool main, unsigned& frame, unsigned& used) {
-    if (!main || !include || step <= 0 || countdown <= step || state != 2) return false;
+bool eligible(unsigned now, unsigned touched, unsigned state, unsigned until, bool queued) {
     const unsigned age = now - touched;
     if (age < kRefreshAge || age >= 0x80000000u) return false;
+    // A zero deadline is the constructor default, not evidence of eviction.
+    // Match the native unsigned queue comparison; leave future cooldowns alone.
+    // Keep the age guard for cold roots too: recently pressure-evicted resources
+    // must not be immediately reloaded by this acceleration path.
+    if (state == 0) return until != 0 && until <= now && !queued;
+    return state == 2;
+}
+bool admit(unsigned now, unsigned touched, unsigned state, int countdown,
+           int step, bool include, bool main, unsigned& frame, unsigned& used,
+           unsigned until = 0, bool queued = false) {
+    if (!main || !include || step <= 0 || countdown <= step
+        || !eligible(now, touched, state, until, queued)) return false;
     if (frame != now) { frame = now; used = 0; }
     if (used >= kRefreshBudget) return false;
     ++used;
@@ -92,12 +111,14 @@ bool __fastcall entity(void* self, void* edx, int step, int include) {
                 const unsigned now = word(engine, 0x3f0);
                 const unsigned touched = word(root, 0x3c);
                 const unsigned state = word(root, 0x30);
+                const unsigned until = state == 0 ? word(root, 0x34) : 0;
+                const bool queued = state == 0 && word(root, 0x60) != 0;
                 if (admit(now, touched, state, countdown, step, true, true,
-                          g_budgetFrame, g_used)) {
+                          g_budgetFrame, g_used, until, queued)) {
                     adjusted = countdown; // Original Entity code reaches its normal due branch.
-                    if (g_tracing) ++g_refreshed;
-                } else if (g_tracing && state == 2 && now - touched >= kRefreshAge
-                           && now - touched < 0x80000000u && g_used >= kRefreshBudget) {
+                    if (g_tracing) { ++g_refreshed; g_recovered += state == 0; }
+                } else if (g_tracing && eligible(now, touched, state, until, queued)
+                           && g_used >= kRefreshBudget) {
                     ++g_deferred;
                 }
             }
@@ -126,7 +147,10 @@ bool install(HMODULE engine) {
         && tq::detour::matches(engine, target, signature(kEntityHead, sizeof(kEntityHead)))
         && tq::detour::matches(engine, base + 0x1480c3, signature(kEntityTail, sizeof(kEntityTail)))
         && tq::detour::matches(engine, touched, signature(kTouched, sizeof(kTouched)))
-        && tq::detour::matches(engine, frame, signature(kFrame, sizeof(kFrame)));
+        && tq::detour::matches(engine, frame, signature(kFrame, sizeof(kFrame)))
+        && tq::detour::matches(engine, base + 0x212ec5, signature(kInitialDeadline, sizeof(kInitialDeadline)))
+        && tq::detour::matches(engine, base + 0x212cbb, signature(kUnloadDeadline, sizeof(kUnloadDeadline)))
+        && tq::detour::matches(engine, base + 0x214627, signature(kQueueDeadline, sizeof(kQueueDeadline)));
     if (!verified) { tq::hdr::log("Mesh preload refresh unavailable: native layout mismatch\r\n"); return false; }
     g_entity = (EntityFn)target;
     g_engine = base;
@@ -134,8 +158,8 @@ bool install(HMODULE engine) {
         signature(kActorWindow, sizeof(kActorWindow)), 4, target, (void*)&entity);
     g_active = actor && patchIdleCooldowns(base);
     if (!g_active) { tq::detour::restoreCall(g_patch); restoreIdleCooldowns(); }
-    tq::hdr::log("Mesh preload refresh %s: resident age=%u frames, accelerated visits <=%u/frame; idle requeue cooldown=%u\r\n",
-                 g_active ? "installed" : "rejected", kRefreshAge, kRefreshBudget, g_active ? 0u : 200u);
+    tq::hdr::log("Mesh preload refresh %s: resident age=%u frames, accelerated visits <=%u/frame; idle requeue cooldown=%u; evicted-root recovery=%u\r\n",
+                 g_active ? "installed" : "rejected", kRefreshAge, kRefreshBudget, g_active ? 0u : 200u, g_active ? 1u : 0u);
     return g_active;
 }
 void shutdown() {
@@ -143,11 +167,11 @@ void shutdown() {
     tq::detour::restoreCall(g_patch);
     restoreIdleCooldowns();
     g_entity = nullptr; g_engine = nullptr;
-    g_budgetFrame = g_used = g_refreshed = g_deferred = 0;
+    g_budgetFrame = g_used = g_refreshed = g_recovered = g_deferred = 0;
 }
 void report() {
-    if (g_active) tq::hdr::log("Mesh preload refresh F12: accelerated=%u budgetDeferred=%u lastEngineFrame=%u used=%u/%u\r\n",
-                              g_refreshed, g_deferred, g_budgetFrame, g_used, kRefreshBudget);
+    if (g_active) tq::hdr::log("Mesh preload refresh F12: accelerated=%u recovered=%u budgetDeferred=%u lastEngineFrame=%u used=%u/%u\r\n",
+                              g_refreshed, g_recovered, g_deferred, g_budgetFrame, g_used, kRefreshBudget);
 }
 #ifdef TQ_SELFTEST
 namespace {
@@ -262,6 +286,24 @@ bool testNative() {
             actor[0xe8 / 4] = 500;
             ok &= !g_entity(actor, nullptr, 30, 1) && actor[0xe8 / 4] == 470;
             ok &= !traced || g_testObserved == 10;
+            // An evicted, unqueued root reaches native Mesh::PreLoad before
+            // the ordinary countdown expires, using the same Actor/Entity ABI.
+            engine[0x3f0 / 4] = 1001;
+            actor[0xe8 / 4] = 500; resource[0x30 / 4] = 0;
+            resource[0x3c / 4] = 0;
+            resource[0x34 / 4] = 999; resource[0x60 / 4] = 0; resource[0x70 / 4] = 0;
+            ok &= call(actor, nullptr, 30, 1) && resource[0x70 / 4] == 1;
+            ok &= actor[0xe8 / 4] == 500 && g_used == 1;
+            // Native queue presence suppresses duplicate acceleration. This
+            // fixture's stand-in mesh callee does not implement the real queue.
+            resource[0x60 / 4] = 1; actor[0xe8 / 4] = 500;
+            ok &= !call(actor, nullptr, 30, 1) && resource[0x70 / 4] == 1;
+            ok &= actor[0xe8 / 4] == 470 && g_used == 1;
+            resource[0x60 / 4] = 0; resource[0x34 / 4] = 0; actor[0xe8 / 4] = 500;
+            ok &= !call(actor, nullptr, 30, 1) && resource[0x70 / 4] == 1;
+            resource[0x34 / 4] = 1002; actor[0xe8 / 4] = 500;
+            ok &= !call(actor, nullptr, 30, 1) && resource[0x70 / 4] == 1;
+            engine[0x3f0 / 4] = 1000;
         }
         g_active = false;
         tq::detour::restoreCall(g_patch);
@@ -294,6 +336,21 @@ bool test() {
     ok &= !admit(1001, 1001, 2, 500, 30, true, true, frame, used);
     ok &= !admit(1001, 1010, 2, 500, 30, true, true, frame, used);
     ok &= admit(200, 0xffffff00u, 2, 500, 30, true, true, frame, used);
+    frame = used = 0;
+    ok &= !admit(1000, 0, 0, 500, 30, true, true, frame, used, 1001);
+    ok &= !admit(1000, 0, 0, 500, 30, true, true, frame, used, 999, true);
+    ok &= !admit(1000, 0, 1, 500, 30, true, true, frame, used, 999);
+    ok &= !admit(1000, 0, 0, 500, 30, false, true, frame, used, 999);
+    ok &= !admit(1000, 0, 0, 500, 30, true, false, frame, used, 999);
+    ok &= !admit(1, 0, 0, 500, 30, true, true, frame, used, 0xffffffffu);
+    ok &= !admit(1000, 999, 0, 500, 30, true, true, frame, used, 1000);
+    ok &= used == 0;
+    // Cold recovery and resident refresh share eight total slots, not eight each.
+    for (unsigned n = 0; n < kRefreshBudget; ++n)
+        ok &= admit(1000, 0, n & 1 ? 2 : 0, 500, 30, true, true, frame, used, 1000);
+    ok &= !admit(1000, 0, 0, 500, 30, true, true, frame, used, 999);
+    ok &= !admit(1000, 0, 2, 500, 30, true, true, frame, used);
+    ok &= admit(1001, 600, 0, 500, 30, true, true, frame, used, 1000) && used == 1;
     return ok && testNative();
 }
 #endif

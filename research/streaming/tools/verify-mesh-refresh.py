@@ -10,7 +10,7 @@ source=(root/'src/mesh_preload.cpp').read_text()
 assert 'bool g_requested = true' in source
 assert 'g_requested = !path || !path[0]' in source
 assert 'L"mesh_preload_refresh", 1, path' in source
-for name,rva in [('kActorWindow',0x114f07),('kEntityHead',0x148050),('kEntityTail',0x1480c3),('kTouched',0x2130c0),('kFrame',0x146cd0),('kTextureIdle',0x1418cb),('kMeshIdle',0x1418e4)]:
+for name,rva in [('kActorWindow',0x114f07),('kEntityHead',0x148050),('kEntityTail',0x1480c3),('kTouched',0x2130c0),('kFrame',0x146cd0),('kTextureIdle',0x1418cb),('kMeshIdle',0x1418e4),('kInitialDeadline',0x212ec5),('kUnloadDeadline',0x212cbb),('kQueueDeadline',0x214627)]:
  body=re.search(r'const BYTE '+name+r'\[\] = \{(.*?)\};',source,re.S)[1]
  data=bytes(int(x,16) for x in re.findall(r'0x([0-9a-f]+)',body))
  assert data==pe.read(rva,len(data)),name

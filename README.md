@@ -272,9 +272,11 @@ where those Resources first exist.
 
 `mesh_preload_refresh=1` reduces reloads of scenery that was preloaded successfully
 but became stale before the player reached it. At an existing main-thread Actor
-preload visit requesting material dependencies, a resident root untouched for
-at least 400 Engine frames can advance the normal Entity preload countdown.
-The native Actor then refreshes the mesh and its dependencies. At most eight
+preload visit requesting material dependencies, a root untouched for at least
+400 Engine frames can advance the normal Entity preload countdown if it is
+resident, or was evicted and is now unqueued with an expired nonzero unload
+deadline. Newly created, loading, queued and recently touched cold roots keep
+stock timing. The native Actor then preloads the mesh and its dependencies. At most eight
 visits per Engine frame are accelerated; ordinary visits already due still run.
 This works with tracing off and defaults to `1`; `0` restores stock timing.
 It adds no Present work, lock, timer query, allocation, or resource sweep.
