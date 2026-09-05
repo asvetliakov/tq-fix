@@ -37,6 +37,11 @@ extension allows stale, unqueued roots with expired unload deadlines to use
 the same eight-visit budget. Its first validation reached 55 ms, with no
 evicted-resource demands across the transition window and steady normal frame
 times. First-use particle loading and a separate 204 ms update spike remain.
+A repeat with a reported 20-second stop kept the transition near 59 ms and
+similar aggregate loading costs. A brief 65 ms native draw-submission spike
+occurred about 2.5 seconds earlier; concurrent worker texture creation makes
+driver contention plausible, but its cause is unconfirmed. See the
+[stop-and-resume validation](residual-gameplay-hitches.md#twenty-second-stop-and-resume-validation).
 
 Read [findings §112](findings.md#112-alternate-route-residency-loss-and-bounded-mesh-preload-refresh),
 [gameplay loading hitches](gameplay-loading-hitches.md), and the

@@ -565,3 +565,63 @@ installed. Further work on particle initialization and the major update children
 should follow the complete diagnostic plan above, rather than blindly expanding
 the resource admission budget. No runtime changes were made while reviewing
 this successful capture.
+
+## Twenty-second stop and resume validation
+
+The user repeated the route with a reported 20-second stop: no felt hitch at
+the usual transition, but possible slight slowness before it. Archive:
+`cache/runs/evicted-root-stop20`, including DLL, INI, manifest and
+`comparison.json`. DLL/INI hashes match `evicted-root-first`. CSV SHA-256:
+`80a3617f8e9d5cf95133922b1412aa52bf4aceac65fe5dc993f4a58d98f088ee`;
+text SHA-256: `f0402088e68a7eb3ad4918cabe19fc340dfcec569d06d73d1726ab585a8dc223`.
+The log confirms combined recovery and all seven lifecycle sites installed.
+There are 4,808 consecutive CPU rows, 4,795 GPU results, five GPU timeouts and
+zero dropped rows. There is **no F12 marker**, so no per-resource lifecycle
+dump or recovery/deferral counter snapshot; do not infer those counts or
+resource identities from their absence.
+
+Exclude first world frame 1991 and its 120-frame warmup, plus exit frame 4671
+(100 ms requested loop sleep, followed by the renderer owner count going to
+zero). Gameplay 2111–4670 spans 51.048 seconds. Median/p95/p99 are
+19.672/23.426/29.035 ms, with seven frames above 50 ms and a maximum of
+66.466 ms. The previous 204 ms update spike does not recur. These session
+percentiles include the stop and are not a matched moving-route benchmark.
+Frames 3291–4190 have an unchanged crossed-grass count of 159 and span
+17.762 seconds, consistent with the interior of the reported stop. Their
+median is 19.660 ms and maximum 25.708 ms; counters do not establish exact
+movement start/stop times.
+
+The one-to-two renderer-owner transition at 4399 is **58.748 ms**, versus
+55.463 ms in the preceding continuous run. Its six main-thread loads total
+23.929 ms, versus seven/22.752 ms. Update accounts for 26.109 ms, including
+22.243 ms of loading; render is 29.103 ms, including 1.686 ms of loading.
+No outside-directional mesh load is recorded at the transition. Texture and
+shader costs resemble the prior particle transition, but without the F12
+dump their filenames and prior eviction histories are unconfirmed. Across
+±120 frames, main-thread loading totals 36.259 ms versus 35.030 ms previously.
+Native Present at the transition is 0.031 ms. This supports continued benefit
+after the stop; the previous large synchronous scenery reload burst has not
+returned in the aggregate timings.
+
+A plausible match for the earlier felt slowness is frame **4273, 64.624 ms**,
+about 2.516 seconds before the transition. Render takes 55.210 ms; native draw
+submission takes 41.580 ms, including 41.193 ms in the first geometry scene.
+There are **zero main-thread resource loads**. Fourteen off-main texture
+creation calls accumulate 28.427 ms in the same reporting interval, and
+geometry-scene GPU elapsed time is 32.662 ms. The following frame takes
+37.617 ms with 16.136 ms of native submission and 23.409 ms of off-main texture
+creation. This is consistent with concurrent streaming/driver contention,
+but aggregate worker counters and GPU elapsed intervals do not prove overlap
+at the blocking draw, shader compilation, or a refresh-induced regression.
+Crossed-grass CPU work at 4273 is 0.238 ms, Present 0.036 ms and Peek 0.708 ms.
+Frames 4275–4398 return to a 19.243 ms median and 26.985 ms maximum: this is
+a short spike, not evidence of sustained frame-rate reduction.
+
+Earlier frames 2661, 2666, 2916 and 3051 take 60–66 ms, mostly in Engine
+update (44.591–48.561 ms), with negligible measured main-thread waits and
+little or no synchronous loading. Frame 2804 takes 54.176 ms, including
+22.440 ms in Peek. These remain unresolved possibilities for felt slowness;
+there is no marker tying the user's observation to one event. Keep the
+current build. No timer/budget adjustment or runtime instrumentation change
+is justified by this capture alone. The broader diagnostic plan above remains
+applicable to native update, driver submission and observer overhead.
