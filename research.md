@@ -120,7 +120,7 @@ Exact sites for all four paths are in the
 | --- | --- |
 | `shadow_defer_cold_resources=1` | Queue unloaded exact mesh-instance shadow dependencies; omit cold root casters and cold alpha-base passes until resident. Skip material inputs absent from the active shadow shader and the verified redundant base-texture binding. |
 | `shadow_defer_cold_actor_pose=1` | Move the root decision before directional Actor pose work. Skip only when queuing/loading is confirmed; an unconfirmed enqueue falls back to stock. Implies the complete cold-resource patch set. |
-| `mesh_preload_refresh=1` | At an existing dependency-aware Actor preload visit, advance the countdown for a resident root untouched for at least 400 Engine frames. Accelerate at most eight visits per Engine frame; use native dependency preloading and leave eviction/cooldown rules intact. |
+| `mesh_preload_refresh=1` | At an existing dependency-aware Actor preload visit, advance the countdown for a resident root untouched for at least 400 Engine frames, at most eight times per frame. Remove the requeue cooldown only from automatic mesh/texture age eviction; preserve native eviction ages, budgets and loading. The cooldown follow-up awaits gameplay validation. |
 | `terrain_preload_layers=1` | Call the game's `TerrainType::PreLoad(true)` immediately after runtime layer `LoadTextures`, using its normal background loaders. |
 | `secondary_pass_admission_budget=8` | Share eight newly admitted renderable identities per presented frame across exact reflection and directional-shadow contexts. Pending objects keep Resource/material preparation but suppress their secondary `Draw`/`DrawIndexed` calls until admitted. |
 | `streaming=optimized` | For eligible mapped loose-file textures, show a low-mip view while uploading withheld high-mip bytes in frame-paced chunks. This budgets texture transfer, not object admission or archive reads. |
@@ -271,7 +271,11 @@ them a few frames earlier. One instrumented route repetition per configuration
 does not prove zero cost or a general speedup. The shipping refresh path has no
 Present work or lock; native dependency traversal can run earlier, and current
 preload interest can retain resources longer within unchanged budget rules.
-`mesh_preload_refresh=0` restores the original Actor preload timing.
+`mesh_preload_refresh=0` restores the original Actor preload timing and automatic
+mesh/texture eviction cooldowns. A later 255 ms repeat identified 63 previously
+worker-loaded resources still under cooldown after eviction, costing 144 ms to
+reload on demand. The follow-up changes only the two native idle-eviction
+cooldown arguments; see the [latest lifecycle evidence and candidate](research/streaming/residual-gameplay-hitches.md#batched-text-repeat-and-idle-requeue-candidate).
 
 The remaining transition contains first-use particle texture loading, five
 smaller scenery reloads and native draw time. Other approximately 100 ms spikes

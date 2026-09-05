@@ -312,3 +312,97 @@ no new native hooks. Preserve the text-off run first; record the next INI under
 `cache/runs/text-logger-batched-prepared`. Use the resource histories to distinguish
 missing preload, evicted dependencies and cooldown rejection before extending
 mesh refresh. The separate pump/update attribution gaps remain unresolved.
+
+## Batched-text repeat and idle-requeue candidate
+
+The next run is archived as `cache/runs/text-logger-batched-first`, with
+`lifecycle.json`, `analysis.json`, DLL/INI copies and a hash manifest. It uses
+the same `bbe68360...` release DLL, with text output re-enabled. CSV SHA-256:
+`154ffca2bd30b49819e46956f6ec05dd94000c5a7d8aaf8244c4afebd3a5541b`;
+text SHA-256: `7f43253aa8f604913cb46e584c83aa517f945a3f9008ff802c3f151f745a882c`.
+There are 3,935 consecutive rows, 3,916 GPU results, 11 timeouts and zero dropped
+rows. All seven lifecycle sites installed, with no history replacement, demand
+overwrite or report truncation. Mesh refresh reports 27 accelerations and zero
+budget deferrals. The user marked the transition and was unsure whether the
+earlier hitch occurred. Its former 163 ms Peek signature is absent: maximum
+gameplay Peek time is 7.167 ms. That single absence is not proof of a pump fix.
+
+Exclude initial world frame 2231, its warmup, and exit frame 3804. Frames
+2351–3803 span 28.967 seconds: median 19.601 ms, p95 23.595 ms, p99 32.483 ms,
+four frames over 50 ms. There are still 41/50 ms update spikes, and frame 2906
+takes 90.192 ms with 44.977 ms in the upload step. These are distinct from the
+marked transition and remain unresolved.
+
+F12 at 3620 follows frame 3597 by 550 ms. The transition is **255.408 ms**:
+32.064 ms update, 219.848 ms render, and the remainder outside those scopes.
+Its 70 main-thread resource loads take 172.898 ms; native draw submission takes
+55.824 ms. These are measured components, not all new mod work. Present is
+0.045 ms, mod presentation 0.034 ms, and the upload step 2.551 ms.
+
+The lifecycle snapshots establish a more specific failure:
+
+* **63 loads / 143.524 ms** were previously worker-loaded, then evicted, and
+  all 63 still have future cooldown deadlines at visible demand.
+* The other seven / 29.374 ms have no prior observed queue. This includes
+  `smoke_8x8__01.tex` at 24.688 ms; particle realization remains separate.
+* `ouranosstatue_01.msh` queued at 2607, loaded on the worker at 2611, and was
+  evicted at 3413 with deadline Engine frame 3616. A renewed native queue
+  request at frame 3557 / Engine 3560 was rejected; drawing demanded it at
+  3597 while that deadline was still future. Its two textures then cost
+  28.590 ms. Several other roots show the same request-before-demand gap.
+* A root need not be cold for its material overrides to fail: the resident
+  `RuinDamagePillar03.msh` had native preload visits, while its `MCRuinSource01`
+  textures were evicted and their renewed requests rejected by cooldown.
+
+The root-refresh budget was not exhausted. Refresh can only prevent eviction
+during qualifying visits while the root remains resident; it cannot recover
+an already-evicted root or override through the native cooldown gate. The
+recorder does not retain every intermediate Actor visit, so it cannot establish
+the exact spatial/thread/countdown reason for every missed resident refresh.
+The renewed-but-rejected queue requests and future deadlines are directly observed.
+
+Re-read the existing Enqueue/Load/Evict disassembly and freshly disassembled
+`Engine::EvictOldResources` at `1418a0`. The texture manager `+24` call at
+`1418df` and mesh manager `+2c` call at `1418f8` pass `(800,1600,0,200)` to
+`BaseResourceManager::EvictOldResources` (`11f830`). The last argument produces
+the future queue deadline. Native `EnqueueResource` compares that deadline at
+`21462d` and branches away at `214630`, inside its existing queue lock. The
+worker's completed load resets both used/touched ages (`213b43` onward), so a
+reload does not inherit its previous idle age. `MaintainBudget` (`11f750`) has
+its own unmodified eviction call with a zero cooldown already.
+
+The candidate extends `mesh_preload_refresh=1` with **two one-byte patches**:
+the low byte of `push 200` becomes zero at `1418cf` and `1418e8`. Whole 25-byte
+windows verify the manager, all four arguments and native call destination;
+both exported function RVAs are also checked. A mismatch rejects the combined
+feature and restores its Actor call patch. Shutdown restores both immediates.
+The recorder remains observational and no new native hook is installed.
+
+Only future automatic mesh/texture age evictions get the shorter deadline.
+Other unload callers, pressure handling, eviction ages, size filters, dependency
+queueing and worker loading remain native. No resource is pinned and no queue
+entry is fabricated. The change allows existing native preload requests to run
+earlier after eviction; it adds no per-frame code or locks. Earlier background
+reload work can increase when preload interest returns soon after eviction,
+so it is not a claim of zero total performance or memory effect. Gameplay must
+validate whether requests complete before visible demand without shifting the
+hitch to another frame. The Actor acceleration bound remains eight root visits,
+not a global loading budget. Setting the option to zero restores both changes.
+
+Verification now includes the full 160-byte native Engine eviction caller as an
+executable fixture, with only its manager callee replaced by an argument recorder.
+Stock, patched and restored calls must preserve 800/1600 ages, size zero, the
+other two managers and x86 stack cleanup. Every byte in both windows is mutated
+in rejection tests. The verifier checks the fixture and signatures against the
+pinned installed Engine. The next run retains the complete batched text/CSV/
+lifecycle/F12 setup; inspect accepted worker queues, cooldowns, whole-frame costs
+and the surrounding window before claiming success.
+
+All six off-game suites passed (`build/idle-requeue-selftest.log`), together
+with the updated mesh verifier and the general streaming-site verifier. The
+installed release candidate has SHA-256
+`cece1ab64be78444cda7f8bf03f01f5faa82262f0364f173bb272b6349e7739f`;
+its INI has SHA-256
+`981551347aeddea8286847f3ad3c86d7c5a5d4c39d4f3df4e6a78bf32967dde0`.
+Copies and a manifest are in `cache/runs/idle-requeue-prepared`. INI values
+match the preceding batched-text run. Gameplay validation is pending.

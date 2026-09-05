@@ -279,8 +279,12 @@ visits per Engine frame are accelerated; ordinary visits already due still run.
 This works with tracing off and defaults to `1`; `0` restores stock timing.
 It adds no Present work, lock, timer query, allocation, or resource sweep.
 Native dependency work can occur earlier and resources can remain resident
-longer within the existing eviction rules. Already-cold roots, active cooldowns,
-and memory-pressure eviction retain stock behavior. Continued native preload
+longer within the existing eviction rules. The fix also removes the 200-frame
+requeue cooldown from the game's two automatic mesh/texture age-eviction calls:
+a renewed native preload request can queue an evicted asset immediately.
+The 800-frame touched-age and 1,600-frame used-age thresholds, memory-pressure
+eviction, and other unload callers retain stock behavior. These two one-byte
+patches add no per-frame callback. Continued native preload
 interest can keep a mesh resident; once those visits stop, this fix stops
 refreshing it and normal aging applies. It does not pin resources or retain
 every previously visited area's meshes. The bound counts root

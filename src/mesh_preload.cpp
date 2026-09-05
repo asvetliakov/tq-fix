@@ -2,7 +2,8 @@
 #include "engine_internal.h"
 
 // Refresh renewed, resident preload interest before the native 800-frame idle
-// eviction window. Keep native loading, memory budgets and cooldowns intact.
+// eviction window. Permit renewed queue requests after automatic age eviction;
+// keep native loading, eviction ages and memory budgets intact.
 namespace tq { namespace meshpreload { namespace {
 using namespace tq::engine::detail;
 constexpr unsigned kRefreshAge = 400, kRefreshBudget = 8;
@@ -10,6 +11,7 @@ bool g_requested = true, g_active;
 unsigned g_budgetFrame, g_used, g_refreshed, g_deferred;
 const BYTE* g_engine;
 tq::detour::CallPatch g_patch;
+BYTE* g_idleCooldown[2];
 typedef bool (__fastcall* EntityFn)(void*, void*, int, int);
 EntityFn g_entity;
 
@@ -29,6 +31,39 @@ const BYTE kEntityTail[] = {
 };
 const BYTE kTouched[] = {0x8b,0x41,0x3c,0xc3};
 const BYTE kFrame[] = {0x8b,0x81,0xf0,0x03,0x00,0x00,0xc3};
+// Engine::EvictOldResources: texture (+24) and mesh (+2c) managers only.
+// Preserve the 800-frame touched age, 1600-frame used age, size filter and
+// native callee. Change only push 200 to push 0 for the requeue cooldown.
+const BYTE kTextureIdle[] = {
+    0x8b,0x4e,0x24,0x68,0xc8,0x00,0x00,0x00,0x6a,0x00,0x68,0x40,
+    0x06,0x00,0x00,0x68,0x20,0x03,0x00,0x00,0xe8,0x4c,0xdf,0xfd,0xff
+};
+const BYTE kMeshIdle[] = {
+    0x8b,0x4e,0x2c,0x68,0xc8,0x00,0x00,0x00,0x6a,0x00,0x68,0x40,
+    0x06,0x00,0x00,0x68,0x20,0x03,0x00,0x00,0xe8,0x33,0xdf,0xfd,0xff
+};
+void restoreIdleCooldowns() {
+    const BYTE stock = 200, patched = 0;
+    for (BYTE*& operand : g_idleCooldown) {
+        if (operand) tq::detour::writeBytes(operand, &patched, &stock, 1);
+        operand = nullptr;
+    }
+}
+bool patchIdleCooldowns(BYTE* base) {
+    if (!tq::detour::matches((HMODULE)base, base + 0x1418cb,
+                            signature(kTextureIdle, sizeof(kTextureIdle)))
+        || !tq::detour::matches((HMODULE)base, base + 0x1418e4,
+                               signature(kMeshIdle, sizeof(kMeshIdle)))) return false;
+    const unsigned offsets[] = {0x1418cf, 0x1418e8};
+    const BYTE stock = 200, patched = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!tq::detour::writeBytes(base + offsets[i], &stock, &patched, 1)) {
+            restoreIdleCooldowns(); return false;
+        }
+        g_idleCooldown[i] = base + offsets[i];
+    }
+    return true;
+}
 unsigned word(const void* p, unsigned offset) {
     return *(const unsigned*)((const BYTE*)p + offset);
 }
@@ -85,6 +120,8 @@ bool install(HMODULE engine) {
     void* frame = resolve(engine, "?GetFrameCount@Engine@GAME@@QBEIXZ", 0x146cd0);
     void* singleton = (void*)GetProcAddress(engine, "?gEngine@GAME@@3PAVEngine@1@A");
     const bool verified = target && touched && frame && singleton == base + 0x3743f0
+        && resolve(engine, "?EvictOldResources@Engine@GAME@@QAEXXZ", 0x1418a0)
+        && resolve(engine, "?EvictOldResources@BaseResourceManager@GAME@@QAEXIIII@Z", 0x11f830)
         && g_mainThreadId && verifyResourceStateLayout(engine)
         && tq::detour::matches(engine, target, signature(kEntityHead, sizeof(kEntityHead)))
         && tq::detour::matches(engine, base + 0x1480c3, signature(kEntityTail, sizeof(kEntityTail)))
@@ -93,15 +130,18 @@ bool install(HMODULE engine) {
     if (!verified) { tq::hdr::log("Mesh preload refresh unavailable: native layout mismatch\r\n"); return false; }
     g_entity = (EntityFn)target;
     g_engine = base;
-    g_active = tq::detour::patchCall(g_patch, engine, base + 0x114f07,
+    const bool actor = tq::detour::patchCall(g_patch, engine, base + 0x114f07,
         signature(kActorWindow, sizeof(kActorWindow)), 4, target, (void*)&entity);
-    tq::hdr::log("Mesh preload refresh %s: resident age=%u frames, accelerated visits <=%u/frame\r\n",
-                 g_active ? "installed" : "rejected", kRefreshAge, kRefreshBudget);
+    g_active = actor && patchIdleCooldowns(base);
+    if (!g_active) { tq::detour::restoreCall(g_patch); restoreIdleCooldowns(); }
+    tq::hdr::log("Mesh preload refresh %s: resident age=%u frames, accelerated visits <=%u/frame; idle requeue cooldown=%u\r\n",
+                 g_active ? "installed" : "rejected", kRefreshAge, kRefreshBudget, g_active ? 0u : 200u);
     return g_active;
 }
 void shutdown() {
     g_active = false;
     tq::detour::restoreCall(g_patch);
+    restoreIdleCooldowns();
     g_entity = nullptr; g_engine = nullptr;
     g_budgetFrame = g_used = g_refreshed = g_deferred = 0;
 }
@@ -114,6 +154,49 @@ namespace {
 #include "../test/fixtures/mesh-preload-native.inc"
 EntityFn g_testActor;
 unsigned g_testObserved;
+void __fastcall captureEviction(void* self, void*, unsigned touched,
+                               unsigned used, unsigned size, unsigned cooldown) {
+    unsigned* args = (unsigned*)self;
+    ++args[0]; args[1] = touched; args[2] = used; args[3] = size; args[4] = cooldown;
+}
+bool testIdleEviction(BYTE* image) {
+    memcpy(image + 0x1418a0, kTestIdleEviction, sizeof(kTestIdleEviction));
+    tq::detour::absoluteBranch(image + 0x11f830, (void*)&captureEviction);
+    unsigned engine[128] = {}, holder[16] = {}, managers[4][5] = {};
+    *(void**)((BYTE*)engine + 0x160) = holder;
+    const unsigned offsets[] = {0x24, 0x2c, 0x28, 0x1c};
+    for (unsigned i = 0; i < 4; ++i) *(void**)((BYTE*)holder + offsets[i]) = managers[i];
+    using IdleFn = void (__fastcall*)(void*, void*);
+    const auto invoke = (IdleFn)(image + 0x1418a0);
+    bool ok = true;
+    // Execute the native caller before/after the patch and after rollback.
+    // The stand-in manager records its actual stack arguments and ret 16 ABI.
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        if (mode == 1) ok &= patchIdleCooldowns(image);
+        if (mode == 2) restoreIdleCooldowns();
+        memset(managers, 0, sizeof(managers));
+        invoke(engine, nullptr);
+        for (unsigned i = 0; i < 4; ++i) {
+            ok &= managers[i][0] == 1 && managers[i][1] == 800 && managers[i][3] == 0;
+            ok &= managers[i][2] == (i < 2 ? 1600u : 0xffffffffu);
+            ok &= managers[i][4] == (i < 2 && mode != 1 ? 200u : 0u);
+        }
+    }
+    ok &= !memcmp(image + 0x1418a0, kTestIdleEviction, sizeof(kTestIdleEviction));
+    // Reject any unsupported byte in either complete window before touching
+    // the first site, including a mismatch found in the second site's callee.
+    const unsigned sites[] = {0x1418cb, 0x1418e4};
+    for (unsigned rva : sites) {
+        for (unsigned n = 0; n < sizeof(kTextureIdle); ++n) {
+            image[rva + n] ^= 1;
+            ok &= !patchIdleCooldowns(image);
+            image[rva + n] ^= 1;
+            ok &= !g_idleCooldown[0] && !g_idleCooldown[1];
+            ok &= !memcmp(image + 0x1418a0, kTestIdleEviction, sizeof(kTestIdleEviction));
+        }
+    }
+    return ok;
+}
 bool __fastcall observeActor(void* self, void* edx, int step, int include) {
     ++g_testObserved;
     return g_testActor(self, edx, step, include);
@@ -186,6 +269,7 @@ bool testNative() {
         ok &= !memcmp(image + 0x114f00, kTestActor, sizeof(kTestActor));
     }
     g_mainThreadId = savedThread;
+    ok &= testIdleEviction(image);
     shutdown();
     VirtualFree(image, 0, MEM_RELEASE);
     return ok;
