@@ -1874,16 +1874,27 @@ void testGrassBufferLifetime() {
     check(balanced, "candidate shutdown leaves no retained references");
 
     tq::grass::installBuffers();
-    GrassTestBuffer seeded, replacements[300];
+    GrassTestBuffer seeded, replacements[700];
     GrassTestContext seedContext;
     tq::grass::crossedBuffer(&seeded);
     tq::grass::seedFromDraw(seedContext.get(), &seeded);
     seeded.Release();
     tq::grass::onPresent(seedContext.get());
     for (auto& buffer : replacements) tq::grass::crossedBuffer(&buffer);
+    seedContext.readResult = DXGI_ERROR_WAS_STILL_DRAWING;
     tq::grass::onPresent(seedContext.get());
-    check(seeded.refs == 0 && seedContext.copies == 1 && seedContext.maps == 0,
-          "evicting a stream cancels its seed before a reused slot can consume it");
+    for (auto& buffer : replacements) tq::grass::crossedBuffer(&buffer);
+    check(seeded.refs == 1 && seedContext.copies == 1 && seedContext.maps == 1,
+          "cache pressure preserves an in-flight seed across frames without waiting");
+    seedContext.readResult = S_OK;
+    tq::grass::onPresent(seedContext.get());
+    check(seedContext.maps == 3 && seedContext.device.twin.refs == 1,
+          "a protected seed completes despite a population exceeding the cache cap");
+    // Once the readback finishes, a source absent for multiple frames is cold.
+    tq::grass::onPresent(seedContext.get());
+    for (auto& buffer : replacements) tq::grass::crossedBuffer(&buffer);
+    check(seeded.refs == 0 && seedContext.device.twin.refs == 0,
+          "cold completed streams release both source and twin on eviction");
     seeded.refs = 1;
     seeded.desc.ByteWidth = 16;
     tq::grass::noteBufferCreated(&seeded, &seeded.desc);
@@ -1930,6 +1941,75 @@ void testGrassBufferLifetime() {
           && normalContext.device.staging.refs == 0,
           "completed seeding releases all owned resources at shutdown");
     VirtualFree(memory, 0, MEM_RELEASE);
+}
+
+void testGrassCachePressure() {
+    tq::grass::installBuffers();
+    GrassTestBuffer sources[700];
+    GrassTestContext context;
+    BYTE cards[44800] = {};
+    memcpy(cards, kCapturedPlane, sizeof(kCapturedPlane));
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    mapped.pData = cards;
+    // Reproduce the >330-buffer live scene using real captured card bytes.
+    for (unsigned i = 0; i < 400; ++i) {
+        tq::grass::noteBufferCreated(&sources[i], &sources[i].desc);
+        tq::grass::noteMap(&sources[i], 0, &mapped);
+        tq::grass::noteUnmap(&sources[i], 0);
+        tq::grass::afterUnmap(context.get());
+    }
+    unsigned descriptors = 0;
+    for (auto& source : sources) descriptors += source.descCalls;
+    bool stable = true;
+    for (unsigned frame = 0; frame < 8; ++frame) {
+        tq::grass::onPresent(context.get());
+        for (unsigned i = 0; i < 400; ++i) {
+            const unsigned at = (i + frame * 31) % 400;
+            stable &= tq::grass::crossedBuffer(&sources[at]) == &context.device.twin;
+        }
+    }
+    unsigned after = 0;
+    for (auto& source : sources) after += source.descCalls;
+    check(stable && after == descriptors,
+          "400 visible grass streams retain every crossing across reordered frames without descriptor queries");
+
+    // A draw population larger than the new cap must degrade to stable stock
+    // blocks, not repeatedly destroy crossings visited earlier in the frame.
+    for (unsigned i = 400; i < 700; ++i) tq::grass::crossedBuffer(&sources[i]);
+    unsigned held = 0;
+    for (auto& source : sources) held += source.refs == 2;
+    check(held == 512, "grass source ownership stays bounded at 512 under overload");
+    descriptors = 0;
+    for (auto& source : sources) descriptors += source.descCalls;
+    for (unsigned pass = 0; pass < 4; ++pass)
+        for (unsigned i = 512; i < 700; ++i) tq::grass::crossedBuffer(&sources[i]);
+    after = 0;
+    for (auto& source : sources) after += source.descCalls;
+    check(after == descriptors, "a saturated grass cache stops repeated admission queries within the frame");
+    // Visit overflow first next frame, before any retained stream is touched.
+    tq::grass::onPresent(context.get());
+    for (unsigned i = 512; i < 700; ++i) tq::grass::crossedBuffer(&sources[i]);
+    stable = true;
+    for (unsigned i = 0; i < 400; ++i)
+        stable &= tq::grass::crossedBuffer(&sources[i]) == &context.device.twin;
+    check(stable, "previous-frame protection prevents early overflow draws evicting visible crossings");
+
+    // Stop using the first scene. Two boundaries allow cold entries to leave.
+    tq::grass::onPresent(context.get());
+    tq::grass::onPresent(context.get());
+    for (unsigned i = 512; i < 700; ++i) tq::grass::crossedBuffer(&sources[i]);
+    unsigned admitted = 0;
+    held = 0;
+    for (unsigned i = 0; i < 700; ++i) {
+        held += sources[i].refs == 2;
+        if (i >= 512) admitted += sources[i].refs == 2;
+    }
+    check(admitted == 188 && held == 512,
+          "new scenery replaces cold streams once recent-frame protection expires");
+    tq::grass::shutdown();
+    bool balanced = context.device.twin.refs == 0;
+    for (auto& source : sources) balanced &= source.refs == 1;
+    check(balanced, "cache pressure and shutdown release all retained sources and twins");
 }
 
 void testGrassCrossed() {
@@ -3890,6 +3970,7 @@ int main(int argc, char** argv) {
     testGrassPointerIndex();
     testGrassCrossed();
     testGrassBufferLifetime();
+    testGrassCachePressure();
     testBloomExtraction();
     testBloomShaders();
     testShadowSplitRedirect();

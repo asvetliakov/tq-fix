@@ -140,7 +140,7 @@ void noteUnmap(ID3D11Resource* resource, UINT subresource);
 // grows: a key that will not fit within the probe window is simply not
 // tracked, which costs one uncrossed block and never corrupts a lookup.
 struct PointerIndex {
-    static const unsigned kSize = 2048;   // power of two
+    static const unsigned kSize = 4096;   // <= 1/8 full at the 512-stream cap
     static const unsigned kProbe = 8;
     void* keys[kSize];
     unsigned values[kSize];

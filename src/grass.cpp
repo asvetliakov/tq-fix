@@ -68,10 +68,10 @@ const unsigned kVerticesPerPlane = 4;
 const unsigned kFloatsPerPlane = kFloatsPerVertex * kVerticesPerPlane;
 const UINT kGrassStreamBytes = 44800;   // maxNumGrassPlanes * 4 * 32
 
-// Terrain::maxGrassBufferCacheSize is 15, but a session sees more distinct
-// streams than that as blocks come and go, and a full table silently stops
-// adopting. Round-robin eviction below makes overflow lossy rather than fatal.
-const unsigned kMaxGrassBuffers = 256;
+// Dense scenes in the captured run draw over 330 streams per frame. Keep
+// headroom without unbounded source/twin ownership (512 pairs = 43.75 MiB).
+// At the cap, retain recent visible streams instead of cycling them every draw.
+const unsigned kMaxGrassBuffers = 512;
 
 // Buffers whose size and usage match a grass stream. That is only a hint --
 // the game creates many of these -- so a candidate is promoted to a real grass
@@ -83,7 +83,7 @@ struct GrassBuffer {
     ID3D11Buffer* crossed;   // our rotated twin of it
     void* mapped;
     bool pending;            // no usable twin yet
-    unsigned lastSeen;       // draw ordinal, so eviction takes the coldest
+    unsigned lastSeen;       // presented-frame ordinal of the last draw/fill
 };
 
 struct Candidate {
@@ -109,10 +109,8 @@ struct Internal {
 bool internalBusy() { return InterlockedCompareExchange(&g_internal, 0, 0) != 0; }
 unsigned g_candidateCursor;
 
-// Both tables are sized for the worst case but hold far less: a session showed
-// 56 streams matching by size. Slots are handed out from the lowest free one,
-// so everything in use sits in a prefix, and the lookups that run on every Map
-// in the frame -- almost none of which are grass -- only have to walk that far.
+// Only adoption scans the occupied prefix; draws and Map/Unmap use the
+// bounded pointer indices below.
 unsigned g_grassHigh;
 unsigned g_candidateHigh;
 
@@ -121,9 +119,10 @@ unsigned g_candidateHigh;
 PointerIndex g_streamIndex;
 PointerIndex g_candidateIndex;
 
-// How much that lookup actually costs, which decides whether it needs to
-// become a hash rather than a walk.
-unsigned g_drawOrdinal;
+// A full, protected cache rejects further admissions until the next frame.
+// This keeps overflow from causing a descriptor query and scan on every draw.
+unsigned g_frameOrdinal;
+bool g_admissionBlocked;
 GrassBuffer g_grassBuffers[kMaxGrassBuffers];
 CRITICAL_SECTION g_grassLock;
 bool g_grassLockReady;
@@ -285,6 +284,12 @@ static void completeSeed(ID3D11DeviceContext* context);
 
 void onPresent(ID3D11DeviceContext* context) {
     completeSeed(context);
+    if (g_grassLockReady) {
+        EnterCriticalSection(&g_grassLock);
+        ++g_frameOrdinal;
+        g_admissionBlocked = false;
+        LeaveCriticalSection(&g_grassLock);
+    }
 }
 
 bool isGrassPlane(const float* plane) {
@@ -456,7 +461,7 @@ static bool grassStreamShape(const D3D11_BUFFER_DESC& desc) {
 
 // All helpers below run under g_grassLock. Owning the source makes its
 // immutable descriptor valid for the entire indexed lifetime, without a COM
-// query on each Map/Unmap. Both source tables are bounded at 256 entries.
+// query on each Map/Unmap. Sources and candidates have separate fixed caps.
 static void clearCandidate(unsigned slot) {
     Candidate& entry = g_candidates[slot];
     ID3D11Buffer* const buffer = entry.buffer;
@@ -487,55 +492,64 @@ static void clearStream(unsigned slot) {
     if (buffer) buffer->Release();
 }
 
-// Takes a slot for `buffer`, reusing its own if it has one, then any free
-// slot, then the coldest. Round-robin eviction could take a stream that is on
-// screen, which is what made a crossing vanish while the camera moved.
+// Evict only streams absent from both this frame and the previous one. The
+// previous-frame guard matters before the renderer has visited all this
+// frame's draws. A staging read or mapped/uploading source stays pinned too.
 static unsigned adoptStream(ID3D11Buffer* buffer) {
-    unsigned chosen = kMaxGrassBuffers;
-    // The draw hook offers whatever is bound on stream 0 while RenderGrass is
-    // on the stack, which is not necessarily a grass stream. Adopting one of
-    // those used to start a staging copy into a fixed 44,800-byte buffer that
-    // could never match it, and the slot then stayed pending for the rest of
-    // the session, re-copying every frame. A stream has an exact shape; check
-    // it before taking a slot.
-    D3D11_BUFFER_DESC desc = {};
-    if (buffer) buffer->GetDesc(&desc);
-    if (!grassStreamShape(desc)) return kMaxGrassBuffers;
+    if (!buffer) return kMaxGrassBuffers;
     EnterCriticalSection(&g_grassLock);
+    unsigned chosen = kMaxGrassBuffers;
+    if (indexLookup(g_streamIndex, buffer, &chosen)) {
+        LeaveCriticalSection(&g_grassLock);
+        return chosen;
+    }
+    if (g_admissionBlocked) {
+        LeaveCriticalSection(&g_grassLock);
+        return kMaxGrassBuffers;
+    }
+    // A draw in RenderGrass is not enough to establish the fixed copy size.
+    D3D11_BUFFER_DESC desc = {};
+    buffer->GetDesc(&desc);
+    if (!grassStreamShape(desc)) {
+        LeaveCriticalSection(&g_grassLock);
+        return kMaxGrassBuffers;
+    }
     unsigned free = kMaxGrassBuffers;
-    unsigned coldest = 0;
-    unsigned coldestAge = 0xffffffffu;
+    unsigned coldest = kMaxGrassBuffers;
+    unsigned coldestAge = 0;
     for (unsigned i = 0; i < g_grassHigh; ++i) {
-        if (g_grassBuffers[i].buffer == buffer) { chosen = i; break; }
-        if (!g_grassBuffers[i].buffer) {
+        const GrassBuffer& entry = g_grassBuffers[i];
+        if (!entry.buffer) {
             if (free == kMaxGrassBuffers) free = i;
             continue;
         }
-        if (g_grassBuffers[i].lastSeen < coldestAge) {
-            coldestAge = g_grassBuffers[i].lastSeen;
+        const unsigned age = g_frameOrdinal - entry.lastSeen;
+        if (age > 1 && age > coldestAge && i != g_seedSlot
+            && (LONG)i != g_pendingSlot && !entry.mapped) {
+            coldestAge = age;
             coldest = i;
         }
     }
+    if (free == kMaxGrassBuffers && g_grassHigh < kMaxGrassBuffers)
+        free = g_grassHigh++;
+    chosen = free < kMaxGrassBuffers ? free : coldest;
     if (chosen == kMaxGrassBuffers) {
-        if (free == kMaxGrassBuffers && g_grassHigh < kMaxGrassBuffers)
-            free = g_grassHigh++;
-        chosen = free < kMaxGrassBuffers ? free : coldest;
-        clearStream(chosen);
-        buffer->AddRef();
-        g_grassBuffers[chosen].buffer = buffer;
-        g_grassBuffers[chosen].pending = true;
-        tq::probe::count(tq::probe::CounterGrassAdopt);
-        g_grassBuffers[chosen].lastSeen = g_drawOrdinal;
-        // An index that will not take the key leaves the stream untracked
-        // rather than mis-tracked: the block draws uncrossed, as it did before.
-        if (!indexInsert(g_streamIndex, buffer, chosen)) {
-            clearStream(chosen);
-            chosen = kMaxGrassBuffers;
-        }
+        g_admissionBlocked = true;
+        LeaveCriticalSection(&g_grassLock);
+        return chosen;
     }
-    if (chosen < kMaxGrassBuffers) {
-        // A promoted stream no longer needs a candidate reference or a second
-        // mapped pointer that could survive the stream's Unmap.
+    clearStream(chosen);
+    buffer->AddRef();
+    g_grassBuffers[chosen].buffer = buffer;
+    g_grassBuffers[chosen].pending = true;
+    g_grassBuffers[chosen].lastSeen = g_frameOrdinal;
+    // Failure remains lossy and safe; a collision never aliases two streams.
+    if (!indexInsert(g_streamIndex, buffer, chosen)) {
+        clearStream(chosen);
+        chosen = kMaxGrassBuffers;
+    } else {
+        tq::probe::count(tq::probe::CounterGrassAdopt);
+        // Promotion transfers the candidate's ownership and drops its mapping.
         unsigned candidate = 0;
         if (indexLookup(g_candidateIndex, buffer, &candidate))
             clearCandidate(candidate);
@@ -586,9 +600,10 @@ void noteMap(ID3D11Resource* resource, UINT subresource,
     EnterCriticalSection(&g_grassLock);
     unsigned slot = 0;
     if (indexLookup(g_streamIndex, resource, &slot) && slot < kMaxGrassBuffers
-        && g_grassBuffers[slot].buffer == (ID3D11Buffer*)resource)
+        && g_grassBuffers[slot].buffer == (ID3D11Buffer*)resource) {
         g_grassBuffers[slot].mapped = mapped->pData;
-    else if (indexLookup(g_candidateIndex, resource, &slot) && slot < kMaxCandidates
+        g_grassBuffers[slot].lastSeen = g_frameOrdinal;
+    } else if (indexLookup(g_candidateIndex, resource, &slot) && slot < kMaxCandidates
         && g_candidates[slot].buffer == (ID3D11Buffer*)resource)
         g_candidates[slot].mapped = mapped->pData;
     LeaveCriticalSection(&g_grassLock);
@@ -710,20 +725,21 @@ ID3D11Buffer* crossedBuffer(ID3D11Buffer* source) {
     ID3D11Buffer* result = nullptr;
     bool known = false;
     bool pending = false;
+    bool canAdopt = false;
     EnterCriticalSection(&g_grassLock);
-    const unsigned ordinal = ++g_drawOrdinal;
     unsigned at = 0;
+    canAdopt = !g_admissionBlocked;
     if (indexLookup(g_streamIndex, source, &at) && at < kMaxGrassBuffers
         && g_grassBuffers[at].buffer == source) {
         known = true;
         pending = g_grassBuffers[at].pending;
-        g_grassBuffers[at].lastSeen = ordinal;
+        g_grassBuffers[at].lastSeen = g_frameOrdinal;
         // Only after a fill has been rotated into it; an unfilled twin would
         // draw whatever the buffer happened to contain.
         if (!pending) result = g_grassBuffers[at].crossed;
     }
     LeaveCriticalSection(&g_grassLock);
-    if (!known) adoptStream(source);
+    if (!known && canAdopt) adoptStream(source);
 
     // One-shot and unconditional: the single line that says the feature is
     // actually drawing, as opposed to merely installed.
@@ -951,7 +967,8 @@ void shutdown() {
     g_candidateHigh = 0;
     indexReset(g_streamIndex);
     indexReset(g_candidateIndex);
-    g_drawOrdinal = 0;
+    g_frameOrdinal = 0;
+    g_admissionBlocked = false;
     if (g_scratch) HeapFree(GetProcessHeap(), 0, g_scratch);
     g_scratch = nullptr;
     g_pendingSlot = (LONG)kMaxGrassBuffers;
