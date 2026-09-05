@@ -45,6 +45,9 @@ change's scope.
   and the prior maximum occupancy ratio. Known draws and Map/Unmap do not
   scan the stream table or query descriptors. A failed capacity scan happens
   at most once per frame. There is no per-frame table sweep.
+- Frame/admission bookkeeping is render-thread-owned. Advancing it at Present
+  takes no cache lock; loader-thread creation notifications do not access it.
+  Existing locks still protect shared candidates and buffer ownership.
 - Preserve nonblocking staging reads and existing reference ownership.
   No native Draw-slot refresh or grass diagnostic tracing is added.
 

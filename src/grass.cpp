@@ -121,6 +121,8 @@ PointerIndex g_candidateIndex;
 
 // A full, protected cache rejects further admissions until the next frame.
 // This keeps overflow from causing a descriptor query and scan on every draw.
+// These two values belong to the render thread (Present and immediate-context
+// draws/Map/Unmap). The loader's noteBufferCreated never accesses them.
 unsigned g_frameOrdinal;
 bool g_admissionBlocked;
 GrassBuffer g_grassBuffers[kMaxGrassBuffers];
@@ -285,10 +287,10 @@ static void completeSeed(ID3D11DeviceContext* context);
 void onPresent(ID3D11DeviceContext* context) {
     completeSeed(context);
     if (g_grassLockReady) {
-        EnterCriticalSection(&g_grassLock);
+        // No shared table access here: do not wait behind a loader-thread
+        // candidate notification just to advance render-thread bookkeeping.
         ++g_frameOrdinal;
         g_admissionBlocked = false;
-        LeaveCriticalSection(&g_grassLock);
     }
 }
 
