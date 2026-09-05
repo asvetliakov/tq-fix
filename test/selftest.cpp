@@ -185,12 +185,117 @@ void onTestPostPresent(IDXGISwapChain* swapChain) {
     g_presentOrder = 3;
 }
 
+UINT g_expectedPresentInterval, g_expectedPresentFlags;
+unsigned g_nativePresents, g_fullscreenQueries, g_alternatePresents;
+BOOL g_testFullscreen;
+HRESULT g_fullscreenResult = S_OK, g_testDescResult = S_OK;
+HRESULT g_nativePresentResult = S_OK;
+bool g_rejectTearing;
+DXGI_SWAP_CHAIN_DESC g_testSwapDesc;
+UINT g_resizeFlags;
+DXGI_FORMAT g_resizeFormat;
+
 HRESULT WINAPI testOriginalPresent(IDXGISwapChain* swapChain, UINT interval,
                                    UINT flags) {
+    ++g_nativePresents;
+    if (g_rejectTearing && flags == DXGI_PRESENT_ALLOW_TEARING) {
+        g_presentOrderValid &= g_presentOrder == 1 && interval == 0;
+        return DXGI_ERROR_INVALID_CALL;
+    }
     g_presentOrderValid &= g_presentOrder == 1 && swapChain == g_presentSwapChain
-                        && interval == 0 && flags == 0;
+                        && interval == g_expectedPresentInterval
+                        && flags == g_expectedPresentFlags;
     g_presentOrder = 2;
+    return g_nativePresentResult;
+}
+
+HRESULT WINAPI testAlternatePresent(IDXGISwapChain* swapChain, UINT interval, UINT flags) {
+    ++g_alternatePresents;
+    return testOriginalPresent(swapChain, interval, flags);
+}
+
+HRESULT WINAPI testFullscreenState(IDXGISwapChain*, BOOL* fullscreen, IDXGIOutput**) {
+    ++g_fullscreenQueries;
+    *fullscreen = g_testFullscreen;
+    return g_fullscreenResult;
+}
+
+HRESULT WINAPI testSwapDesc(IDXGISwapChain*, DXGI_SWAP_CHAIN_DESC* desc) {
+    *desc = g_testSwapDesc;
+    return g_testDescResult;
+}
+
+HRESULT WINAPI testResizeBuffers(IDXGISwapChain*, UINT, UINT, UINT,
+                                 DXGI_FORMAT format, UINT flags) {
+    g_resizeFlags = flags;
+    g_resizeFormat = format;
     return S_OK;
+}
+
+struct TearingTestFactory {
+    void** vtable;
+    void* slots[29] = {};
+    HRESULT queryResult = S_OK, featureResult = S_OK;
+    BOOL supported = TRUE;
+    unsigned queries = 0, releases = 0, features = 0;
+    bool validArgs = true;
+    TearingTestFactory() : vtable(slots) {
+        slots[0] = (void*)&query;
+        slots[2] = (void*)&release;
+        slots[28] = (void*)&feature;
+    }
+    static HRESULT WINAPI query(IDXGIFactory* self, REFIID iid, void** out) {
+        auto* f = (TearingTestFactory*)self;
+        ++f->queries;
+        f->validArgs &= IsEqualIID(iid, __uuidof(IDXGIFactory5));
+        *out = SUCCEEDED(f->queryResult) ? self : nullptr;
+        return f->queryResult;
+    }
+    static ULONG WINAPI release(IDXGIFactory5* self) {
+        ++((TearingTestFactory*)self)->releases; return 1;
+    }
+    static HRESULT WINAPI feature(IDXGIFactory5* self, DXGI_FEATURE kind,
+                                   void* data, UINT size) {
+        auto* f = (TearingTestFactory*)self;
+        ++f->features;
+        f->validArgs &= kind == DXGI_FEATURE_PRESENT_ALLOW_TEARING && size == sizeof(BOOL);
+        *(BOOL*)data = f->supported;
+        return f->featureResult;
+    }
+};
+
+void testTearingCapability() {
+    TearingTestFactory factory;
+    auto* f = (IDXGIFactory*)&factory;
+    check(tq::hdr::supportsTearing(f) && factory.validArgs && factory.releases == 1,
+          "tearing requires the DXGI factory capability and releases its queried interface");
+    factory.supported = FALSE;
+    check(!tq::hdr::supportsTearing(f), "unsupported tearing falls back without enabling flags");
+    factory.supported = TRUE; factory.featureResult = E_FAIL;
+    check(!tq::hdr::supportsTearing(f), "failed capability query cannot enable tearing");
+    factory.queryResult = E_NOINTERFACE;
+    check(!tq::hdr::supportsTearing(f) && factory.features == 3 && factory.releases == 3
+          && !tq::hdr::supportsTearing(nullptr),
+          "older factories and absent DXGI support retain the non-tearing path");
+    DXGI_SWAP_CHAIN_DESC original = {};
+    original.BufferDesc.Width = 3840; original.BufferDesc.Height = 2160;
+    original.BufferDesc.RefreshRate = {120, 1};
+    original.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    original.BufferCount = 2; original.Windowed = TRUE;
+    original.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    original.SampleDesc = {4, 2};
+    original.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    DXGI_SWAP_CHAIN_DESC expected = original;
+    expected.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    expected.SampleDesc = {1, 0}; expected.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    expected.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    DXGI_SWAP_CHAIN_DESC candidate = tq::hdr::fp16SwapChainDescription(original, true);
+    check(!memcmp(&candidate, &expected, sizeof(candidate)),
+          "FP16 tearing preserves requested refresh, window mode, buffer count and unrelated flags");
+    candidate = tq::hdr::fp16SwapChainDescription(original, false);
+    expected.Flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    check(!memcmp(&candidate, &expected, sizeof(candidate)),
+          "non-tearing capability uses the same FP16 description without the optional flag");
 }
 
 void testRendererPresentHook() {
@@ -225,6 +330,9 @@ void testRendererPresentHook() {
 
     void* swapVtable[14] = {};
     swapVtable[8] = (void*)&testOriginalPresent;
+    swapVtable[11] = (void*)&testFullscreenState;
+    swapVtable[12] = (void*)&testSwapDesc;
+    swapVtable[13] = (void*)&testResizeBuffers;
     struct FakeSwapChain { void** vtable; } swapChain = {swapVtable};
     BYTE renderer[0x600] = {};
     *(IDXGISwapChain**)(renderer + 0x34) = (IDXGISwapChain*)&swapChain;
@@ -244,6 +352,78 @@ void testRendererPresentHook() {
           "run pre-Present, Steam-safe original Present, and post-Present in order");
     check(swapVtable[8] == (void*)&testOriginalPresent,
           "leave the shared IDXGISwapChain Present slot untouched");
+
+    g_testSwapDesc.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    g_testSwapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    g_testSwapDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    g_testSwapDesc.Windowed = TRUE;
+    tq::streaming::installSwapChain((IDXGISwapChain*)&swapChain);
+    auto run = [&](UINT interval, UINT flags) {
+        renderer[0x5db] = (BYTE)interval;
+        g_expectedPresentInterval = interval ? 1 : 0;
+        g_expectedPresentFlags = flags;
+        g_presentOrder = 0; g_presentOrderValid = true;
+        return present(renderer, nullptr);
+    };
+    check(run(0, DXGI_PRESENT_ALLOW_TEARING) == S_OK && g_presentOrderValid
+          && g_presentOrder == 3, "windowed VSync-off uses tearing with callback order preserved");
+    unsigned queries = g_fullscreenQueries;
+    check(run(1, 0) == S_OK && g_presentOrderValid && g_fullscreenQueries == queries,
+          "VSync-on uses the original interval with no per-frame fullscreen query");
+    check(run(255, 0) == S_OK && g_presentOrderValid,
+          "any nonzero renderer VSync byte keeps the original normalized interval one");
+    g_testFullscreen = TRUE;
+    check(run(0, 0) == S_OK && g_presentOrderValid,
+          "exclusive fullscreen never receives the windowed tearing flag");
+    g_testFullscreen = FALSE; g_fullscreenResult = E_FAIL;
+    check(run(0, 0) == S_OK && g_presentOrderValid,
+          "unknown fullscreen state fails safely to original presentation");
+    g_fullscreenResult = S_OK;
+    swapVtable[8] = (void*)&testAlternatePresent;
+    check(run(0, DXGI_PRESENT_ALLOW_TEARING) == S_OK && g_presentOrderValid
+          && g_alternatePresents == 1 && swapVtable[8] == (void*)&testAlternatePresent,
+          "tearing follows a replaced native/overlay Present slot without patching it");
+    unsigned calls = g_nativePresents;
+    g_rejectTearing = true;
+    check(run(0, 0) == S_OK && g_presentOrderValid && g_presentOrder == 3
+          && g_nativePresents == calls + 2,
+          "a rejected tearing flag retries original Present once with one successful post callback");
+    g_rejectTearing = false;
+    queries = g_fullscreenQueries;
+    check(run(0, 0) == S_OK && g_presentOrderValid && g_fullscreenQueries == queries,
+          "a rejected optional flag remains disabled for the rest of the chain lifetime");
+    tq::streaming::installSwapChain((IDXGISwapChain*)&swapChain);
+    calls = g_nativePresents;
+    g_nativePresentResult = DXGI_ERROR_DEVICE_REMOVED;
+    check(run(0, DXGI_PRESENT_ALLOW_TEARING) == DXGI_ERROR_DEVICE_REMOVED
+          && g_presentOrderValid && g_presentOrder == 2 && g_nativePresents == calls + 1,
+          "device removal propagates without a duplicate Present or post callback");
+    g_nativePresentResult = S_OK;
+    typedef HRESULT (WINAPI* ResizeFn)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+    ResizeFn resize = (ResizeFn)swapVtable[13];
+    resize((IDXGISwapChain*)&swapChain, 2, 1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM,
+           DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+    check(g_resizeFormat == DXGI_FORMAT_R16G16B16A16_FLOAT
+          && g_resizeFlags == (DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH),
+          "ResizeBuffers retains FP16 and immutable tearing support plus caller flags");
+    g_testSwapDesc.Flags = 0;
+    tq::streaming::installSwapChain((IDXGISwapChain*)&swapChain);
+    queries = g_fullscreenQueries;
+    check(run(0, 0) == S_OK && g_presentOrderValid && g_fullscreenQueries == queries,
+          "a chain created without tearing keeps original presentation without extra queries");
+    resize((IDXGISwapChain*)&swapChain, 2, 1920, 1080, DXGI_FORMAT_UNKNOWN,
+           DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+    check(g_resizeFlags == 0, "ResizeBuffers cannot add tearing to a chain created without it");
+    g_testSwapDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    g_testSwapDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    tq::streaming::installSwapChain((IDXGISwapChain*)&swapChain);
+    check(run(0, 0) == S_OK && g_presentOrderValid,
+          "stock eight-bit output remains outside the FP16 tearing change");
+    g_testDescResult = E_FAIL;
+    tq::streaming::installSwapChain((IDXGISwapChain*)&swapChain);
+    check(run(0, 0) == S_OK && g_presentOrderValid,
+          "a failed chain descriptor query cannot enable tearing");
+    g_testDescResult = S_OK;
 
     tq::streaming::shutdown();
     check(*rendererPresentSlot == image + 0x61190
@@ -3962,6 +4142,7 @@ int main(int argc, char** argv) {
           "streaming=optimized enables progressive uploads");
     check(!tq::streaming::optimizationEnabled(L"original"),
           "streaming=original restores synchronous uploads");
+    testTearingCapability();
     testRendererPresentHook();
     testRendererDrawHooks();
     testBloomHook();

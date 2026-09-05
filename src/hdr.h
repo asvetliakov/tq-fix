@@ -32,6 +32,10 @@ struct Runtime {
 Settings readSettings();
 const Runtime& runtime();
 
+bool supportsTearing(IDXGIFactory* factory);
+DXGI_SWAP_CHAIN_DESC fp16SwapChainDescription(
+    const DXGI_SWAP_CHAIN_DESC& original, bool allowTearing);
+
 // Returns true when enhanced output is selected and candidate contains a complete
 // FP16 flip-model description. The same linear scRGB path is used for SDR and
 // HDR; only the final display mapping differs.

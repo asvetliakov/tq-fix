@@ -265,8 +265,22 @@ HRESULT WINAPI hookCreateDeviceAndSwapChain(
                  tryFloatOutput ? 1u : 0u, (unsigned long)result,
                  swapChain ? *swapChain : nullptr, device ? *device : nullptr,
                  context ? *context : nullptr);
-    if (tryFloatOutput && (FAILED(result) || !swapChain || !*swapChain
-                           || !tq::hdr::activateSwapChain(*swapChain))) {
+    bool floatReady = tryFloatOutput && SUCCEEDED(result) && swapChain && *swapChain
+                   && tq::hdr::activateSwapChain(*swapChain);
+    if (tryFloatOutput && !floatReady
+        && (candidate.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING)) {
+        tq::hdr::log("FP16 tearing attempt failed; retrying FP16 without tearing\r\n");
+        releaseCreation(swapChain, device, context);
+        candidate.Flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        result = g_createDeviceAndSwapChain(
+            adapter, driverType, software, flags, levels, levelCount, sdkVersion,
+            &candidate, swapChain, device, selectedLevel, context);
+        tq::hdr::log("FP16 non-tearing retry returned: hr=0x%08lx\r\n",
+                     (unsigned long)result);
+        floatReady = SUCCEEDED(result) && swapChain && *swapChain
+                  && tq::hdr::activateSwapChain(*swapChain);
+    }
+    if (tryFloatOutput && !floatReady) {
         tq::hdr::log("FP16 swap-chain attempt failed; retrying original description\r\n");
         releaseCreation(swapChain, device, context);
         result = g_createDeviceAndSwapChain(

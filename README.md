@@ -339,6 +339,14 @@ graded midtones and color ratios while rolling off only the upper part of the
 display range. AgX provides a more modern contrast and highlight response.
 Use `tonemap=original` for the complete original path and `hdr=off` to prevent
 HDR output.
+
+The enhanced FP16 output path enables DXGI tearing support when available.
+With in-game VSync off, windowed and borderless presentation can use it;
+VSync-on and exclusive-fullscreen Present calls retain the game's original
+behavior. No extra INI setting is needed. Unsupported systems keep the
+non-tearing path, and a rejected tearing-capable creation retries FP16 without
+that flag before falling back to the original output path.
+
 `paper_white_nits` defaults to 203;
 `peak_nits=auto` uses the display-reported peak and falls back to 1000 nits when
 HDR is available but the report is unusable. A numeric `peak_nits` overrides

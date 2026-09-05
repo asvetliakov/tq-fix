@@ -87,7 +87,8 @@ bool inspectAdapter(IDXGIAdapter* adapter, HMONITOR monitor,
     return false;
 }
 
-bool detectOutput(const DXGI_SWAP_CHAIN_DESC& swap, DXGI_OUTPUT_DESC1* selected) {
+bool detectOutput(const DXGI_SWAP_CHAIN_DESC& swap, DXGI_OUTPUT_DESC1* selected,
+                  bool* allowTearing) {
     HMONITOR monitor = swap.OutputWindow
         ? MonitorFromWindow(swap.OutputWindow, MONITOR_DEFAULTTONEAREST) : nullptr;
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
@@ -100,6 +101,7 @@ bool detectOutput(const DXGI_SWAP_CHAIN_DESC& swap, DXGI_OUTPUT_DESC1* selected)
         ? createFactory(__uuidof(IDXGIFactory1), (void**)&factory) : E_FAIL;
     bool found = false;
     if (SUCCEEDED(hr) && factory) {
+        *allowTearing = supportsTearing(factory);
         for (UINT i = 0; !found; ++i) {
             IDXGIAdapter1* adapter = nullptr;
             if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
@@ -214,6 +216,31 @@ const Runtime& runtime() {
     return g_runtime;
 }
 
+bool supportsTearing(IDXGIFactory* factory) {
+    if (!factory) return false;
+    IDXGIFactory5* factory5 = nullptr;
+    HRESULT hr = factory->QueryInterface(__uuidof(IDXGIFactory5), (void**)&factory5);
+    BOOL supported = FALSE;
+    if (SUCCEEDED(hr) && factory5)
+        hr = factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                                           &supported, sizeof(supported));
+    if (factory5) factory5->Release();
+    return SUCCEEDED(hr) && supported;
+}
+
+DXGI_SWAP_CHAIN_DESC fp16SwapChainDescription(
+    const DXGI_SWAP_CHAIN_DESC& original, bool allowTearing) {
+    DXGI_SWAP_CHAIN_DESC candidate = original;
+    candidate.BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (candidate.BufferCount < 2) candidate.BufferCount = 2;
+    candidate.SampleDesc.Count = 1;
+    candidate.SampleDesc.Quality = 0;
+    candidate.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    candidate.Flags &= ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    if (allowTearing) candidate.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    return candidate;
+}
+
 bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
                             DXGI_SWAP_CHAIN_DESC* candidate) {
     Settings settings = readSettings();
@@ -223,7 +250,8 @@ bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
     if (!candidate || settings.toneMap == ToneOriginal)
         return false;
     DXGI_OUTPUT_DESC1 output = {};
-    bool detected = detectOutput(original, &output);
+    bool allowTearing = false;
+    bool detected = detectOutput(original, &output, &allowTearing);
     if (detected) {
         g_runtime.displayHdr = hdrColorSpace(output.ColorSpace);
         log("Output: colorSpace=%u min=%.3f max=%.1f fullFrame=%.1f hdr=%u\r\n",
@@ -237,12 +265,11 @@ bool makeSwapChainCandidate(const DXGI_SWAP_CHAIN_DESC& original,
         reportedPeak = 1000.0f;
     g_runtime.peakNits = settings.peakNitsOverride > 0.0f
                        ? settings.peakNitsOverride : reportedPeak;
-    *candidate = original;
-    candidate->BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    candidate->BufferCount = candidate->BufferCount < 2 ? 2 : candidate->BufferCount;
-    candidate->SampleDesc.Count = 1;
-    candidate->SampleDesc.Quality = 0;
-    candidate->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    *candidate = fp16SwapChainDescription(original, allowTearing);
+    log("FP16 presentation: tearingSupport=%u windowed=%u refresh=%u/%u flags=0x%x\r\n",
+        allowTearing ? 1u : 0u, candidate->Windowed ? 1u : 0u,
+        candidate->BufferDesc.RefreshRate.Numerator,
+        candidate->BufferDesc.RefreshRate.Denominator, candidate->Flags);
     log("FP16 candidate: %ux%u format=%u buffers=%u effect=%u hdrRequested=%u paper=%.1f peak=%.1f\r\n",
         candidate->BufferDesc.Width, candidate->BufferDesc.Height,
         (unsigned)candidate->BufferDesc.Format, candidate->BufferCount,

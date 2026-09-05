@@ -19,6 +19,8 @@ const DWORD kRendererImageSize = 0x192000;
 const DWORD kRendererPresentRva = 0x61190;
 const DWORD kRendererPresentSlotRva = 0x8625c;
 const DWORD kRendererSwapChainOffset = 0x34;
+// The complete verified Present wrapper normalizes this byte to interval 0/1.
+const DWORD kRendererVsyncOffset = 0x5db;
 const BYTE kRendererPresentCode[] = {
     0x8b, 0x51, 0x34, 0x33, 0xc0, 0x38, 0x81, 0xdb,
     0x05, 0x00, 0x00, 0x56, 0x8b, 0x32, 0x0f, 0x95,
@@ -40,6 +42,8 @@ void (*g_presentCallback)(IDXGISwapChain*);
 void (*g_postPresentCallback)(IDXGISwapChain*);
 void (*g_preResizeCallback)(IDXGISwapChain*);
 void (*g_resizeCallback)(IDXGISwapChain*);
+IDXGISwapChain* g_tearingSwapChain; // borrowed; reset on chain installation/shutdown
+bool g_tearingPresentLogged;
 
 bool readable(const void* address) {
     MEMORY_BASIC_INFORMATION info = {};
@@ -71,7 +75,36 @@ HRESULT __fastcall hookRendererPresent(void* renderer, void*, void* parameter) {
     HRESULT result;
     {
         tq::probe::Scope timing(tq::probe::PhasePresentCall);
-        result = g_rendererPresent(renderer, parameter);
+        bool tear = false;
+        if (swapChain && swapChain == g_tearingSwapChain
+            && !*((BYTE*)renderer + kRendererVsyncOffset)) {
+            // Query current state to handle Alt+Enter. A failed query must not
+            // accidentally pass the windowed-only flag in exclusive fullscreen.
+            BOOL fullscreen = TRUE;
+            tear = SUCCEEDED(swapChain->GetFullscreenState(&fullscreen, nullptr))
+                && !fullscreen;
+        }
+        if (tear) {
+            // The verified wrapper does only Present(interval, 0). Preserve
+            // its live DXGI/overlay dispatch while supplying the extra flag;
+            // never patch or cache a shared DXGI Present function pointer.
+            result = swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+            if (result == DXGI_ERROR_INVALID_CALL || result == E_INVALIDARG) {
+                // A runtime/overlay may reject the optional flag despite the
+                // capability report. Failed calls presented nothing; retry
+                // once through the original path, then leave tearing disabled.
+                g_tearingSwapChain = nullptr;
+                tq::hdr::log("Tearing Present rejected: hr=0x%08lx; reverting to original presentation\r\n",
+                             (unsigned long)result);
+                result = g_rendererPresent(renderer, parameter);
+            } else if (result == S_OK && !g_tearingPresentLogged) {
+                g_tearingPresentLogged = true;
+                tq::hdr::log("Tearing Present active: syncInterval=0 flags=0x%x\r\n",
+                             DXGI_PRESENT_ALLOW_TEARING);
+            }
+        } else {
+            result = g_rendererPresent(renderer, parameter);
+        }
     }
     LONG present = InterlockedIncrement(&g_presentReturnCount);
     if (present == 1 || present == 2 || present == 30 || present == 120
@@ -92,8 +125,12 @@ HRESULT WINAPI hookResizeBuffers(IDXGISwapChain* swapChain, UINT count,
                                  UINT flags) {
     DXGI_SWAP_CHAIN_DESC current = {};
     if (SUCCEEDED(swapChain->GetDesc(&current))
-        && current.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+        && current.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
         format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        // ALLOW_TEARING is immutable across ResizeBuffers.
+        flags = (flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING)
+              | (current.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+    }
     if (g_preResizeCallback) g_preResizeCallback(swapChain);
     HRESULT hr = g_resizeBuffers(swapChain, count, width, height, format, flags);
     if (SUCCEEDED(hr) && g_resizeCallback) g_resizeCallback(swapChain);
@@ -151,9 +188,22 @@ bool presentHookInstalled() {
 }
 
 void installSwapChain(IDXGISwapChain* swapChain) {
+    g_tearingSwapChain = nullptr;
+    g_tearingPresentLogged = false;
     if (!swapChain) {
         tq::hdr::log("Swap-chain Resize hook skipped: no swap chain\r\n");
         return;
+    }
+    DXGI_SWAP_CHAIN_DESC desc = {};
+    if (SUCCEEDED(swapChain->GetDesc(&desc))) {
+        if (desc.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
+            && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD
+            && (desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING))
+            g_tearingSwapChain = swapChain;
+        tq::hdr::log("Swap-chain presentation: tearingEligible=%u windowed=%u refresh=%u/%u flags=0x%x\r\n",
+                     g_tearingSwapChain ? 1u : 0u, desc.Windowed ? 1u : 0u,
+                     desc.BufferDesc.RefreshRate.Numerator,
+                     desc.BufferDesc.RefreshRate.Denominator, desc.Flags);
     }
     // Steam may re-establish its DXGI hooks after device creation. Never join
     // that shared vtable chain: Present is handled above the overlay, and the
@@ -202,6 +252,8 @@ void setResizeCallback(void (*callback)(IDXGISwapChain*)) {
 }
 
 void shutdown() {
+    g_tearingSwapChain = nullptr;
+    g_tearingPresentLogged = false;
     g_presentCallback = nullptr;
     g_postPresentCallback = nullptr;
     g_preResizeCallback = nullptr;
