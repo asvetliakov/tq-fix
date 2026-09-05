@@ -6,7 +6,8 @@ analysis below describes the original capture. The installed comparison
 keeps performance/lifecycle recording enabled and turns only text output off
 on a release build; the earlier DLL, INI and logs are preserved under
 `cache/runs/text-logger-before-batching`. No gameplay result for that comparison
-has been measured yet. Text batching is also active when logging is re-enabled.
+was available when the comparison was prepared. Its result is recorded below.
+Text batching is also active when logging is re-enabled.
 
 Validation: all six off-game suites pass, including all 12,000 concurrent text
 records exactly once, the final shutdown sentinel, zero message-triggered
@@ -235,3 +236,79 @@ affect recency and residency, but it does not exempt a mesh from that policy or
 change memory budgets. This is not a promise of identical memory consumption:
 avoiding premature eviction intentionally retains currently interesting assets
 longer. The eight-visit limit controls acceleration, not total resident bytes.
+
+## First text-off comparison: stalls persist
+
+Archived under `cache/runs/text-logger-off-first`, including the tested DLL,
+INI, manifest and `comparison.json`. CSV SHA-256:
+`9db73fc1b8914a3e4f9f596fdcb7d3d50608ad2544b0072348a87f368accf352`.
+The installed DLL and INI exactly match the prepared hashes above. There is no
+debug or HDR text log: the text logger is disabled, while performance and
+lifecycle recording remain requested. The CSV has 4,553 consecutive rows,
+4,528 resolved GPU frames, 17 timeouts and zero dropped rows.
+
+First grass is frame 2887; its 344 ms initial-world frame is excluded, as are
+the following 120-frame warmup and the exit transition at 4417. Compare frames
+3007–4416 with the earlier text-on run's 3556–5053. These gameplay windows are
+28.684 and 29.994 seconds respectively. Percentiles below use linear interpolation.
+The user was unsure of a subjective difference; do not claim a felt improvement.
+
+| Measurement | Earlier text on | Text off |
+|---|---:|---:|
+| Median frame | 19.624 ms | 19.651 ms |
+| p95 | 23.998 ms | 25.464 ms |
+| p99 | 33.269 ms | 37.930 ms |
+| Frames over 50 ms | 6 / 1,498 | 6 / 1,410 |
+| Frames over 100 ms | 1 | 2 |
+| One-to-two-owner transition | 79.485 ms at 4773 | 186.134 ms at 4249 |
+| Transition main resource loads | 12 / 29.480 ms | 43 / 100.535 ms |
+| Transition native draw submission | 29.201 ms | 56.746 ms |
+| Main resource loads in transition ±120 frames | 22 / 42.494 ms | 63 / 178.281 ms |
+
+Both F12 reactions have clear preceding candidates:
+
+* Marker 3924 follows frame 3906 by 386 ms. The frame takes 191.936 ms, with
+  162.824 ms in the measured Peek wrapper and only 0.038 ms in Dispatch. Two
+  Peeks occur: one returns a message, one returns empty in 0.002 ms. This differs
+  from the historically slow final-empty-Peek signature. The frame has no
+  synchronous main-thread resource loads; update is 10.100 ms, render 17.995 ms,
+  native Present 0.043 ms and mod presentation 0.072 ms. It is not an F12 report
+  frame and there is no text writer to compete with the game.
+* Marker 4269 follows the transition at 4249 by 508 ms. All 43 resource loads
+  are in render: 16 meshes / 15.942 ms, 25 textures / 81.983 ms, two shaders /
+  2.610 ms. The first owner's geometry setup contains 78.617 ms of resource
+  loading; the second owner's geometry scene contains 56.163 ms of native draw
+  time. Whole update is only 4.993 ms; render is 177.810 ms. Native Present is
+  0.073 ms, mod presentation 0.064 ms, and the upload step 2.148 ms. Grass is
+  still 172/172 crossed draws at 0.153 ms, with no secondary admissions,
+  suppression or overflow in this frame.
+
+There are also a 69.531 ms draw-dominated frame at 3164 (58.957 ms in native
+draws), and update spikes at 3542 and 3970 (40.763 and 45.696 ms). These classes
+also survive with text logging disabled. The former 34 ms presentation spike
+is absent (maximum 4.050 ms in this gameplay window), but one run is insufficient
+to credit text logging for its disappearance.
+
+The heavier transition is a changed cold-resource workload, not just slower
+execution of the same twelve loads. Particle demand is later in this run:
+frame 4257 has 18.861 ms of update-time resource loading, and 4260 has 8.992 ms.
+There are further render-time loads before and after the transition. Asset
+names and before-demand residency histories were intentionally suppressed by
+the text-off control, so those later loads cannot be identified as the earlier
+smoke textures from the CSV alone. The 79 ms result is not a stable ceiling or
+proof that the mesh residency problem is fully solved. The root-age refresh's
+known limits still apply; this capture cannot select which limit caused the
+extra demand or directly report its installation/acceleration totals.
+
+Conclusion: the text logger is not necessary for the surviving pump, update
+and draw/loading stalls. This does not rule out a contribution in earlier runs,
+nor isolate CSV, lifecycle or other observer overhead. Do not revert the
+validated text batching or reopen message-pump behavior changes from one event.
+
+Next comparison: keep the same tested DLL and re-enable only `trace=1`, with
+the new batching policy, to recover the existing full lifecycle and draw reports
+for this variable transition. Capture F12 after each gameplay hitch. This needs
+no new native hooks. Preserve the text-off run first; record the next INI under
+`cache/runs/text-logger-batched-prepared`. Use the resource histories to distinguish
+missing preload, evicted dependencies and cooldown rejection before extending
+mesh refresh. The separate pump/update attribution gaps remain unresolved.

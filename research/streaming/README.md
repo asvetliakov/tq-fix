@@ -24,6 +24,9 @@ budgets and cooldowns, and runs independently of tracing. Particle realization,
 native draw waits and separate update spikes remain outside that result.
 The [remaining-hitch investigation](residual-gameplay-hitches.md) separates
 those costs and records the native particle path and remaining measurement gaps.
+A subsequent text-off repeat still hit 186 ms at that transition and a separate
+163 ms Peek stall. The mesh result varies with cold-resource demand, and text
+logging alone does not explain the remaining hitches.
 
 Read [findings §112](findings.md#112-alternate-route-residency-loss-and-bounded-mesh-preload-refresh),
 [gameplay loading hitches](gameplay-loading-hitches.md), and the
