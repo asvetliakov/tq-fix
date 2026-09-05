@@ -12,6 +12,7 @@
 #include "arc_cache.h"
 #include "dxbc_patch.h"
 #include "bloom_hook.h"
+#include "contact_shadow.h"
 #include "frame_overlay.h"
 #include "detour.h"
 #include "renderer_draw.h"
@@ -2861,9 +2862,14 @@ void testTimestampCapability(ID3D11Device* device, ID3D11DeviceContext* context)
         if (!flushed) Sleep(1);
     }
     UINT64 first = 0, last = 0;
-    bool stamps = flushed
-               && context->GetData(begin, &first, sizeof(first), 0) == S_OK
-               && context->GetData(end, &last, sizeof(last), 0) == S_OK;
+    // A ready disjoint query does not imply both independent timestamps have
+    // retired yet. DXMT can expose the period first; poll the stamps too.
+    bool stamps = false;
+    for (unsigned i = 0; flushed && i < 200 && !stamps; ++i) {
+        stamps = context->GetData(begin, &first, sizeof(first), 0) == S_OK
+              && context->GetData(end, &last, sizeof(last), 0) == S_OK;
+        if (!stamps) Sleep(1);
+    }
 
     char detail[192];
     snprintf(detail, sizeof(detail),
@@ -4056,6 +4062,147 @@ void testShadowFitStabilizer() {
           "a degenerate fit extent is left untouched");
 }
 
+// ---------------------------------------------------------- contact shadows
+//
+// The deferred receiver holds only the inverse view-projection, so the
+// screen-space march is supplied with the forward transform, inverted on the
+// CPU once a frame. Nothing downstream can detect a bad inversion -- a wrong
+// matrix marches into the wrong pixels and simply looks like noise -- so the
+// inversion and the round trip that justifies it are checked here against a
+// synthetic view-projection of the shape Titan Quest produces: a right-handed
+// look-at at the world scale the game actually uses, times a D3D perspective.
+
+void multiplyRowMatrix(const float a[16], const float b[16], float out[16]) {
+    for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < 4; ++j) {
+            double sum = 0.0;
+            for (unsigned k = 0; k < 4; ++k)
+                sum += (double)a[i * 4 + k] * (double)b[k * 4 + j];
+            out[i * 4 + j] = (float)sum;
+        }
+}
+
+// A view-projection of the shape the receiver holds: a right-handed look-at at
+// a chosen world position, times a D3D perspective for the 32:9 display this is
+// tuned for, laid out as DP4 rows.
+void makeViewProjection(const float eye[3], float out[16]) {
+    const float target[3] = {eye[0] + 20.0f, eye[1] - 320.0f, eye[2] + 40.0f};
+    float forward[3], right[3], up[3];
+    for (unsigned i = 0; i < 3; ++i) forward[i] = target[i] - eye[i];
+    float length = sqrtf(forward[0] * forward[0] + forward[1] * forward[1]
+                         + forward[2] * forward[2]);
+    for (unsigned i = 0; i < 3; ++i) forward[i] /= length;
+    const float world[3] = {0.0f, 1.0f, 0.0f};
+    right[0] = world[1] * forward[2] - world[2] * forward[1];
+    right[1] = world[2] * forward[0] - world[0] * forward[2];
+    right[2] = world[0] * forward[1] - world[1] * forward[0];
+    length = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+    for (unsigned i = 0; i < 3; ++i) right[i] /= length;
+    up[0] = forward[1] * right[2] - forward[2] * right[1];
+    up[1] = forward[2] * right[0] - forward[0] * right[2];
+    up[2] = forward[0] * right[1] - forward[1] * right[0];
+
+    float view[16] = {0};
+    const float* axes[3] = {right, up, forward};
+    for (unsigned i = 0; i < 3; ++i) {
+        for (unsigned c = 0; c < 3; ++c) view[i * 4 + c] = axes[i][c];
+        view[i * 4 + 3] = -(axes[i][0] * eye[0] + axes[i][1] * eye[1]
+                            + axes[i][2] * eye[2]);
+    }
+    view[15] = 1.0f;
+
+    const float nearPlane = 1.0f, farPlane = 4000.0f;
+    const float aspect = 5120.0f / 1440.0f;
+    const float yScale = 1.0f / tanf(0.35f);
+    float projection[16] = {0};
+    projection[0] = yScale / aspect;
+    projection[5] = yScale;
+    projection[10] = farPlane / (farPlane - nearPlane);
+    projection[11] = -nearPlane * farPlane / (farPlane - nearPlane);
+    projection[14] = 1.0f;
+    multiplyRowMatrix(projection, view, out);
+}
+
+void testContactShadowTransform() {
+    // Near the origin the round trip is limited by the inversion alone, so this
+    // is where the inversion and the DP4 convention are actually tested.
+    const float origin[3] = {0.0f, 320.0f, 0.0f};
+    float nearOrigin[16], nearInverse[16] = {0};
+    makeViewProjection(origin, nearOrigin);
+    check(tq::contact::invertRowMatrix(nearOrigin, nearInverse),
+          "invert a view-projection of the shape the receiver holds");
+    const float nearError =
+        tq::contact::ndcRoundTripError(nearInverse, nearOrigin);
+    char described[160];
+    _snprintf(described, sizeof(described) - 1,
+              "projecting a reconstructed pixel reproduces its own NDC"
+              " (%.2e near the world origin)", (double)nearError);
+    described[sizeof(described) - 1] = 0;
+    check(nearError < 1.0e-4f, described);
+
+    // Inverting twice must reproduce what the matrix does, not its bit pattern:
+    // element-wise equality is not recoverable through a float inverse and is
+    // not what anything downstream depends on.
+    float again[16] = {0};
+    check(tq::contact::invertRowMatrix(nearInverse, again),
+          "invert the inverse view-projection back");
+    check(tq::contact::ndcRoundTripError(nearInverse, again) < 1.0e-4f,
+          "inverting twice reproduces the original transform");
+
+    // A transposed upload is the failure this cannot be allowed to miss: it is
+    // the one wrong matrix that is still invertible and still well scaled.
+    float transposed[16];
+    for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < 4; ++j)
+            transposed[i * 4 + j] = nearOrigin[j * 4 + i];
+    check(tq::contact::ndcRoundTripError(nearInverse, transposed) > 1.0e-2f,
+          "the round trip rejects a transposed view-projection");
+
+    // At Titan Quest's actual world scale the same matrices lose three orders
+    // of magnitude, which is why the march takes its clip-space origin from the
+    // pixel's own NDC over h.w rather than from VP * P. The check here is only
+    // that the matrix is still recognisably the right one; the measurement is
+    // in the description so a change in it is visible rather than silent.
+    const float distant[3] = {12480.0f, 320.0f, 9310.0f};
+    float world[16], worldInverse[16] = {0};
+    makeViewProjection(distant, world);
+    check(tq::contact::invertRowMatrix(world, worldInverse),
+          "invert a view-projection at Titan Quest's world scale");
+    const float worldError =
+        tq::contact::ndcRoundTripError(worldInverse, world);
+    _snprintf(described, sizeof(described) - 1,
+              "the matrix route degrades with world scale, not with the"
+              " inversion (%.2e at world scale)", (double)worldError);
+    described[sizeof(described) - 1] = 0;
+    check(worldError < 2.0e-2f && worldError > nearError, described);
+
+    // A projection row of zeros is what a constant buffer that was never
+    // written looks like, and it must not reach the GPU as a live transform.
+    float singular[16];
+    memcpy(singular, world, sizeof(singular));
+    for (unsigned c = 0; c < 4; ++c) singular[8 + c] = 0.0f;
+    float rejected[16];
+    check(!tq::contact::invertRowMatrix(singular, rejected),
+          "refuse to invert a singular matrix");
+
+    float infinite[16];
+    memcpy(infinite, world, sizeof(infinite));
+    infinite[0] = (float)(1.0 / 0.0);
+    check(!tq::contact::invertRowMatrix(infinite, rejected),
+          "refuse to invert a matrix carrying a non-finite value");
+
+    // No INI is present here: verify the gameplay-approved shipped profile.
+    const tq::shadow::ContactSettings& settings = tq::shadow::contactSettings();
+    check(settings.enabled && tq::contact::enabled(),
+          "contact shadows are enabled without an INI override");
+    check(settings.steps == 12 && settings.length == 0.35f && settings.bias == 0.012f
+              && settings.thickness == 0.30f && settings.strength == 0.70f
+              && settings.upright == 0.0f,
+          "the contact march defaults match the gameplay-approved profile");
+    check(!settings.toggle,
+          "the contact comparison key is off unless shadow_contact_toggle is set");
+}
+
 // Runs in its own fixture directory/process because production options and
 // device hooks are initialized once. Verify the actual DLL's renderer patches,
 // with every other Draw-hook consumer disabled.
@@ -4066,7 +4213,7 @@ int testGrassOnlyHooks(bool enhanced, bool rejectRenderer = false) {
     check(ini != nullptr, "create isolated grass-only configuration");
     if (ini) {
         fprintf(ini,
-            "[graphics]\ngrass=%s\naa=fxaa\nshadows=original\n"
+            "[graphics]\ngrass=%s\naa=fxaa\nshadows=original\nshadow_contact=off\n"
             "tonemap=original\nhdr=off\nbloom=original\nanisotropy=1\n"
             "[performance]\nstreaming=original\narchive_cache_mb=0\n"
             "loose_texture_max=0\nshadow_defer_cold_resources=0\n"
@@ -4395,7 +4542,10 @@ int testLogRetention() {
     return g_failures ? 1 : 0;
 }
 
+#include "contact_runtime.inc"
+
 int main(int argc, char** argv) {
+    if (argc == 2 && !strcmp(argv[1], "--contact-runtime")) return testContactRuntime();
     if (argc == 2 && !strcmp(argv[1], "--log-retention")) return testLogRetention();
     if (argc == 2 && !strcmp(argv[1], "--device-recreation"))
         return testDeviceRecreation();
@@ -4428,6 +4578,7 @@ int main(int argc, char** argv) {
     testShadowSplitRedirect();
     testShadowFitStabilizer();
     testShadowBasisReference();
+    testContactShadowTransform();
     testTextureDimensions();
     testUpload();
 
@@ -5005,6 +5156,90 @@ int main(int argc, char** argv) {
                   shadowBytes, (SIZE_T)shadowSize, 0.38f, 0.695f, true, &legacyTuned),
               "leave a per-material receiver's taps untouched");
         tq::dxbc::release(&legacyTuned);
+
+        // The contact march. It appends a straight-line block after the shadow
+        // term and splices three instructions into the existing stream; the
+        // only thing that can prove the encoding is a device that compiles it.
+        tq::dxbc::PatchResult marched = {};
+        bool appended = deferredBytes && tq::dxbc::addContactShadowMarch(
+            deferredBytes, (SIZE_T)deferredSize, 8, &marched);
+        check(appended && marched.size > (SIZE_T)deferredSize,
+              "append the contact march to the deferred receiver");
+        if (appended && device) {
+            ID3D11PixelShader* shader = nullptr;
+            HRESULT hr = device->CreatePixelShader(marched.data, marched.size,
+                                                   nullptr, &shader);
+            check(SUCCEEDED(hr) && shader,
+                  "DXMT accepts the deferred receiver with the contact march");
+            if (shader) shader->Release();
+        }
+
+        // The order is forced: retuning rewrites the tap immediates the march's
+        // shape test keys on, so the march has to go first. Both directions are
+        // checked so a future reordering cannot pass silently.
+        tq::dxbc::PatchResult both = {};
+        bool composed = appended && tq::dxbc::tuneDeferredShadowFilter(
+            marched.data, marched.size, 0.381f, 0.695f, true, &both);
+        check(composed, "retune the taps of a shader already carrying the march");
+        if (composed && device) {
+            ID3D11PixelShader* shader = nullptr;
+            HRESULT hr = device->CreatePixelShader(both.data, both.size,
+                                                   nullptr, &shader);
+            check(SUCCEEDED(hr) && shader,
+                  "DXMT accepts the march and the retuned filter together");
+            if (shader) shader->Release();
+        }
+        tq::dxbc::release(&both);
+
+        tq::dxbc::PatchResult afterTune = {};
+        tq::dxbc::PatchResult tuneFirst = {};
+        bool tunedFirst = deferredBytes && tq::dxbc::tuneDeferredShadowFilter(
+            deferredBytes, (SIZE_T)deferredSize, 0.381f, 0.695f, true, &tuneFirst);
+        check(tunedFirst && !tq::dxbc::addContactShadowMarch(
+                  tuneFirst.data, tuneFirst.size, 8, &afterTune),
+              "refuse the march on a receiver whose taps were already retuned");
+        tq::dxbc::release(&afterTune);
+        tq::dxbc::release(&tuneFirst);
+
+        tq::dxbc::PatchResult twice = {};
+        check(appended && !tq::dxbc::addContactShadowMarch(
+                  marched.data, marched.size, 8, &twice),
+              "refuse to march a shader that already declares b13");
+        tq::dxbc::release(&twice);
+
+        // Step counts outside the configured range would emit a block the
+        // capacity check was not sized for.
+        tq::dxbc::PatchResult tooFew = {}, tooMany = {};
+        check(deferredBytes && !tq::dxbc::addContactShadowMarch(
+                  deferredBytes, (SIZE_T)deferredSize, 3, &tooFew)
+              && !tq::dxbc::addContactShadowMarch(
+                  deferredBytes, (SIZE_T)deferredSize, 17, &tooMany),
+              "refuse a march step count outside 4 to 16");
+        tq::dxbc::release(&tooMany);
+        tq::dxbc::release(&tooFew);
+
+        // Sixteen steps is the widest block the emitter can be asked for, and
+        // the one most likely to overrun a miscounted capacity.
+        tq::dxbc::PatchResult widest = {};
+        bool wide = deferredBytes && tq::dxbc::addContactShadowMarch(
+            deferredBytes, (SIZE_T)deferredSize, 16, &widest);
+        check(wide && widest.size > marched.size,
+              "append the widest march the configuration allows");
+        if (wide && device) {
+            ID3D11PixelShader* shader = nullptr;
+            HRESULT hr = device->CreatePixelShader(widest.data, widest.size,
+                                                   nullptr, &shader);
+            check(SUCCEEDED(hr) && shader, "DXMT accepts a sixteen-step march");
+            if (shader) shader->Release();
+        }
+        tq::dxbc::release(&widest);
+
+        tq::dxbc::PatchResult legacyMarch = {};
+        check(shadowBytes && !tq::dxbc::addContactShadowMarch(
+                  shadowBytes, (SIZE_T)shadowSize, 8, &legacyMarch),
+              "leave a per-material receiver unmarched");
+        tq::dxbc::release(&legacyMarch);
+        tq::dxbc::release(&marched);
         free(deferredBytes);
         free(shadowBytes);
     }

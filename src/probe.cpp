@@ -1,4 +1,5 @@
 #include "probe.h"
+#include "shadow_fix.h"
 
 #include <algorithm>
 #include <stdio.h>
@@ -63,7 +64,7 @@ struct GpuSlot {
 const char* const kPhaseNames[] = {
     "present", "grass_present", "stream_step", "overlay_raster", "overlay_draw",
     "smaa", "bloom", "shader_create", "texture_create", "buffer_create",
-    "grass_fill", "grass_cross", "present_call", "draw_submit", "map_resource"
+    "grass_fill", "grass_cross", "present_call", "draw_submit", "map_resource", "contact_refresh"
 };
 
 const char* const kCounterNames[] = {
@@ -425,7 +426,10 @@ const char* const kCounterNames[] = {
     "engine_gpu_chunk_reflection_draw",
     "engine_gpu_chunk_reflection_overflow",
     "engine_gpu_chunk_reflection_collision",
-    "stutter_marker"
+    "stutter_marker",
+    "contact_receiver_draw", "contact_marched_draw", "contact_readback_copy",
+    "contact_readback_poll", "contact_readback_ready", "contact_readback_busy",
+    "contact_ring_full", "contact_invalid", "contact_neutral", "contact_history_age", "contact_active_draw"
 };
 static_assert(sizeof(kCounterNames) / sizeof(kCounterNames[0]) == CounterCount,
               "every counter needs a CSV column name");
@@ -437,7 +441,7 @@ static_assert(sizeof(kPhaseNames) / sizeof(kPhaseNames[0]) == PhaseCount,
 const char* const kPhaseShortNames[] = {
     "PRESENT", "GRASS-PRES", "STREAM", "OVL-RAST", "OVL-DRAW", "SMAA", "BLOOM",
     "SHADER", "TEXTURE", "BUFFER", "GRASS-FILL", "GRASS-CROSS", "PRESENT-CALL",
-    "DRAW", "MAP"
+    "DRAW", "MAP", "CONTACT"
 };
 static_assert(sizeof(kPhaseShortNames) / sizeof(kPhaseShortNames[0])
                   == PhaseCount,
@@ -466,7 +470,7 @@ const char* const kGpuNames[] = {
     "gpu_chunk_reflection_08", "gpu_chunk_reflection_09",
     "gpu_chunk_reflection_10", "gpu_chunk_reflection_11",
     "gpu_chunk_reflection_12", "gpu_chunk_reflection_13",
-    "gpu_chunk_reflection_14", "gpu_chunk_reflection_15"
+    "gpu_chunk_reflection_14", "gpu_chunk_reflection_15", "gpu_contact_receiver"
 };
 static_assert(sizeof(kGpuNames) / sizeof(kGpuNames[0]) == GpuPhaseCount,
               "every GPU phase needs a CSV column name");
@@ -655,6 +659,12 @@ void writeHeader() {
     // marker have the same row value.
     snprintf(line, sizeof(line), "# stutter_marker=%s\r\n",
              g_stutterMarkerRequested ? "F12" : "0");
+    appendLog(line);
+    const tq::shadow::ContactSettings& contact = tq::shadow::contactSettings();
+    snprintf(line, sizeof(line), "# shadow_contact=%s steps=%u length=%.3f bias=%.3f"
+             " thickness=%.3f strength=%.3f upright=%.3f\r\n",
+             contact.enabled ? "on" : "off", contact.steps, contact.length,
+             contact.bias, contact.thickness, contact.strength, contact.upright);
     appendLog(line);
     int n = snprintf(line, sizeof(line), "frame,ms");
     for (unsigned i = 0; i < PhaseCount && n > 0 && n < (int)sizeof(line); ++i)

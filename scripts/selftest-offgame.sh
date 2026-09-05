@@ -10,7 +10,7 @@ REPORT_WIN='C:\tqflicker-selftest\report.txt'
 [ -f build/winmm.dll ] || { echo "no build/winmm.dll - run: npm run build" >&2; exit 1; }
 
 i686-w64-mingw32-g++ -o build/selftest.exe \
-  test/selftest.cpp test/engine_runtime.cpp src/arc_cache.cpp src/bloom_hook.cpp src/detour.cpp src/renderer_draw.cpp src/dxbc_patch.cpp src/mesh_preload.cpp src/resource_trace.cpp src/engine_probe.cpp src/engine_hooks.cpp src/shadow_defer.cpp src/terrain_preload.cpp src/secondary_admission.cpp src/archive_hooks.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp \
+  test/selftest.cpp test/engine_runtime.cpp src/arc_cache.cpp src/bloom_hook.cpp src/contact_shadow.cpp src/detour.cpp src/renderer_draw.cpp src/dxbc_patch.cpp src/mesh_preload.cpp src/resource_trace.cpp src/engine_probe.cpp src/engine_hooks.cpp src/shadow_defer.cpp src/terrain_preload.cpp src/secondary_admission.cpp src/archive_hooks.cpp src/frame_overlay.cpp src/frustum_fix.cpp src/grass.cpp src/hdr.cpp src/probe.cpp src/shadow_fix.cpp src/streaming.cpp src/upload.cpp \
   -I src -I build/gen -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   -DTQ_SELFTEST -ld3d11
 i686-w64-mingw32-g++ -shared -o build/Direct3D11.dll \
@@ -135,3 +135,32 @@ done
 [ -s "$logger_case/report.txt" ] || { echo "FAIL: logger produced no report" >&2; exit 1; }
 cat "$logger_case/report.txt"
 grep -q '^RESULT: 0 failure' "$logger_case/report.txt"
+
+# Contact readback/backlog and shader execution have their own cached options.
+contact_case="$WORK/contact"
+mkdir -p "$contact_case"
+cp build/selftest.exe "$WORK/tq-dxbc-PS-deferred-shadow.dxbc" "$contact_case/"
+"$CX/bin/cxstart" --bottle "$(basename "$BOTTLE")" --no-convert \
+  --no-gui --no-wait --workdir 'C:\tqflicker-selftest\contact' \
+  -- 'C:\tqflicker-selftest\contact\selftest.exe' --contact-runtime >/dev/null 2>&1 || true
+for _ in $(seq 1 120); do
+  grep -q '^RESULT' "$contact_case/report.txt" 2>/dev/null && break
+  sleep 0.25
+done
+[ -s "$contact_case/report.txt" ] || { echo "FAIL: contact produced no report" >&2; exit 1; }
+cat "$contact_case/report.txt"
+grep -q '^RESULT: 0 failure' "$contact_case/report.txt"
+python3 - "$contact_case/tqflicker-frames.csv" <<'PYTRACE'
+from pathlib import Path
+import csv, sys
+lines = Path(sys.argv[1]).read_text().splitlines()
+assert any(line.startswith('# shadow_contact=on steps=12 length=0.350 bias=0.012 thickness=0.300 strength=0.700 upright=0.000') for line in lines)
+rows = list(csv.DictReader(line for line in lines if not line.startswith('#')))
+for name in ['contact_receiver_draw', 'contact_marched_draw', 'contact_readback_copy',
+             'contact_readback_ready', 'contact_readback_busy', 'contact_ring_full',
+             'contact_invalid', 'contact_neutral']:
+    assert sum(int(row[name]) for row in rows) > 0, name
+assert any(float(row['contact_refresh_ms']) > 0 for row in rows)
+assert any(row['gpu_contact_receiver_ms'] for row in rows)
+print('ok    contact CPU/GPU timings, configuration and backlog counters reach performance_trace')
+PYTRACE

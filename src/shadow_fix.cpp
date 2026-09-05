@@ -193,6 +193,15 @@ float readFloat(const wchar_t* key, float fallback, float low, float high) {
     return parsed;
 }
 
+// The one dial that is not a [graphics] setting: a debug key, kept beside the
+// rest of the contact configuration rather than in a second reader.
+bool readDebugFlag(const wchar_t* key) {
+    wchar_t path[MAX_PATH];
+    iniPath(path);
+    if (!path[0]) return false;
+    return GetPrivateProfileIntW(L"debug", key, 0, path) != 0;
+}
+
 bool readSwitch(const wchar_t* key, const wchar_t* fallback, const wchar_t* off) {
     wchar_t path[MAX_PATH];
     iniPath(path);
@@ -215,6 +224,7 @@ struct Config {
     unsigned steps;
     float blurScale;
     float biasScale;
+    ContactSettings contact;
 };
 
 Config g_config;
@@ -257,6 +267,32 @@ const Config& config() {
         g_config.blurScale = 1.0f;
         g_config.biasScale = 1.0f;
     }
+
+    // Contact shadows are independent of the split: they add detail the map
+    // cannot resolve at any coverage, so they are not disabled by
+    // shadows=original. Enabled with the gameplay-approved normal-zoom profile.
+    g_config.contact.enabled = readSwitch(L"shadow_contact", L"on", L"off");
+    g_config.contact.steps =
+        (unsigned)readFloat(L"shadow_contact_steps", 12.0f, 4.0f, 16.0f);
+    // Gameplay-approved reach for the fixed, elevated camera. Twelve taps keep
+    // samples close as the ray reaches farther around vegetation and props.
+    // Hidden geometry still cannot contribute to a screen-space ray.
+    g_config.contact.length =
+        readFloat(L"shadow_contact_length", 0.35f, 0.02f, 8.0f);
+    // Both in world units, not NDC. A constant NDC bias is unusable here: the
+    // same 0.0005 is 0.046 world units ten units from the camera and 0.80 at
+    // forty, which is wider than the whole march, so the effect would die with
+    // distance. The shader linearises the depth instead.
+    g_config.contact.bias =
+        readFloat(L"shadow_contact_bias", 0.012f, 0.0f, 1.0f);
+    g_config.contact.thickness =
+        readFloat(L"shadow_contact_thickness", 0.30f, 0.01f, 8.0f);
+    g_config.contact.strength =
+        readFloat(L"shadow_contact_strength", 0.70f, 0.0f, 1.0f);
+    g_config.contact.upright =
+        readFloat(L"shadow_contact_upright", 0.0f, -1.0f, 1.0f);
+    g_config.contact.toggle = readDebugFlag(L"shadow_contact_toggle");
+    g_config.contact.timing = readDebugFlag(L"shadow_contact_timing");
     return g_config;
 }
 
@@ -666,6 +702,8 @@ float blurCompensation() { return config().blurScale; }
 float biasCompensation() { return config().biasScale; }
 
 bool cornerFilterEnabled() { return config().corners; }
+
+const ContactSettings& contactSettings() { return config().contact; }
 
 void shutdown() {
     restoreStabilizer();

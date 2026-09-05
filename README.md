@@ -112,6 +112,13 @@ shadow_map_scale=4
 shadow_point_map_scale=2
 shadow_filter=corners
 shadow_stabilize=on
+shadow_contact=on
+shadow_contact_steps=12
+shadow_contact_length=0.35
+shadow_contact_bias=0.012
+shadow_contact_thickness=0.30
+shadow_contact_strength=0.70
+shadow_contact_upright=0.0
 grass=enhanced
 edge_updates=expanded
 bloom=enhanced
@@ -347,6 +354,37 @@ again, and `shadow_stabilize_steps` (1-64, default 8) sets how finely the
 fitted extent is quantized -- fewer steps hold the extent for longer at the
 cost of covering more world than the camera needs. Pinning the basis is the
 half that matters; snapping without it stabilizes nothing.
+
+Contact shadows are **enabled by default**, independently of
+`shadows=enhanced`; `shadow_contact=off` disables them. The gameplay-approved
+profile targets normal zoomed-out play: 12 steps, `shadow_contact_length=0.35`,
+`shadow_contact_bias=0.012`, `shadow_contact_thickness=0.30`,
+`shadow_contact_strength=0.70`, and `shadow_contact_upright=0.0`. Distances are
+world units. The normal threshold admits upward and vertical surfaces while
+excluding downward-facing ones; `-1` admits all orientations. Thin grass can
+still cast onto ground because screen depth contains no object identity.
+
+The clearest observed benefit is richer grounding and separation of vegetation
+clumps; gains on buildings and small props are subtler. The march uses up to
+twelve extra depth samples per eligible pixel and has no temporal accumulation.
+Readbacks never deliberately wait for the GPU; stale camera history temporarily
+disables the effect. See the [tuning and approval record](research/shadows/contact-tuning.md)
+and [implementation review](research/shadows/contact-review.md).
+
+For an A/B run, set `[debug] performance_trace=full` and restart once with
+`shadow_contact=off`, then with `on`, using the same scene and camera.
+`gpu_contact_receiver_ms` measures the complete deferred receiver, including
+native lighting and PCF; compare runs to estimate the added GPU cost. Multiple
+receiver draws span first to last draw, including gaps. `contact_refresh_ms`
+measures CPU polling, parameter upload and copy submission. `contact_readback_*`,
+`contact_ring_full`, `contact_invalid`, `contact_neutral`, and
+`contact_history_age` expose delayed/failed refreshes. The CSV header records
+the configured shadow settings. Both hitch and full tracing collect these;
+full tracing retains every frame. `[debug] shadow_contact_toggle=1` enables
+Ctrl+Shift+C for appearance comparison. Zero strength skips the shader march,
+but a restarted `off` run is still the baseline for total feature overhead.
+The older `shadow_contact_timing=1` log summary remains available with `trace=1`;
+when performance tracing is enabled it uses the shared CSV timing instead.
 
 `grass=enhanced`, the default, crosses each grass blade with a second card
 turned a quarter turn about its own centre, so a field keeps its volume as the

@@ -1,5 +1,6 @@
 #include "visual.h"
 #include "bloom_hook.h"
+#include "contact_shadow.h"
 #include "grass.h"
 #include "renderer_draw.h"
 #include "dxbc_patch.h"
@@ -142,6 +143,7 @@ ID3D11PixelShader* g_colorGrading[8];
 unsigned g_colorGradingCount;
 ID3D11PixelShader* g_gamma[8];
 unsigned g_gammaCount;
+unsigned g_contactReceiverBound;
 ID3D11PixelShader* g_alphaClampCopies[8];
 unsigned g_alphaClampCopyCount;
 ID3D11PixelShader* g_gamePixelShader;
@@ -1400,6 +1402,25 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
     tq::probe::count(tq::probe::CounterShaderCreate);
     tq::dxbc::PatchResult patch = {};
     bool enhanced = g_options.shadows && tq::dxbc::enhanceShadowPcf(bytecode, size, &patch);
+    const void* current = enhanced ? patch.data : bytecode;
+    SIZE_T currentSize = enhanced ? patch.size : size;
+
+    // The deferred receiver takes up to two additive transforms, and the order
+    // is forced: the filter retune rewrites the very tap immediates the contact
+    // march's shape test keys on, so applying the march second is refused. Both
+    // gate on the same single shader, so neither can reach anything else.
+    tq::dxbc::PatchResult marched = {};
+    const tq::shadow::ContactSettings& contact = tq::shadow::contactSettings();
+    if (!enhanced && device == g_device && contact.enabled && tq::contact::ready()
+        && tq::dxbc::addContactShadowMarch(current, currentSize, contact.steps,
+                                           &marched)) {
+        current = marched.data;
+        currentSize = marched.size;
+        tq::hdr::log("Contact shadow march: %u steps, length %.3f, thickness"
+                     " %.5f, strength %.3f\r\n",
+                     contact.steps, contact.length, contact.thickness,
+                     contact.strength);
+    }
     // enhanceShadowPcf matches the per-material receivers, which this renderer
     // does not use for directional light. The deferred screen-space receiver
     // carries the PCF that actually runs, and its taps need the same 3x3
@@ -1409,20 +1430,45 @@ HRESULT WINAPI hookCreatePixelShader(ID3D11Device* device, const void* bytecode,
         const float offsets = tq::shadow::blurCompensation();
         const float bias = tq::shadow::biasCompensation();
         const bool corners = tq::shadow::cornerFilterEnabled();
-        if (tq::dxbc::tuneDeferredShadowFilter(bytecode, size, offsets, bias,
-                                               corners, &patch)) {
-            enhanced = true;
+        tq::dxbc::PatchResult tuned = {};
+        if (tq::dxbc::tuneDeferredShadowFilter(current, currentSize, offsets,
+                                               bias, corners, &tuned)) {
+            tq::dxbc::release(&patch);
+            patch = tuned;
+            current = patch.data;
+            currentSize = patch.size;
             tq::hdr::log("Deferred shadow filter: taps=%s offsetScale=%.3f"
                          " biasScale=%.3f\r\n",
                          corners ? "3x3 corners" : "native cross",
                          offsets, bias);
         }
     }
-    HRESULT hr = g_createPixelShader(device, enhanced ? patch.data : bytecode,
-                                     enhanced ? patch.size : size, linkage, shader);
-    if (enhanced && FAILED(hr)) hr = g_createPixelShader(device, bytecode, size, linkage, shader);
+    bool contactApplied = marched.data != nullptr;
+    const bool transformed = current != bytecode;
+    HRESULT hr = g_createPixelShader(device, current, currentSize, linkage, shader);
+    if (transformed && FAILED(hr)) {
+        contactApplied = false;
+        tq::hdr::log("Deferred receiver rejected by the device; falling back to"
+                     " the original program\r\n");
+        hr = g_createPixelShader(device, bytecode, size, linkage, shader);
+    }
     tq::dxbc::release(&patch);
+    tq::dxbc::release(&marched);
     if (SUCCEEDED(hr) && shader && *shader) {
+        // The contact march needs to know which created shader is the deferred
+        // receiver even when the filter transform above was not applied, so it
+        // matches the original bytecode rather than reusing that result.
+        if (device == g_device && tq::contact::instrumented()
+            && tq::dxbc::matchesDeferredShadowReceiver(bytecode, size)
+            && !tq::contact::noteReceiver(*shader, contactApplied)) {
+            // An unidentifiable marched shader would never receive b13.
+            // Fall back before the game can bind it.
+            (*shader)->Release();
+            *shader = nullptr;
+            hr = g_createPixelShader(device, bytecode, size, linkage, shader);
+            tq::hdr::log("Contact shadow: receiver tagging failed; using original\r\n");
+            if (FAILED(hr) || !*shader) return hr;
+        }
         bool outputTransform = tq::hdr::runtime().settings.toneMap != tq::hdr::ToneOriginal;
         bool fxaa = g_options.smaa && isFxaa(bytecode, size);
         bool color = outputTransform && tq::hdr::isColorGradingShader(bytecode, size);
@@ -1486,6 +1532,9 @@ void WINAPI hookPSSetShader(ID3D11DeviceContext* context, ID3D11PixelShader* sha
                             ID3D11ClassInstance* const* classes, UINT count) {
     if (context == g_context) g_gamePixelShader = shader;
     g_fxaaBound = g_colorGradingBound = g_gammaBound = false;
+    if (context == g_context && !g_inside)
+        g_contactReceiverBound = tq::contact::instrumented()
+            ? tq::contact::receiverKind(shader) : 0;
     for (unsigned i = 0; i < g_fxaaCount; ++i)
         if (shader == g_fxaa[i]) g_fxaaBound = true;
     for (unsigned i = 0; i < g_colorGradingCount; ++i)
@@ -2997,6 +3046,7 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
                        && g_globalBloomEnabled && !g_bloom.freshForPresent;
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
+    if (!g_inside && g_contactReceiverBound) tq::contact::beforeReceiverDraw(context, g_contactReceiverBound == 2);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
     const bool gpuChunkDraw = !g_inside
         && tq::engineprobe::gpuChunkDrawActive();
@@ -3015,6 +3065,7 @@ void WINAPI hookDraw(ID3D11DeviceContext* context, UINT count, UINT start) {
     if (gpuChunkDraw)
         tq::engineprobe::finishGpuChunkDraw(
             false, count, &g_deferredBindings);
+    if (!g_inside && g_contactReceiverBound) tq::contact::afterReceiverDraw(context);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -3035,6 +3086,7 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
                        && g_globalBloomEnabled && !g_bloom.freshForPresent;
     bool clampRegionalAlpha = !g_inside
         && shouldClampRegionalCompositeAlpha(context);
+    if (!g_inside && g_contactReceiverBound) tq::contact::beforeReceiverDraw(context, g_contactReceiverBound == 2);
     bindRegionalCompositeShader(context, clampRegionalAlpha);
     const bool grassDraw = !g_inside && context == g_context
         && g_grassEnhanced && tq::grass::rendering();
@@ -3072,6 +3124,7 @@ void WINAPI hookDrawIndexed(ID3D11DeviceContext* context, UINT count, UINT start
     if (gpuChunkDraw)
         tq::engineprobe::finishGpuChunkDraw(
             true, count, &g_deferredBindings);
+    if (!g_inside && g_contactReceiverBound) tq::contact::afterReceiverDraw(context);
     restoreRegionalCompositeShader(context, clampRegionalAlpha);
     if (bloomAfterDraw) renderEnhancedBloom();
 }
@@ -3123,6 +3176,10 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
                              && toneEnabled && hdrRuntime.fp16Active;
     bool nativeBloomControl = g_options.bloom == BloomOff
                            || enhancedBloomCapable;
+    // Contact shadows add detail below one shadow-map texel, which no split or
+    // resolution reaches, so they are independent of shadows=enhanced and pull
+    // in their own hooks.
+    bool contactEnabled = tq::contact::instrumented();
     // Prepares the buffer table before the hooks that feed it are patched in.
     tq::grass::installBuffers();
     bool grassBufferHooks = tq::grass::enabled();
@@ -3138,7 +3195,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     // The shadow path needs the pre-resize callback too, not just FP16: the
     // renderer rebuilds its shadow targets across a resize and the identity
     // table has to be dropped with them.
-    if (hdrRuntime.fp16Active || g_options.shadows)
+    if (hdrRuntime.fp16Active || g_options.shadows || contactEnabled)
         tq::streaming::setPreResizeCallback(&onBeforeResize);
     if (hdrRuntime.fp16Active)
         tq::streaming::setResizeCallback(&onResize);
@@ -3183,6 +3240,9 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     if (grassBufferHooks) {
         ok &= patchSlot(&cv[14], (void*)&hookMap, (void**)&g_map);
         ok &= patchSlot(&cv[15], (void*)&hookUnmap, (void**)&g_unmap);
+    } else {
+        g_map = (MapFn)cv[14];
+        g_unmap = (UnmapFn)cv[15];
     }
     if (g_options.shadows || g_options.streaming || toneEnabled
         || g_deferredBindingTracing)
@@ -3192,14 +3252,14 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         ok &= patchSlot(&dv[7], (void*)&hookCreateShaderResourceView,
                         (void**)&g_createShaderResourceView);
     else g_createShaderResourceView = (CreateShaderResourceViewFn)dv[7];
-    if (g_options.smaa || toneEnabled)
+    if (g_options.smaa || toneEnabled || contactEnabled)
         ok &= patchSlot(&dv[15], (void*)&hookCreatePixelShader, (void**)&g_createPixelShader);
     else g_createPixelShader = (CreatePixelShaderFn)dv[15];
     if (hdrRuntime.fp16Active)
         ok &= patchSlot(&dv[9], (void*)&hookCreateRenderTargetView,
                         (void**)&g_createRenderTargetView);
     else g_createRenderTargetView = (CreateRenderTargetViewFn)dv[9];
-    if (g_options.smaa || toneEnabled || g_deferredBindingTracing)
+    if (g_options.smaa || toneEnabled || contactEnabled || g_deferredBindingTracing)
         ok &= patchSlot(&cv[9], (void*)&hookPSSetShader, (void**)&g_psSetShader);
     else g_psSetShader = (PSSetShaderFn)cv[9];
     if (g_deferredBindingTracing) {
@@ -3219,7 +3279,7 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
     // visual feature, secondary admission and performance tracing are off.
     if (g_options.smaa || toneEnabled || nativeBloomControl
         || g_deferredBindingTracing || secondaryAdmissionDrawHooks
-        || grassBufferHooks) {
+        || grassBufferHooks || contactEnabled) {
         secondaryAdmissionDrawHooksReady = tq::rendererdraw::install(
             GetModuleHandleW(L"Direct3D11.dll"), &hookDraw, &hookDrawIndexed);
         ok &= secondaryAdmissionDrawHooksReady;
@@ -3284,10 +3344,12 @@ void install(ID3D11Device* device, ID3D11DeviceContext* context,
         startProgramBuild(device);
         tq::hdr::log("Shader program build requested\r\n");
     }
+    if (ok && contactEnabled) tq::contact::install(device, context, g_map, g_unmap);
     if (!ok) {
         g_deferredBindingTracing = false;
         memset(&g_deferredBindings, 0, sizeof(g_deferredBindings));
         tq::bloomhook::shutdown();
+        tq::contact::shutdown();
         g_globalBloomEnabled = false;
         restoreSlots();
         // Optional visual failure must not disable the original skinning fix.
@@ -3323,6 +3385,7 @@ void onPresent(IDXGISwapChain* swapChain) {
     tq::probe::Scope presentTiming(tq::probe::PhasePresent);
     { tq::probe::Scope grassTiming(tq::probe::PhaseGrassPresent);
       tq::grass::onPresent(g_context); }
+    tq::contact::onPresent();
     if (!InterlockedCompareExchange(&g_firstPresentLogged, 1, 0))
         tq::hdr::log("First Present reached: swapChain=%p fp16=%u hdr=%u\r\n",
                      swapChain, tq::hdr::runtime().fp16Active ? 1u : 0u,
@@ -3353,6 +3416,7 @@ void onPostPresent(IDXGISwapChain* swapChain) {
 
 void onBeforeResize(IDXGISwapChain* swapChain) {
     (void)swapChain;
+    tq::contact::invalidateHistory();
     // DXGI requires every reference to a swap-chain buffer to be released
     // before ResizeBuffers. Also restart ordinal target matching because the
     // game recreates its resolution-dependent post-process chain afterward.
@@ -3413,6 +3477,8 @@ static bool releaseVisual(bool recreating) {
     tq::streaming::setResizeCallback(nullptr);
     if (recreating) tq::streaming::releaseSwapChain();
     tq::bloomhook::shutdown();
+    tq::contact::shutdown();
+    g_contactReceiverBound = false;
     g_globalBloomEnabled = false;
     g_bloomToggleKeyDown = false;
     g_bloomEnhancedRuntime = true;

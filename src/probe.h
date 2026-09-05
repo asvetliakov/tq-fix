@@ -64,6 +64,7 @@ enum Phase {
     // -- tools/frames.py must not charge them to the mod's share.
     PhaseDrawSubmit,     // the game's Draw/DrawIndexed, driver call only
     PhaseMapResource,    // the game's Map, driver call only
+    PhaseContactRefresh, // staging polling, validation, parameter upload and copy
     PhaseCount
 };
 
@@ -890,6 +891,17 @@ enum Counter {
     // [debug] stutter_marker=1, an F12 key-down returned by the game's message
     // pump marks the Present interval in which it was retrieved.
     CounterStutterMarker,
+    CounterContactReceiverDraw,
+    CounterContactMarchedDraw,
+    CounterContactReadbackCopy,
+    CounterContactReadbackPoll,
+    CounterContactReadbackReady,
+    CounterContactReadbackBusy,
+    CounterContactRingFull,
+    CounterContactInvalid,
+    CounterContactNeutral,
+    CounterContactHistoryAge,
+    CounterContactActiveDraw,
     CounterCount
 };
 
@@ -945,6 +957,7 @@ enum GpuPhase {
     GpuChunkReflection13,
     GpuChunkReflection14,
     GpuChunkReflection15,
+    GpuContactReceiver, // first receiver draw to last, gaps included
     GpuPhaseCount
 };
 

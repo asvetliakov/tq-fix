@@ -50,6 +50,31 @@ float biasCompensation();
 // cross for the same four texture instructions.
 bool cornerFilterEnabled();
 
+// Screen-space contact shadows: an optional short-range occlusion march the
+// deferred receiver runs after its PCF taps. The shadow map cannot resolve
+// contact detail below one texel -- about 0.03 world units at the shipped
+// defaults -- and raising density costs coverage, which is already the
+// constraint on a wide display. The march only ever darkens: it is combined
+// with the native shadow term by `min`.
+struct ContactSettings {
+    bool enabled;
+    unsigned steps;    // march samples, 4..16
+    float length;      // total march distance, world units
+    float bias;        // depth comparison slack, world units
+    float thickness;   // largest depth gap still treated as an occluder, world units
+    float strength;    // 0..1, how dark a fully occluded pixel becomes
+    // Least upward-facing a surface may be and still receive the march, as the
+    // world Y of its G-buffer normal. Default 0 accepts upward and vertical
+    // surfaces but excludes downward-facing ones; -1 accepts everything. This
+    // does not identify materials or prevent grass casting onto other surfaces.
+    float upright;
+    bool toggle;       // [debug] shadow_contact_toggle: Ctrl+Shift+C compares
+    bool timing;       // [debug] shadow_contact_timing: time the receiver pass
+};
+
+// Read once with the rest of the shadow dials. Enabled unless explicitly off.
+const ContactSettings& contactSettings();
+
 #ifdef TQ_SELFTEST
 void resetShadowMapSizesForTest();
 bool validateSupportedImageForTest(HMODULE engineModule);
