@@ -280,7 +280,10 @@ This works with tracing off and defaults to `1`; `0` restores stock timing.
 It adds no Present work, lock, timer query, allocation, or resource sweep.
 Native dependency work can occur earlier and resources can remain resident
 longer within the existing eviction rules. Already-cold roots, active cooldowns,
-and memory-pressure eviction retain stock behavior. The bound counts root
+and memory-pressure eviction retain stock behavior. Continued native preload
+interest can keep a mesh resident; once those visits stop, this fix stops
+refreshing it and normal aging applies. It does not pin resources or retain
+every previously visited area's meshes. The bound counts root
 visits, not dependency bytes or milliseconds. See the
 [matched gameplay validation](research/streaming/gameplay-loading-hitches.md#first-gameplay-validation-of-resident-refresh).
 

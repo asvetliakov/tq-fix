@@ -552,9 +552,8 @@ FrameRecord* recordAt(unsigned index) {
 }
 
 // ---------------------------------------------------------------------------
-// Writer. Its own sink rather than tq::hdr::log, which is a 64 KiB append-only
-// buffer that drops silently once full and rewrites the whole file on every
-// flush -- fine for a handful of one-shot lines, fatal for per-frame rows.
+// Writer. A separate sink from tq::hdr::log keeps per-frame CSV rows batched
+// on their own cadence, independently of diagnostic text and F12 reports.
 
 // `reserved` bytes are held back from the ring, so the shutdown summary can
 // always be written even when a burst has just overrun the buffer.
